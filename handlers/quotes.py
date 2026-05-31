@@ -172,8 +172,14 @@ async def cmd_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_quotes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """``/quotes [N]`` — show the last N quotes in this chat (default 10)."""
+    """``/quotes [N]`` — show the last N quotes in this chat (default 10).
+
+    Each quote is shown with its <code>#id</code> so admins can use
+    ``/delquote &lt;id&gt;``. For admins, the panel also has inline
+    🗑 buttons for one-tap deletion.
+    """
     chat = update.effective_chat
+    user = update.effective_user
     if chat is None:
         return
     args = list(ctx.args or [])
@@ -185,7 +191,8 @@ async def cmd_quotes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send(
             update,
             "🤷 В этом чате пока нет цитат.\n"
-            "Добавь первую: <code>/quote Pep: Не теряй ритм.</code>",
+            "Добавь первую: <code>/quote Pep: Не теряй ритм.</code>\n"
+            "Полный гайд: <code>/quote_help</code>",
         )
         return
     lines = [f"💬 <b>Последние цитаты</b> ({len(rows)}):"]
@@ -195,20 +202,66 @@ async def cmd_quotes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(
             f"<b>#{r['id']}</b>  «{body}» — <i>{html.escape(a)}</i>"
         )
-    await send(update, "\n".join(lines))
+    lines.append("")
+    is_a = bool(user and is_admin(user.id))
+    if is_a:
+        lines.append(
+            "🗑 Удалить: <code>/delquote &lt;id&gt;</code> "
+            "(или нажми кнопку под цитатой ниже)."
+        )
+    else:
+        lines.append(
+            "🗑 Удалить может только админ — <code>/delquote &lt;id&gt;</code>."
+        )
+    lines.append("📖 Полный гайд: <code>/quote_help</code>")
+
+    kb = None
+    if is_a:
+        kb_rows: list[list[InlineKeyboardButton]] = []
+        for r in rows[:10]:
+            qid = int(r["id"])
+            preview = (r.get("text") or "").strip()
+            if len(preview) > 28:
+                preview = preview[:26] + "…"
+            kb_rows.append([
+                InlineKeyboardButton(
+                    f"🗑 #{qid} — {preview}",
+                    callback_data=f"qs:del:{qid}",
+                ),
+            ])
+        if kb_rows:
+            kb = InlineKeyboardMarkup(kb_rows)
+    await send(update, "\n".join(lines), reply_markup=kb)
 
 
 async def cmd_delete_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """``/delquote <id>`` — delete a quote by id (admin-only)."""
+    """``/delquote <id>`` — delete a quote by id (admin-only).
+
+    Friendly UX — when called without an id, prints exactly how to find
+    one (use ``/quotes``) and reminds that only admins can delete.
+    """
     user = update.effective_user
     if user is None:
         return
     if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
+        await send(
+            update,
+            "❌ Удалять цитаты может только админ.\n"
+            "Если ты админ — добавь свой telegram-id в env "
+            "<code>ADMIN_IDS</code> (либо попроси действующего админа "
+            "выполнить <code>/grant_admin @ты</code>).",
+        )
         return
     args = list(ctx.args or [])
     if not args or not args[0].lstrip("#").isdigit():
-        await send(update, "Использование: <code>/delquote &lt;id&gt;</code>")
+        await send(
+            update,
+            "🗑 <b>Удаление цитаты</b>\n\n"
+            "Формат: <code>/delquote &lt;id&gt;</code>\n\n"
+            "Где взять id:\n"
+            "• <code>/quotes</code> — покажет список с номерами\n"
+            "• Под каждой строкой указан <b>#id</b>",
+        )
         return
     qid = int(args[0].lstrip("#"))
     q = db.get_quote(qid)
@@ -217,6 +270,60 @@ async def cmd_delete_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     db.delete_quote(qid)
     await send(update, f"🗑 Цитата #{qid} удалена.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /quote_help — full guide (one place to learn the whole system).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_QUOTE_GUIDE_HTML = (
+    "💬 <b>Гайд по цитатам</b>\n\n"
+
+    "<b>1. Добавить цитату</b> — любой пользователь:\n"
+    "  • <code>/quote Автор: Текст цитаты</code>\n"
+    "  • Разделители: <code>:</code> <code>—</code> <code>-</code> "
+    "<code>|</code>\n"
+    "  • Можно ответом на сообщение: пишешь <code>/quote</code> в реплай — "
+    "бот возьмёт текст и автора из цитируемого сообщения.\n"
+    "  • Алиасы команды: <code>/addquote</code>, <code>/add_quote</code>, "
+    "<code>/quto</code> (опечатка тоже работает).\n\n"
+
+    "<b>2. Посмотреть цитаты</b>:\n"
+    "  • <code>/quotes</code> — последние 10 цитат этого чата с их id.\n"
+    "  • <code>/quotes 30</code> — последние 30.\n\n"
+
+    "<b>3. Удалить цитату</b> (только админ):\n"
+    "  • <code>/delquote &lt;id&gt;</code>\n"
+    "  • id берётся из <code>/quotes</code> — там у каждой строки в начале "
+    "стоит <code>#&lt;id&gt;</code>.\n"
+    "  • Также под цитатами в <code>/quotes</code> есть инлайн-кнопки "
+    "🗑 для удаления одним тапом.\n\n"
+
+    "<b>4. Авто-рассылка цитат</b>:\n"
+    "  • <code>/quote_settings</code> (или <code>/quotemenu</code>) — "
+    "панель управления для этого чата.\n"
+    "  • Кнопкой выбираешь интервал: 30 мин / 1 ч / 3 ч / 6 ч / 12 ч / "
+    "24 ч / Выкл.\n"
+    "  • Точное значение в минутах: "
+    "<code>/set_quote_interval &lt;минут&gt;</code> (макс 10080 = 1 неделя).\n"
+    "  • <b>Менять интервал может только админ чата или админ бота.</b>\n\n"
+
+    "<b>5. Тихие часы (по умолчанию 23:00–12:00 МСК)</b>:\n"
+    "  • Ночью бот не шлёт цитаты — настройка по умолчанию не пингует "
+    "в 3 ночи.\n"
+    "  • В <code>/quote_settings</code> кнопка «🌙 Тихие часы» — выбор "
+    "пресета или отключение.\n"
+    "  • Если <i>start = end</i>, тихих часов нет (24/7 цитаты).\n\n"
+
+    "<b>6. Что появляется в чате</b>:\n"
+    "<code>💬 «Текст цитаты»\n— Автор</code>\n"
+)
+
+
+async def cmd_quote_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/quote_help`` — полный гайд по системе цитат."""
+    await send(update, _QUOTE_GUIDE_HTML)
 
 
 async def cmd_set_quote_interval(
@@ -240,7 +347,8 @@ async def cmd_set_quote_interval(
             update,
             "Использование: "
             "<code>/set_quote_interval &lt;минут&gt;</code>\n"
-            f"Текущее: <b>{cur_lbl}</b>. 0 = выключить.",
+            f"Текущее: <b>{cur_lbl}</b>. 0 = выключить.\n"
+            "<i>(только админ чата или бота)</i>",
         )
         return
     minutes = int(args[0])
@@ -284,6 +392,7 @@ __all__ = [
     "cmd_delete_quote",
     "cmd_set_quote_interval",
     "cmd_quote_settings",
+    "cmd_quote_help",
     "cb_quote_settings",
 ]
 
@@ -298,13 +407,13 @@ __all__ = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _quote_settings_kb(tid_chat: str | int) -> InlineKeyboardMarkup:
-    """Build the cadence picker keyboard for a chat.
+def _format_hour(h: int) -> str:
+    """Format an hour-of-day (0..23) as ``HH:00``."""
+    return f"{int(h) % 24:02d}:00"
 
-    The chat_id is embedded in the callback so the same buttons work
-    if the menu was opened in another chat (sub-chats / forwarded
-    interactions). Single-row, six options.
-    """
+
+def _quote_settings_kb(tid_chat: str | int) -> InlineKeyboardMarkup:
+    """Build the cadence + quiet-hour picker keyboard for a chat."""
     cid = str(tid_chat)
     rows = [
         [
@@ -320,14 +429,41 @@ def _quote_settings_kb(tid_chat: str | int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("12 ч",  callback_data=f"qs:set:{cid}:720"),
         ],
         [InlineKeyboardButton("24 ч",  callback_data=f"qs:set:{cid}:1440")],
-        [InlineKeyboardButton("✖️ Закрыть", callback_data="qs:close")],
+        # Quiet-hour presets — admin-only, applies a (start, end) pair.
+        # Format: ``qs:quiet:<chat_id>:<start>:<end>``.
+        [
+            InlineKeyboardButton(
+                "🌙 Тихие 23–12 (МСК)",
+                callback_data=f"qs:quiet:{cid}:23:12",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🌙 22–10",
+                callback_data=f"qs:quiet:{cid}:22:10",
+            ),
+            InlineKeyboardButton(
+                "🌙 00–09",
+                callback_data=f"qs:quiet:{cid}:0:9",
+            ),
+            InlineKeyboardButton(
+                "☀️ Без тихих",
+                callback_data=f"qs:quiet:{cid}:0:0",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📖 Гайд", callback_data=f"qs:guide:{cid}",
+            ),
+            InlineKeyboardButton("✖️ Закрыть", callback_data="qs:close"),
+        ],
     ]
     return InlineKeyboardMarkup(rows)
 
 
 def _quote_settings_text(chat_id: str | int) -> str:
-    """Render the settings panel body — current cadence, quote count
-    and a one-line hint for /quote / /quotes."""
+    """Render the settings panel body — current cadence, quote count,
+    quiet-hour window and a one-line hint."""
     settings = db.get_chat_settings(chat_id)
     cur_min = int(settings.get("quote_interval_minutes") or 0)
     cur_lbl = "выкл" if cur_min <= 0 else f"каждые {cur_min} мин"
@@ -335,19 +471,33 @@ def _quote_settings_text(chat_id: str | int) -> str:
         total = len(db.list_quotes(chat_id=str(chat_id), limit=1000))
     except Exception:
         total = 0
+    qs = int(settings.get("quiet_start_hour") or 23)
+    qe = int(settings.get("quiet_end_hour") or 12)
+    if qs == qe:
+        quiet_lbl = "выкл (24/7)"
+    else:
+        quiet_lbl = (
+            f"{_format_hour(qs)} → {_format_hour(qe)} "
+            f"(в это время цитаты не отправляются)"
+        )
     last_raw = settings.get("last_quote_at")
     last_str = ""
     if last_raw:
-        last_str = f"\n   Последняя цитата отправлена: <code>{html.escape(str(last_raw))}</code> UTC"
+        last_str = (
+            f"\n   Последняя цитата отправлена: "
+            f"<code>{html.escape(str(last_raw))}</code> UTC"
+        )
     return (
         "💬 <b>Настройки цитат</b>\n\n"
-        f"Текущая частота: <b>{cur_lbl}</b>\n"
-        f"Цитат в чате: <b>{total}</b>{last_str}\n\n"
-        "Жми кнопку ниже, чтобы выставить частоту. Точное значение "
-        "(в минутах) можно задать командой "
-        "<code>/set_quote_interval &lt;минут&gt;</code>.\n\n"
-        "📥 Добавить цитату: <code>/quote &lt;автор&gt;: &lt;текст&gt;</code>\n"
-        "📜 Список цитат: <code>/quotes</code>"
+        f"⏱ Частота: <b>{cur_lbl}</b>\n"
+        f"🌙 Тихие часы: <b>{quiet_lbl}</b>\n"
+        f"📜 Цитат в чате: <b>{total}</b>{last_str}\n\n"
+        "Жми кнопки ниже, чтобы поменять.\n"
+        "<i>Менять может только админ чата или админ бота.</i>\n\n"
+        "📥 Добавить: <code>/quote Автор: текст</code>\n"
+        "📋 Список: <code>/quotes</code>\n"
+        "🗑 Удалить (только админ): <code>/delquote &lt;id&gt;</code>\n"
+        "📖 Гайд: <code>/quote_help</code>"
     )
 
 
@@ -355,8 +505,10 @@ async def _user_can_change_quotes(
     update: Update, ctx: ContextTypes.DEFAULT_TYPE,
 ) -> bool:
     """Allow bot admins always; in groups, also allow Telegram chat
-    administrators. DM with the bot — only the user themselves (and bot
-    admins). Best-effort: API failures default to allowing the change.
+    administrators. DM with the bot — only the user themselves (and
+    bot admins). Best-effort: API failures default to **denying** the
+    change so we don't accidentally give random users in big groups
+    the power to mess with cadence.
     """
     user = update.effective_user
     chat = update.effective_chat
@@ -369,7 +521,7 @@ async def _user_can_change_quotes(
             member = await ctx.bot.get_chat_member(chat.id, user.id)
             return member.status in ("creator", "administrator")
         except Exception:
-            return True  # best-effort fallback
+            return False  # safer default: deny on API error
     return True  # private chats: only one user can ever interact
 
 
@@ -386,58 +538,127 @@ async def cmd_quote_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cb_quote_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Inline callback handler for the ``qs:*`` namespace.
 
-    * ``qs:set:<chat_id>:<minutes>`` — apply a new cadence and refresh panel.
-    * ``qs:close`` — drop the panel.
+    * ``qs:set:<chat_id>:<minutes>``         — apply a new cadence.
+    * ``qs:quiet:<chat_id>:<start>:<end>``   — apply quiet-hour window.
+    * ``qs:guide:<chat_id>``                 — show /quote_help inline.
+    * ``qs:del:<quote_id>``                  — admin one-tap delete.
+    * ``qs:close``                           — drop the panel.
     """
     query = update.callback_query
     if not query or not query.data:
         return
     await query.answer()
     data = query.data
-    if data == "qs:close":
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+
+    if action == "close":
         try:
             await query.edit_message_text("💬 Закрыто.")
         except TelegramError:
             pass
         return
-    if not data.startswith("qs:set:"):
-        return
-    parts = data.split(":")
-    if len(parts) < 4:
-        return
-    chat_id_raw = parts[2]
-    try:
-        minutes = max(0, min(10080, int(parts[3])))
-    except ValueError:
-        return
 
-    if not await _user_can_change_quotes(update, ctx):
+    if action == "guide":
         try:
-            await query.message.reply_text(
-                "❌ Менять настройки цитат может только админ чата "
-                "или админ бота.",
+            await query.edit_message_text(
+                _QUOTE_GUIDE_HTML,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "⬅️ Назад",
+                        callback_data=(
+                            f"qs:back:{parts[2]}" if len(parts) > 2 else "qs:close"
+                        ),
+                    ),
+                ]]),
             )
         except TelegramError:
             pass
         return
 
-    try:
-        db.set_chat_quote_interval(chat_id_raw, minutes)
-    except Exception:
-        log.exception("qs:set: persist failed for chat=%s", chat_id_raw)
+    if action == "back" and len(parts) > 2:
+        chat_id_back = parts[2]
         try:
-            await query.message.reply_text(
-                "❌ Не удалось сохранить настройку. Попробуй ещё раз.",
+            await query.edit_message_text(
+                _quote_settings_text(chat_id_back),
+                parse_mode="HTML",
+                reply_markup=_quote_settings_kb(chat_id_back),
             )
         except TelegramError:
             pass
         return
 
-    body = _quote_settings_text(chat_id_raw)
-    kb = _quote_settings_kb(chat_id_raw)
-    try:
-        await query.edit_message_text(body, parse_mode="HTML", reply_markup=kb)
-    except TelegramError:
-        # "Message is not modified" if the user tapped the same value
-        # twice; ignore.
-        pass
+    # ── One-tap delete from /quotes admin keyboard ────────────────────
+    if action == "del":
+        if len(parts) < 3:
+            return
+        try:
+            qid = int(parts[2])
+        except ValueError:
+            return
+        user = update.effective_user
+        if user is None or not is_admin(user.id):
+            try:
+                await query.message.reply_text(
+                    "❌ Удалять цитаты может только админ.",
+                )
+            except TelegramError:
+                pass
+            return
+        try:
+            ok = db.delete_quote(qid)
+        except Exception:
+            log.exception("qs:del: persist failed for #%s", qid)
+            ok = False
+        try:
+            await query.message.reply_text(
+                f"🗑 Цитата #{qid} удалена."
+                if ok else f"❌ Цитата #{qid} не найдена.",
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
+        return
+
+    # ── Cadence + quiet-hour mutators (admin-only) ────────────────────
+    if action in ("set", "quiet"):
+        if not await _user_can_change_quotes(update, ctx):
+            try:
+                await query.message.reply_text(
+                    "❌ Менять настройки цитат может только админ чата "
+                    "или админ бота.",
+                )
+            except TelegramError:
+                pass
+            return
+        if len(parts) < 3:
+            return
+        chat_id_raw = parts[2]
+        try:
+            if action == "set":
+                minutes = max(0, min(10080, int(parts[3])))
+                db.set_chat_quote_interval(chat_id_raw, minutes)
+            else:  # quiet
+                start_h = int(parts[3])
+                end_h = int(parts[4])
+                db.set_chat_quote_quiet_hours(chat_id_raw, start_h, end_h)
+        except Exception:
+            log.exception("qs:%s: persist failed for chat=%s", action, chat_id_raw)
+            try:
+                await query.message.reply_text(
+                    "❌ Не удалось сохранить. Попробуй ещё раз.",
+                )
+            except TelegramError:
+                pass
+            return
+        # Refresh the panel.
+        try:
+            await query.edit_message_text(
+                _quote_settings_text(chat_id_raw),
+                parse_mode="HTML",
+                reply_markup=_quote_settings_kb(chat_id_raw),
+            )
+        except TelegramError:
+            pass
+        return

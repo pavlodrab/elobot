@@ -6932,16 +6932,30 @@ async def job_quotes(ctx: ContextTypes.DEFAULT_TYPE):
     per bot) so multiple chats can have completely different
     cadences without interfering.
 
+    Quiet hours (``quiet_start_hour`` .. ``quiet_end_hour`` in the
+    operator's display TZ — МСК by default) suppress posting at
+    night. Defaults are 23..12 — quotes only fire between noon and
+    11 PM МСК. Admins can override per chat via
+    ``set_chat_quote_quiet_hours`` (settings panel button).
+
     Silently skips chats that have no quotes yet (admin enabled the
     cadence but nobody has used ``/quote`` yet) — no spam, no error.
     """
     from datetime import datetime as _dt
+    from handlers.common import _display_tz  # local: avoid cycle at import
     try:
         chats = db.list_chats_with_quote_interval()
     except Exception:
         log.exception("job_quotes: list chats failed")
         return
     now = _dt.utcnow()
+    # Local-time hour for quiet-hour gating. _display_tz() respects
+    # the operator's BOT_DISPLAY_TZ env (МСК by default).
+    try:
+        tz = _display_tz()
+        local_hour = _dt.now(tz).hour
+    except Exception:
+        local_hour = now.hour  # fall back to UTC if TZ resolution fails
     for c in chats:
         chat_id = c.get("chat_id")
         try:
@@ -6950,6 +6964,23 @@ async def job_quotes(ctx: ContextTypes.DEFAULT_TYPE):
             interval_min = 0
         if interval_min <= 0 or not chat_id:
             continue
+
+        # Quiet-hour gate. start == end disables the window (24/7
+        # quotes). Wrap-around windows (e.g. 23..12) are handled via
+        # the OR variant — "in window if hour >= start OR hour < end".
+        try:
+            qs = int(c.get("quiet_start_hour") if c.get("quiet_start_hour") is not None else 23)
+            qe = int(c.get("quiet_end_hour") if c.get("quiet_end_hour") is not None else 12)
+        except (TypeError, ValueError):
+            qs, qe = 23, 12
+        if qs != qe:
+            in_quiet = (
+                (qs < qe and qs <= local_hour < qe)
+                or (qs > qe and (local_hour >= qs or local_hour < qe))
+            )
+            if in_quiet:
+                continue
+
         last_raw = c.get("last_quote_at")
         last = None
         if last_raw:
@@ -7042,7 +7073,7 @@ def main():
     # ── Quotes (per-chat user-submitted quotations + scheduled rotation) ──
     from handlers.quotes import (
         cmd_quote, cmd_quotes, cmd_delete_quote, cmd_set_quote_interval,
-        cmd_quote_settings,
+        cmd_quote_settings, cmd_quote_help,
     )
     app.add_handler(CommandHandler("quote", cmd_quote))
     app.add_handler(CommandHandler("addquote", cmd_quote))
@@ -7065,6 +7096,11 @@ def main():
     app.add_handler(CommandHandler("quote_menu", cmd_quote_settings))
     app.add_handler(CommandHandler("quotemenu", cmd_quote_settings))
     app.add_handler(CommandHandler("citaty", cmd_quote_settings))
+    # Full guide.
+    app.add_handler(CommandHandler("quote_help", cmd_quote_help))
+    app.add_handler(CommandHandler("quotehelp", cmd_quote_help))
+    app.add_handler(CommandHandler("quote_guide", cmd_quote_help))
+    app.add_handler(CommandHandler("quoteguide", cmd_quote_help))
     # NB: Telegram only allows ASCII / digits / underscore in command
     # names, so the Russian-only aliases (/цитаты, /баг) had to go —
     # ``CommandHandler('цитаты', ...)`` raises at startup. Users
