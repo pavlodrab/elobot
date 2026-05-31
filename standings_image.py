@@ -339,6 +339,11 @@ def _render(t: dict, standings: dict, qualify_n: int) -> bytes:
     head_font   = _font(_s(20), bold=True)
     row_font    = _font(_s(22), bold=False)
     row_font_b  = _font(_s(22), bold=True)
+    # Slightly smaller font for the player-name column so long
+    # "<nick> - <Country> 🇨🇨 (@user)" labels fit without aggressive
+    # ellipsing. Numeric columns keep the larger row_font so scores
+    # stay easy to scan.
+    name_font   = _font(_s(19), bold=False)
 
     col_total = sum(w for _, w, _ in COLS)
     width = PAD * 2 + col_total
@@ -464,6 +469,7 @@ def _render(t: dict, standings: dict, qualify_n: int) -> bytes:
                     color = POS_COLORS[pos]
                     font_use = row_font_b
                 if label == "Игрок":
+                    font_use = name_font
                     val = _truncate(val, font_use, w - 24, draw)
                 # Player-name cells get color emoji rendering (flags,
                 # 🐐 etc.); the rest of the columns are pure ASCII so
