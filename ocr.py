@@ -59,11 +59,18 @@ _GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# OpenRouter (fallback) — 3 keys rotated on 429
+# OpenRouter (fallback) — keys rotated on 429.
+# Primary key: env OPENROUTER_API_KEY (with hardcoded fallback below).
+# Slots 2 and 3 also have hardcoded fallbacks for backward compat.
+# Additional keys (4+): set env vars OPENROUTER_API_KEY_4, _5, ..., up to
+# _MAX_OPENROUTER_KEYS — no code changes required to plug in more keys.
 _OPENROUTER_DEFAULT_KEY = "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"
 _OPENROUTER_API_KEY_2 = os.getenv("OPENROUTER_API_KEY_2", "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").strip()
 _OPENROUTER_API_KEY_3 = os.getenv("OPENROUTER_API_KEY_3", "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").strip()
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Upper bound for how many additional env-var-only keys we scan for.
+# Bump this if you ever need more than 20 keys (very unlikely).
+_MAX_OPENROUTER_KEYS = 20
 
 # Groq (fast inference, free tier — llama-4-scout has vision)
 _GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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").strip()
@@ -105,6 +112,9 @@ AI_DEFAULT_MODEL = os.getenv(
 # nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free — re-added as last
 #   fallback (May 2026). Sometimes emits prose, but _ai_extract_json_block
 #   can usually salvage the JSON from the reasoning trace.
+# moonshotai/kimi-k2.6:free — added May 2026, large 1T MoE with vision,
+#   262K context. Useful as a fresh fallback when NVIDIA/Gemma chains
+#   are saturated.
 # Removed (404 / discontinued):
 #   baidu/qianfan-ocr-fast:free (May 2026).
 # Note: non-VL models (text-only) are NOT suitable for screenshot OCR —
@@ -114,12 +124,14 @@ AI_FALLBACK_MODELS = (
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "moonshotai/kimi-k2.6:free",
 )
 AI_COMPARE_MODELS = (
     "nvidia/nemotron-nano-12b-v2-vl:free",
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "moonshotai/kimi-k2.6:free",
 )
 
 _AI_PROMPT = """You are reading a football game end-screen.
@@ -228,16 +240,39 @@ def _ai_key() -> str:
 
 
 def _openrouter_keys() -> list[str]:
-    """Return all available OpenRouter keys in rotation order."""
+    """Return all available OpenRouter keys in rotation order.
+
+    Picks up keys from (in order):
+      1. ``OPENROUTER_API_KEY`` (env)  — falls back to the hardcoded primary.
+      2. ``OPENROUTER_API_KEY_2``      — falls back to a hardcoded secondary.
+      3. ``OPENROUTER_API_KEY_3``      — falls back to a hardcoded tertiary.
+      4. ``OPENROUTER_API_KEY_4`` … ``OPENROUTER_API_KEY_{_MAX_OPENROUTER_KEYS}``
+         — env-only, no hardcoded fallback. Set as many as you need
+         without changing code; absent vars are skipped.
+
+    Duplicates are deduplicated (e.g. accidentally setting the same
+    key twice doesn't waste a 429 retry slot).
+    """
     keys: list[str] = []
-    k1 = _ai_key()
-    if k1:
-        keys.append(k1)
-    if _OPENROUTER_API_KEY_2:
-        keys.append(_OPENROUTER_API_KEY_2)
-    if _OPENROUTER_API_KEY_3:
-        keys.append(_OPENROUTER_API_KEY_3)
-    return keys or [k1]
+    seen: set[str] = set()
+
+    def _add(raw: str | None) -> None:
+        if not raw:
+            return
+        s = raw.strip()
+        if s and s not in seen:
+            seen.add(s)
+            keys.append(s)
+
+    # Primary + legacy hardcoded slots 2 and 3.
+    _add(_ai_key())
+    _add(_OPENROUTER_API_KEY_2)
+    _add(_OPENROUTER_API_KEY_3)
+    # Additional env-only keys (no code change required to plug in more).
+    for n in range(4, _MAX_OPENROUTER_KEYS + 1):
+        _add(os.getenv(f"OPENROUTER_API_KEY_{n}", ""))
+
+    return keys or [_ai_key()]
 
 
 def ai_is_available() -> bool:
