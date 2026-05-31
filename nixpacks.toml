@@ -1,0 +1,11 @@
+# Railway / Nixpacks build configuration.
+# Tesseract + Russian/English language packs are required for OCR (see ocr.py).
+# fonts-dejavu-core ships DejaVuSans.ttf with full Cyrillic coverage,
+# used by standings_image.py to render the /table standings as a PNG.
+[phases.setup]
+aptPkgs = [
+    "tesseract-ocr",
+    "tesseract-ocr-rus",
+    "tesseract-ocr-eng",
+    "fonts-dejavu-core",
+]
