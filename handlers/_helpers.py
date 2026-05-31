@@ -81,10 +81,19 @@ def _resolve_player_arg(arg: str) -> Optional[dict]:
     When the argument starts with ``@``, username lookup is prioritised
     over telegram_id lookup so that players whose username happens to be
     all-digits (e.g. ``@8530008617``) are resolved correctly.
+
+    The argument is normalised before lookup: leading/trailing
+    quote-like characters (``«»""''‹›``) are stripped so OCR-fed
+    nicknames like ``«9thproblem»`` resolve cleanly to the underlying
+    ``9thproblem`` player row.
     """
     if not arg:
         return None
     raw = arg.strip()
+    # Strip Russian and Western quote variants — admins sometimes paste
+    # nicknames wrapped in «» from chat output, OCR sometimes returns
+    # them, and the leading/trailing quote breaks every lookup below.
+    raw = raw.strip("«»\u201c\u201d\u2018\u2019\u2039\u203a\"'`")
     had_at = raw.startswith("@")
     s = raw.lstrip("@").lower()
     if not s:

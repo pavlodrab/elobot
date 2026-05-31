@@ -453,6 +453,29 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🔥 <b>Серия побед</b>: {p['win_streak']}  (рекорд: {p['best_streak']})\n"
     )
 
+    # Append a Titles block when the player has any awarded titles.
+    # Titles are admin-managed via /award and shown here as a single
+    # inline list ("🏅 Титулы: 🐐 GOAT • Чемпион №76"). Duplicates
+    # (same exact text re-awarded) are de-duplicated for display.
+    try:
+        title_strs = db.player_title_strings(p["id"])
+    except Exception:
+        title_strs = []
+    if title_strs:
+        seen_t: set[str] = set()
+        uniq_t: list[str] = []
+        for t in title_strs:
+            key = (t or "").strip().lower()
+            if key in seen_t:
+                continue
+            seen_t.add(key)
+            uniq_t.append(t)
+        text += (
+            "\n🏅 <b>Титулы</b>: "
+            + " • ".join(html.escape(t) for t in uniq_t)
+            + "\n"
+        )
+
     # Profile-only: an inline shortcut to the player's open matches.
     # Falls back to plain text on any markup error.
     kb = InlineKeyboardMarkup([[
