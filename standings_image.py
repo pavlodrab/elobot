@@ -160,23 +160,42 @@ def _draw_text_in_cell(
     text: str,
     x: int, y: int, w: int, h: int,
     font: ImageFont.ImageFont,
-    color: tuple[int, int, int],
+    color: tuple,
+    *,
     align: str = "left",
     pad: int | None = None,
+    base_img: "Image.Image | None" = None,
 ) -> None:
+    """Render text inside a cell with horizontal alignment + padding.
+
+    When ``base_img`` is provided AND the text contains color emoji,
+    the text is drawn through ``emoji_helper.draw_text_with_emoji`` so
+    flags / pictographs render in colour. Otherwise falls back to
+    ``draw.text`` for compatibility with sites that haven't been
+    updated yet.
+    """
     if pad is None:
         pad = _s(12)
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
+    # Always measure with the emoji-aware helper so cells containing
+    # 🐐 / 🇩🇪 don't overflow because a regular-font measurement
+    # under-counted the wider glyph.
+    from emoji_helper import draw_text_with_emoji, measure_text_with_emoji
+    tw = measure_text_with_emoji(text, font)
+    bbox = draw.textbbox((0, 0), "Hg", font=font)  # cap-height reference
     th = bbox[3] - bbox[1]
-    if align == "left":
-        tx = x + pad
-    elif align == "right":
+    if align == "right":
         tx = x + w - pad - tw
-    else:  # center
+    elif align == "center":
         tx = x + (w - tw) // 2
+    else:
+        tx = x + pad
     ty = y + (h - th) // 2 - bbox[1]
-    draw.text((tx, ty), text, font=font, fill=color)
+    if base_img is not None and any(
+        ord(ch) > 0x2000 for ch in text  # cheap prefilter
+    ):
+        draw_text_with_emoji(base_img, (tx, ty), text, font, fill=color)
+    else:
+        draw.text((tx, ty), text, font=font, fill=color)
 
 
 def _truncate(
@@ -185,18 +204,13 @@ def _truncate(
     max_w: int,
     draw: ImageDraw.ImageDraw,
 ) -> str:
-    """Trim ``text`` with an ellipsis so it fits within ``max_w`` pixels."""
-    if draw.textlength(text, font=font) <= max_w:
-        return text
-    ell = "…"
-    lo, hi = 0, len(text)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if draw.textlength(text[:mid] + ell, font=font) <= max_w:
-            lo = mid
-        else:
-            hi = mid - 1
-    return text[:lo] + ell
+    """Trim ``text`` with an ellipsis so it fits within ``max_w`` pixels.
+
+    Emoji-aware: uses :func:`emoji_helper.measure_text_with_emoji` so a
+    "🐐 GOAT - phoenileo (@p)" string isn't sliced through a flag glyph.
+    """
+    from emoji_helper import truncate_text_with_emoji
+    return truncate_text_with_emoji(text, font, max_w)
 
 
 def _display_name(p: dict) -> str:
@@ -451,9 +465,13 @@ def _render(t: dict, standings: dict, qualify_n: int) -> bytes:
                     font_use = row_font_b
                 if label == "Игрок":
                     val = _truncate(val, font_use, w - 24, draw)
+                # Player-name cells get color emoji rendering (flags,
+                # 🐐 etc.); the rest of the columns are pure ASCII so
+                # we can skip the emoji branch and save a few cycles.
                 _draw_text_in_cell(
                     draw, val, cx, y, w, ROW_H,
                     font_use, color, align=align,
+                    base_img=img if label == "Игрок" else None,
                 )
                 cx += w
             y += ROW_H

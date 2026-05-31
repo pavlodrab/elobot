@@ -263,9 +263,11 @@ from handlers.leaderboard import (  # noqa: E402
     _build_official_local_view,
     _resolve_leaderboard_tournament,
     _send_feedback_to_admins,
+    _send_bug_to_admins,
     _send_top_by_field,
     cmd_cancel,
     cmd_feedback,
+    cmd_bug,
     cmd_leaderboard,
     cmd_table_bomb,
     cmd_top,
@@ -364,6 +366,7 @@ from handlers.match import (  # noqa: E402
     _list_pending_matches_for,
     _maybe_auto_advance,
     _send_match_to_admins,
+    _send_failed_screenshot_to_admins,
     cmd_admin_report,
     cmd_admin_photo,
     cmd_reocr,
@@ -2388,6 +2391,30 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await send(update, "⚠️ Не удалось доставить ни одному админу.")
         return
 
+    # Bug-report mode (sister flow to awaiting_feedback) — same plumbing,
+    # different header so admins can triage by 🐞.
+    if ctx.user_data.get("awaiting_bug"):
+        ctx.user_data.pop("awaiting_bug", None)
+        photos = msg.photo
+        photo_file_id = photos[-1].file_id if photos else None
+        text = msg.caption or ""
+        if not ADMIN_IDS:
+            await send(update, "❌ Админы не настроены — некому отправить отчёт.")
+            return
+        from handlers.leaderboard import _send_bug_to_admins
+        delivered = await _send_bug_to_admins(
+            ctx, user, text, photo_file_id=photo_file_id,
+        )
+        if delivered:
+            await send(
+                update,
+                f"✅ Багрепорт отправлен ({delivered}/{len(ADMIN_IDS)} "
+                f"админ(ам)). Спасибо!",
+            )
+        else:
+            await send(update, "⚠️ Не удалось доставить ни одному админу.")
+        return
+
     photos = msg.photo
     if not photos:
         return
@@ -3231,6 +3258,27 @@ async def _process_match_photo(
             saw_side1 = html.escape(side1 or "?")
             saw_side2 = html.escape(side2 or "?")
             my_nick_safe = html.escape(my_nick)
+            # Hand off to admins so they see the actual screenshot and
+            # can decide whether to /admin_report it manually. This is
+            # the path that fired for the "Loading…" / "tw..hLUCS" case.
+            try:
+                await _send_failed_screenshot_to_admins(
+                    ctx,
+                    file_id=file_id,
+                    score1=res.score1,
+                    score2=res.score2,
+                    p1_username=None,
+                    p2_username=None,
+                    tournament=target_tournament,
+                    reporter_user=update.effective_user,
+                    reason="не твой матч (никнейм репортёра не совпал)",
+                    extra_note=(
+                        f"Ник репортёра: «{my_nick}», "
+                        f"OCR ники на скрине: «{side1 or '?'}» / «{side2 or '?'}»"
+                    ),
+                )
+            except Exception:
+                log.exception("not-my-match handoff")
             if is_album and album_state_early is not None:
                 matches_a = album_state_early.setdefault("matches", [])
                 matches_a.append({
@@ -3288,6 +3336,26 @@ async def _process_match_photo(
                 t_arg_hint = (
                     f" {target_tournament['id']}" if target_tournament else ""
                 )
+                # Hand off to admins: the screenshot itself + the parsed
+                # nicknames so they can manually create the match with
+                # /admin_report. Best-effort — don't block the panel.
+                try:
+                    await _send_failed_screenshot_to_admins(
+                        ctx,
+                        file_id=file_id,
+                        score1=res.score1,
+                        score2=res.score2,
+                        p1_username=None,
+                        p2_username=None,
+                        tournament=target_tournament,
+                        reporter_user=update.effective_user,
+                        reason="админ-репорт: не нашёл игроков по OCR",
+                        extra_note=(
+                            f"OCR-ники: «{side1 or '?'}» / «{side2 or '?'}»"
+                        ),
+                    )
+                except Exception:
+                    log.exception("admin-proxy fail handoff")
                 if is_album and album_state_early is not None:
                     matches_a = album_state_early.setdefault("matches", [])
                     matches_a.append({
@@ -3375,6 +3443,24 @@ async def _process_match_photo(
                         ctx.user_data.pop("_last_report_error", None)
                         or "не удалось записать"
                     )
+                    # Forward the screenshot to admins with the actual
+                    # reason — they can manually /admin_report or fix
+                    # whatever guard tripped (e.g. add the player to the
+                    # tournament). Best-effort: don't block the panel.
+                    try:
+                        await _send_failed_screenshot_to_admins(
+                            ctx,
+                            file_id=file_id,
+                            score1=res.score1,
+                            score2=res.score2,
+                            p1_username=p1.get("username"),
+                            p2_username=p2.get("username"),
+                            tournament=target_tournament,
+                            reporter_user=update.effective_user,
+                            reason=bail_reason,
+                        )
+                    except Exception:
+                        log.exception("admin-proxy bail handoff")
                     # ``short_apx`` carries literal HTML (``<b>...</b>``)
                     # for the score, but the album panel runs the whole
                     # error_text through ``html.escape``, which turns
@@ -3691,6 +3777,26 @@ async def _process_match_photo(
                         ctx.user_data.pop("_last_report_error", None)
                         or "не удалось записать"
                     )
+                    # Hand off to admins so they can still salvage the
+                    # match manually (e.g. cross-group / pair-cap tripped).
+                    try:
+                        await _send_failed_screenshot_to_admins(
+                            ctx,
+                            file_id=file_id,
+                            score1=res.score1,
+                            score2=res.score2,
+                            p1_username=(
+                                reporter.get("username") if reporter else None
+                            ),
+                            p2_username=(
+                                opponent.get("username") if opponent else None
+                            ),
+                            tournament=target_tournament,
+                            reporter_user=update.effective_user,
+                            reason=bail_reason_2,
+                        )
+                    except Exception:
+                        log.exception("self-report bail handoff")
                     matches.append({
                         "status": "error",
                         "error_text": f"{short_summary} — {bail_reason_2}",
@@ -6202,6 +6308,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if txt in MENU_LABELS:
         _wizard_clear(ctx)
         ctx.user_data.pop("awaiting_feedback", None)
+        ctx.user_data.pop("awaiting_bug", None)
         ctx.user_data.pop("awaiting_fb_reply_to", None)
         handler = MENU_DISPATCH.get(txt)
         if handler:
@@ -6217,6 +6324,24 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         delivered = await _send_feedback_to_admins(ctx, update.effective_user, txt)
         if delivered:
             await send(update, f"✅ Спасибо! Доставлено {delivered}/{len(ADMIN_IDS)} админ(ам).")
+        else:
+            await send(update, "⚠️ Не удалось доставить ни одному админу.")
+        return
+
+    # Bug-report waiting mode → forward to admins with 🐞 header.
+    if ctx.user_data.get("awaiting_bug"):
+        ctx.user_data.pop("awaiting_bug", None)
+        if not ADMIN_IDS:
+            await send(update, "❌ Админы не настроены.")
+            return
+        from handlers.leaderboard import _send_bug_to_admins
+        delivered = await _send_bug_to_admins(ctx, update.effective_user, txt)
+        if delivered:
+            await send(
+                update,
+                f"✅ Багрепорт отправлен ({delivered}/{len(ADMIN_IDS)} "
+                f"админ(ам)). Спасибо!",
+            )
         else:
             await send(update, "⚠️ Не удалось доставить ни одному админу.")
         return
@@ -7310,6 +7435,12 @@ def main():
     app.add_handler(CommandHandler("advance", cmd_advance_playoff))
     app.add_handler(CommandHandler("advance_playoff", cmd_advance_playoff))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
+    # /bug — sister command for bug reports (separate "awaiting" slot,
+    # admins see "🐞 BUG REPORT" header for easy triage).
+    app.add_handler(CommandHandler("bug", cmd_bug))
+    app.add_handler(CommandHandler("bugreport", cmd_bug))
+    app.add_handler(CommandHandler("bug_report", cmd_bug))
+    app.add_handler(CommandHandler("баг", cmd_bug))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
 
     # Photo handler — auto OCR match screenshot (also handles photo feedback)

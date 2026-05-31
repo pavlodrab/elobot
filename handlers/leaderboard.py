@@ -764,9 +764,111 @@ async def cmd_feedback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send(update, "⚠️ Не удалось доставить ни одному админу.")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# /bug — bug-only reporter (separate flow from /feedback so admins can
+# triage by header, but the underlying delivery is the same).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _send_bug_to_admins(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    user,
+    text: str | None,
+    photo_file_id: str | None = None,
+):
+    """Send a bug report to every admin DM. Returns count delivered.
+
+    Wire-compatible with ``_send_feedback_to_admins`` (same callback
+    flow for the 'Ответить' button) but stamps the message with a
+    🐞 ``BUG`` header so admins can spot bug reports immediately in
+    their feed.
+    """
+    if not ADMIN_IDS:
+        return 0
+
+    user_tag = f"@{user.username}" if user.username else f"id {user.id}"
+    name = user.full_name or "—"
+    header = (
+        f"🐞 <b>BUG REPORT</b>\n"
+        f"От: {user_tag} (<i>{html.escape(name)}</i>, tg_id={user.id})\n"
+        f"{'─'*30}\n"
+    )
+    body = (text or "").strip() or "<i>(без описания)</i>"
+    payload = header + body
+
+    reply_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "💬 Ответить",
+            callback_data=f"fb_reply:{user.id}",
+        ),
+    ]])
+
+    delivered = 0
+    for admin_id in ADMIN_IDS:
+        try:
+            if photo_file_id:
+                await ctx.bot.send_photo(
+                    admin_id,
+                    photo=photo_file_id,
+                    caption=payload[:1000],
+                    parse_mode="HTML",
+                    reply_markup=reply_kb,
+                )
+            else:
+                await ctx.bot.send_message(
+                    admin_id, payload,
+                    parse_mode="HTML",
+                    reply_markup=reply_kb,
+                )
+            delivered += 1
+        except Exception as e:
+            log.warning("bug-report delivery to admin %s failed: %s", admin_id, e)
+    return delivered
+
+
+async def cmd_bug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/bug [текст]`` — отправить багрепорт админам.
+
+    Без аргументов — переходит в режим ``awaiting_bug``, и следующее
+    сообщение (текст или фото) уходит админам с заголовком
+    «🐞 BUG REPORT». Это отдельный слот от ``awaiting_feedback`` так
+    что параллельные сессии fb / bug не мешают друг другу.
+    """
+    user = update.effective_user
+    if user is None:
+        return
+
+    text = " ".join(ctx.args).strip()
+    if not text:
+        ctx.user_data["awaiting_bug"] = True
+        await send(
+            update,
+            "🐞 Опиши баг одним сообщением (можно прикрепить скриншот).\n"
+            "Что было — что ожидал — что получилось.\n"
+            "Отменить: /cancel.",
+        )
+        return
+
+    if not ADMIN_IDS:
+        await send(update, "❌ Админы не настроены — некому отправить отчёт.")
+        return
+
+    delivered = await _send_bug_to_admins(ctx, user, text)
+    if delivered:
+        await send(
+            update,
+            f"✅ Багрепорт отправлен ({delivered}/{len(ADMIN_IDS)} админ(ам)). "
+            f"Спасибо!",
+        )
+    else:
+        await send(update, "⚠️ Не удалось доставить ни одному админу.")
+
+
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cancelled = False
     if ctx.user_data.pop("awaiting_feedback", False):
+        cancelled = True
+    if ctx.user_data.pop("awaiting_bug", False):
         cancelled = True
     if ctx.user_data.pop("awaiting_fb_reply_to", None) is not None:
         cancelled = True
@@ -781,6 +883,7 @@ __all__ = [
     "_resolve_leaderboard_tournament",
     "_build_official_local_view",
     "_send_feedback_to_admins",
+    "_send_bug_to_admins",
     "cmd_top",
     "cmd_top_vsa",
     "cmd_top_ri",
@@ -788,5 +891,6 @@ __all__ = [
     "cmd_top_scorers",
     "cmd_table_bomb",
     "cmd_feedback",
+    "cmd_bug",
     "cmd_cancel",
 ]
