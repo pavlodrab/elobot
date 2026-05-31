@@ -343,7 +343,7 @@ def _render(t: dict, standings: dict, qualify_n: int) -> bytes:
     # "<nick> - <Country> 🇨🇨 (@user)" labels fit without aggressive
     # ellipsing. Numeric columns keep the larger row_font so scores
     # stay easy to scan.
-    name_font   = _font(_s(19), bold=False)
+    name_font   = _font(_s(17), bold=False)
 
     col_total = sum(w for _, w, _ in COLS)
     width = PAD * 2 + col_total
