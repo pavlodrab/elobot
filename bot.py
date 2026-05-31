@@ -7065,7 +7065,11 @@ def main():
     app.add_handler(CommandHandler("quote_menu", cmd_quote_settings))
     app.add_handler(CommandHandler("quotemenu", cmd_quote_settings))
     app.add_handler(CommandHandler("citaty", cmd_quote_settings))
-    app.add_handler(CommandHandler("цитаты", cmd_quote_settings))
+    # NB: Telegram only allows ASCII / digits / underscore in command
+    # names, so the Russian-only aliases (/цитаты, /баг) had to go —
+    # ``CommandHandler('цитаты', ...)`` raises at startup. Users
+    # reach the same panel via the inline "💬 Цитаты" main-menu
+    # button or the Latin aliases above.
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("admincmd", cmd_admincmd))
     app.add_handler(CommandHandler("admin_cmd", cmd_admincmd))
@@ -7440,7 +7444,6 @@ def main():
     app.add_handler(CommandHandler("bug", cmd_bug))
     app.add_handler(CommandHandler("bugreport", cmd_bug))
     app.add_handler(CommandHandler("bug_report", cmd_bug))
-    app.add_handler(CommandHandler("баг", cmd_bug))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
 
     # Photo handler — auto OCR match screenshot (also handles photo feedback)
