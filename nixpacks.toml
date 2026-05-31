@@ -2,10 +2,17 @@
 # Tesseract + Russian/English language packs are required for OCR (see ocr.py).
 # fonts-dejavu-core ships DejaVuSans.ttf with full Cyrillic coverage,
 # used by standings_image.py to render the /table standings as a PNG.
+# libraqm0 + libfribidi0 enable HarfBuzz/Raqm text shaping inside Pillow
+# (loaded via dlopen at runtime). Without them subdivision-flag emojis
+# (🏴󠁧󠁢󠁥󠁮󠁧󠁿 England / 🏴󠁧󠁢󠁳󠁣󠁴󠁿 Scotland / 🏴󠁧󠁢󠁷󠁬󠁳󠁿 Wales) render as a
+# plain black flag because GSUB tag-sequence substitutions in
+# NotoColorEmoji aren't applied.
 [phases.setup]
 aptPkgs = [
     "tesseract-ocr",
     "tesseract-ocr-rus",
     "tesseract-ocr-eng",
     "fonts-dejavu-core",
+    "libraqm0",
+    "libfribidi0",
 ]

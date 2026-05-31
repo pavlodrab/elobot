@@ -52,8 +52,20 @@ NATIVE_EMOJI_SIZE = 109  # NotoColorEmoji ships as a 109 px bitmap font.
 # the combined flag glyph when the two indicators arrive together —
 # in isolation each indicator is drawn as a letter in a square box.
 # So we must match the pair as a single grapheme, never one at a time.
+#
+# Subdivision flags (🏴󠁧󠁢󠁥󠁮󠁧󠁿 England, 🏴󠁧󠁢󠁳󠁣󠁴󠁿 Scotland, 🏴󠁧󠁢󠁷󠁬󠁳󠁿 Wales)
+# are encoded as a black flag (U+1F3F4) followed by an ISO-3166-2-style
+# tag sequence in the U+E0020-U+E007E range, terminated by U+E007F
+# (CANCEL TAG). The tag chars are invisible in regular text fonts, so
+# we MUST capture the whole sequence as one grapheme — otherwise the
+# 🏴 leaks into the emoji branch alone and renders as a plain black
+# flag, with the tag chars dropped into the regular-text run.
 _EMOJI_RE = re.compile(
     "(?:"
+    # Subdivision flag: black flag + tag sequence + cancel tag.
+    # Must come before the generic 🏴 match in the emoji range below.
+    "\U0001F3F4[\U000E0020-\U000E007E]+\U000E007F"
+    "|"
     # Country flag: exactly two consecutive regional indicators.
     "[\U0001F1E6-\U0001F1FF]{2}"
     "|"
@@ -98,6 +110,43 @@ def _native_emoji_font() -> Optional[ImageFont.FreeTypeFont]:
         return None
 
 
+@lru_cache(maxsize=1)
+def _raqm_available() -> bool:
+    """Check whether Pillow has HarfBuzz/Raqm shaping (libraqm) at runtime.
+
+    Subdivision-flag emojis (🏴󠁧󠁢󠁥󠁮󠁧󠁿 / 🏴󠁧󠁢󠁳󠁣󠁴󠁿 / 🏴󠁧󠁢󠁷󠁬󠁳󠁿) are encoded as
+    a black flag plus an ISO-3166-2 tag sequence and only render as the
+    correct flag when Pillow can apply OpenType GSUB substitutions via
+    libraqm. Without raqm the tag chars are dropped and only a plain
+    black flag remains. The bot deploys (Dockerfile / nixpacks.toml)
+    install ``libraqm0`` + ``libfribidi0`` so Pillow's _imagingft can
+    dlopen them at runtime.
+    """
+    try:
+        from PIL import features  # type: ignore
+        return bool(features.check("raqm"))
+    except Exception:
+        return False
+
+
+_NO_RAQM_WARNED = False
+
+
+def _warn_no_raqm_once() -> None:
+    """Log a single warning when a subdivision flag is rendered without
+    libraqm — the result will be a plain black flag instead of the
+    intended England / Scotland / Wales glyph."""
+    global _NO_RAQM_WARNED
+    if _NO_RAQM_WARNED:
+        return
+    _NO_RAQM_WARNED = True
+    log.warning(
+        "emoji_helper: libraqm is not available; subdivision-flag emojis "
+        "(England / Scotland / Wales) will render as a plain black flag. "
+        "Install libraqm0 + libfribidi0 in the deploy image."
+    )
+
+
 def split_emoji_runs(text: str) -> list[Tuple[str, bool]]:
     """Split ``text`` into runs of ``(piece, is_emoji)``.
 
@@ -133,6 +182,16 @@ def _render_emoji_glyph_png(grapheme: str, target_h: int) -> Optional[bytes]:
     ef = _native_emoji_font()
     if ef is None:
         return None
+    # Subdivision flag (England / Scotland / Wales): 🏴 + tag sequence
+    # + cancel-tag. Renders correctly only when Pillow has libraqm at
+    # runtime; warn once so the missing-shaper case is obvious in logs.
+    if (
+        len(grapheme) >= 3
+        and grapheme[0] == "\U0001F3F4"
+        and grapheme[-1] == "\U000E007F"
+        and not _raqm_available()
+    ):
+        _warn_no_raqm_once()
     try:
         canvas = Image.new(
             "RGBA",
