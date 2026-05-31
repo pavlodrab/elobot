@@ -685,13 +685,14 @@ M_PROFILE     = "👤 Профиль"
 M_REPORT      = "📨 Репорт"
 M_TOP         = "📊 Топ"
 M_SETTINGS    = "🔧 Настройки"
+M_QUOTES      = "💬 Цитаты"
 M_FEEDBACK    = "🐞 Связь"
 M_ADMIN       = "👮 Админ"
 M_HELP        = "ℹ️ Помощь"
 
 MENU_LABELS = {
     M_TOURNAMENTS, M_PROFILE, M_REPORT, M_TOP,
-    M_SETTINGS, M_FEEDBACK, M_ADMIN, M_HELP,
+    M_SETTINGS, M_QUOTES, M_FEEDBACK, M_ADMIN, M_HELP,
 }
 
 
@@ -700,7 +701,8 @@ def main_menu_kb(user_id: int | None = None) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(M_TOURNAMENTS), KeyboardButton(M_PROFILE)],
         [KeyboardButton(M_REPORT),      KeyboardButton(M_TOP)],
-        [KeyboardButton(M_SETTINGS),    KeyboardButton(M_FEEDBACK)],
+        [KeyboardButton(M_SETTINGS),    KeyboardButton(M_QUOTES)],
+        [KeyboardButton(M_FEEDBACK)],
     ]
     if user_id is not None and is_admin(user_id):
         rows.append([KeyboardButton(M_ADMIN), KeyboardButton(M_HELP)])
@@ -760,6 +762,9 @@ def main_menu_inline_kb(user_id: int | None = None) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(M_SETTINGS,    callback_data="gmenu:settings"),
+            InlineKeyboardButton(M_QUOTES,      callback_data="gmenu:quotes"),
+        ],
+        [
             InlineKeyboardButton(M_FEEDBACK,    callback_data="gmenu:feedback"),
         ],
     ]
@@ -5685,6 +5690,16 @@ async def _send_settings_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def _send_quotes_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Open the quote-settings panel for the current chat. The panel
+    shows current cadence + quote count + preset buttons. Lazy-imports
+    the implementation to avoid the bot ↔ handlers.quotes cycle at
+    module load.
+    """
+    from handlers.quotes import cmd_quote_settings
+    await cmd_quote_settings(update, ctx)
+
+
 async def _send_feedback_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg is None:
@@ -5720,6 +5735,7 @@ MENU_DISPATCH = {
     M_REPORT:      _send_report_section,
     M_TOP:         _send_top_section,
     M_SETTINGS:    _send_settings_section,
+    M_QUOTES:      _send_quotes_section,
     M_FEEDBACK:    _send_feedback_section,
     M_ADMIN:       _send_admin_section,
     M_HELP:        cmd_help,
@@ -5825,6 +5841,26 @@ async def _inline_settings_section(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await _send_settings_section(update, ctx)
 
 
+async def _inline_quotes_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Group inline-menu version: open the quote-settings panel by
+    editing the current message in place. Falls back to a fresh
+    message if the edit fails (e.g. the original message is gone).
+    """
+    from handlers.quotes import _quote_settings_text, _quote_settings_kb
+    query = update.callback_query
+    chat = update.effective_chat
+    if not query or chat is None:
+        return await _send_quotes_section(update, ctx)
+    try:
+        await query.edit_message_text(
+            _quote_settings_text(chat.id),
+            parse_mode="HTML",
+            reply_markup=_quote_settings_kb(chat.id),
+        )
+    except TelegramError:
+        await _send_quotes_section(update, ctx)
+
+
 async def _inline_feedback_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -5909,6 +5945,7 @@ MENU_DISPATCH_INLINE = {
     M_REPORT:      _inline_report_section,
     M_TOP:         _inline_top_section,
     M_SETTINGS:    _inline_settings_section,
+    M_QUOTES:      _inline_quotes_section,
     M_FEEDBACK:    _inline_feedback_section,
     M_ADMIN:       _inline_admin_section,
     M_HELP:        _inline_help_section,
@@ -5922,6 +5959,7 @@ _GMENU_TO_LABEL = {
     "report":      M_REPORT,
     "top":         M_TOP,
     "settings":    M_SETTINGS,
+    "quotes":      M_QUOTES,
     "feedback":    M_FEEDBACK,
     "admin":       M_ADMIN,
     "help":        M_HELP,
