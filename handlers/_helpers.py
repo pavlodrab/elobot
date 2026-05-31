@@ -268,4 +268,153 @@ __all__ = [
     "_resolve_tournament_from_args",
     "_user_active_tournaments",
     "_tournament_picker_kb",
+    "MAX_TEAM_TAG_LEN",
+    "normalize_team_tag",
+    "format_player_with_tag",
+    "format_player_with_tag_html",
 ]
+
+
+# ── Team / club tag (per-tournament) ─────────────────────────────────────────
+#
+# Tags are short labels (≤ MAX_TEAM_TAG_LEN chars) attached to a
+# tournament_players row. Used at every name-display site to show
+# something like "phoenileo - Германия (@Phoenileo)" so chats with
+# clubs / national teams can tell who's representing whom.
+#
+# All rendering goes through ``format_player_with_tag(...)`` so we have
+# a single source of truth for the format. The helper is HTML-safe and
+# produces a string that's safe to drop straight into a Telegram
+# ``parse_mode='HTML'`` message (clickable @username included).
+
+MAX_TEAM_TAG_LEN = 32
+
+
+def normalize_team_tag(raw: str | None) -> str:
+    """Trim / normalise an admin-supplied team tag.
+
+    Empty / None / words like ``clear``/``-``/``нет`` map to an empty
+    string (= remove the tag). Otherwise we strip whitespace, drop a
+    leading ``@`` (admins sometimes paste a username by mistake), and
+    cap to ``MAX_TEAM_TAG_LEN`` chars so the rendered name doesn't
+    blow up the column width in the standings PNG.
+    """
+    if not raw:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    if s.lower() in {"clear", "none", "-", "—", "нет", "off"}:
+        return ""
+    if s.startswith("@"):
+        s = s[1:].strip()
+    if len(s) > MAX_TEAM_TAG_LEN:
+        s = s[:MAX_TEAM_TAG_LEN].rstrip()
+    return s
+
+
+def _is_synthetic_username(user: str) -> bool:
+    import re
+
+    return bool(user) and bool(re.match(r"^id_\d+$", user.lower()))
+
+
+def format_player_with_tag(
+    player: dict | None,
+    team_tag: str | None = None,
+    *,
+    fallback: str = "?",
+) -> str:
+    """Render a player as ``"<nick> - <Team> (@<user>)"`` or one of the
+    short variants when something is missing.
+
+    Cases:
+      * nick + tag + user → ``"phoenileo - Германия (@Phoenileo)"``
+      * nick + user (no tag) → ``"phoenileo (@Phoenileo)"``
+      * tag + user only → ``"Германия (@Phoenileo)"``
+      * user only → ``"@Phoenileo"``
+      * synthetic username (``id_<digits>``) is hidden — replaced by
+        the nickname, or by ``id <digits>`` when no nickname is set.
+      * nothing usable → ``fallback``.
+
+    Plain text. Use ``format_player_with_tag_html`` when you need HTML
+    output that's safe to drop into a parse_mode='HTML' message.
+    """
+    if not player:
+        if team_tag:
+            return team_tag
+        return fallback
+    nick = (player.get("game_nickname") or "").strip()
+    user = (player.get("username") or "").strip()
+    tag = (team_tag or "").strip()
+
+    is_synth = _is_synthetic_username(user)
+    if is_synth:
+        # Show the nickname (or "id <digits>"), never the synthetic handle.
+        synth_display = nick or user.lower().replace("id_", "id ", 1)
+        if tag:
+            return f"{synth_display} - {tag}"
+        return synth_display
+
+    if nick and user:
+        if tag:
+            return f"{nick} - {tag} (@{user})"
+        if nick.lower() == user.lower():
+            return f"@{user}"
+        return f"{nick} (@{user})"
+    if user:
+        if tag:
+            return f"{tag} (@{user})"
+        return f"@{user}"
+    if nick:
+        if tag:
+            return f"{nick} - {tag}"
+        return nick
+    return tag or fallback
+
+
+def format_player_with_tag_html(
+    player: dict | None,
+    team_tag: str | None = None,
+    *,
+    fallback: str = "?",
+) -> str:
+    """HTML-safe variant of :func:`format_player_with_tag`.
+
+    The ``@username`` portion is left raw so Telegram still renders the
+    clickable mention; everything else (nick, tag) is HTML-escaped.
+    """
+    import html as _html
+
+    if not player:
+        return _html.escape(team_tag) if team_tag else _html.escape(fallback)
+
+    nick = (player.get("game_nickname") or "").strip()
+    user = (player.get("username") or "").strip()
+    tag = (team_tag or "").strip()
+
+    is_synth = _is_synthetic_username(user)
+    nick_h = _html.escape(nick)
+    tag_h = _html.escape(tag)
+
+    if is_synth:
+        synth_display = nick_h or _html.escape(user.lower().replace("id_", "id ", 1))
+        if tag:
+            return f"{synth_display} - {tag_h}"
+        return synth_display
+
+    if nick and user:
+        if tag:
+            return f"{nick_h} - {tag_h} (@{user})"
+        if nick.lower() == user.lower():
+            return f"@{user}"
+        return f"{nick_h} (@{user})"
+    if user:
+        if tag:
+            return f"{tag_h} (@{user})"
+        return f"@{user}"
+    if nick:
+        if tag:
+            return f"{nick_h} - {tag_h}"
+        return nick_h
+    return tag_h or _html.escape(fallback)

@@ -307,12 +307,22 @@ from handlers.tournament import (  # noqa: E402
     cmd_replace_player,
     cmd_set_auto_confirm,
     cmd_set_third_place,
+    cmd_skip_third_place,
+    cmd_set_team,
+    cmd_myteam,
+    cb_team_buttons,
+    handle_pending_team_tag_text,
     cmd_set_penalties,
     cmd_set_group,
     cmd_set_matches_per_pair,
     cmd_set_overlay,
     cmd_set_playoff_slots,
     cmd_set_reminders,
+    cmd_set_signup_reminder,
+    cmd_set_signup_link,
+    cmd_clear_signup_link,
+    cmd_set_signup_deadline,
+    cmd_clear_signup_deadline,
     cmd_set_row_alpha,
     cmd_set_series_length,
     cmd_simulate,
@@ -929,6 +939,16 @@ def _submenu_ts_playoff(t: dict) -> InlineKeyboardMarkup:
         fmt_lbl = "лига (чемпионат)"
     third = "вкл" if int(t.get("playoff_third_place") or 0) else "выкл"
     pens = "вкл" if int(t.get("playoff_penalties") or 0) else "выкл"
+
+    # If a bronze fixture has been spawned but isn't fully played yet,
+    # surface a one-tap cancel button so the admin can unstick the
+    # tournament without remembering /skip_third_place.
+    bronze_pending = False
+    try:
+        from tournament import _third_place_complete  # local import: avoid cycle at module load
+        bronze_pending = _third_place_complete(int(tid), t) is False
+    except Exception:
+        bronze_pending = False
     rows = [
         [InlineKeyboardButton(
             f"📅 Формат: {fmt_lbl}",
@@ -950,6 +970,13 @@ def _submenu_ts_playoff(t: dict) -> InlineKeyboardMarkup:
             f"🥉 Матч за 3-е место: {third}",
             callback_data=f"ts:third:{tid}",
         )],
+    ]
+    if bronze_pending:
+        rows.append([InlineKeyboardButton(
+            "❌ Отменить незавершённый матч за 3-е место",
+            callback_data=f"ts:third_skip:{tid}",
+        )])
+    rows.extend([
         [InlineKeyboardButton(
             f"⚽ Пенальти при ничье: {pens}",
             callback_data=f"ts:pen:{tid}",
@@ -959,7 +986,7 @@ def _submenu_ts_playoff(t: dict) -> InlineKeyboardMarkup:
             callback_data=f"ts:signup:{tid}",
         )],
         [InlineKeyboardButton("⬅️ Назад к настройкам", callback_data=f"ts:open:{tid}")],
-    ]
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -990,14 +1017,32 @@ def _submenu_ts_remind(t: dict) -> InlineKeyboardMarkup:
     chat_rem = "вкл" if int(t.get("reminder_chat_enabled") or 0) else "выкл"
     dm_h = int(t.get("reminder_dm_hours") or 0)
     dm_lbl = "выкл" if dm_h <= 0 else f"{dm_h}ч"
+    sig_min = int(t.get("signup_reminder_minutes") or 0)
+    sig_lbl = "выкл" if sig_min <= 0 else f"{sig_min} мин"
+    has_signup_link = bool((t.get("signup_link") or "").strip())
+    has_signup_deadline = bool(t.get("signup_deadline_at"))
+    link_lbl = "ссылка ✓" if has_signup_link else "без ссылки"
+    deadline_lbl = "дедлайн ✓" if has_signup_deadline else "без дедлайна"
     rows = [
         [InlineKeyboardButton(
-            f"🔔 DM-напоминания: {dm_lbl}",
+            f"🔔 DM-напоминания (по матчам): {dm_lbl}",
             callback_data=f"ts:dm:{tid}",
         )],
         [InlineKeyboardButton(
-            f"💬 Чат-напоминания: {chat_rem}",
+            f"💬 Чат-напоминания (по матчам): {chat_rem}",
             callback_data=f"ts:chat:{tid}",
+        )],
+        [InlineKeyboardButton(
+            f"📣 Напоминалка о записи: {sig_lbl}",
+            callback_data=f"ts:remsignup:{tid}",
+        )],
+        [InlineKeyboardButton(
+            f"🔗 Ссылка на запись: {link_lbl}",
+            callback_data=f"ts:remsignup_link:{tid}",
+        )],
+        [InlineKeyboardButton(
+            f"📅 Дедлайн записи: {deadline_lbl}",
+            callback_data=f"ts:remsignup_deadline:{tid}",
         )],
         [InlineKeyboardButton("⬅️ Назад к настройкам", callback_data=f"ts:open:{tid}")],
     ]
@@ -4358,7 +4403,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data == "fin_cancel" or data.startswith("fin_t:"):
+    if (
+        data == "fin_cancel"
+        or data.startswith("fin_t:")
+        or data.startswith("fin_t_skip3:")
+    ):
         # The /finish_tournament callback already calls query.answer() itself,
         # but doing it again is harmless and was already done at the top.
         await cb_finish_tournament(update, ctx)
@@ -4531,6 +4580,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if _can_manage_tournament(update.effective_user.id, t):
                 kb_rows.append([
                     InlineKeyboardButton("➕ Добавить игрока", callback_data=f"t:addplayer:{t['id']}"),
+                    InlineKeyboardButton("🏷 Команды", callback_data=f"team:list:{t['id']}"),
                 ])
                 kb_rows.append([
                     InlineKeyboardButton("📝 Описание",   callback_data=f"t:setdesc:{t['id']}"),
@@ -4778,6 +4828,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── Tournament settings submenu (button-driven) ───────────────────────
     if data.startswith("ts:"):
         await _handle_tournament_settings_cb(update, ctx, data)
+        return
+
+    # ── Team / club tag picker ────────────────────────────────────────────
+    if data.startswith("team:"):
+        await cb_team_buttons(update, ctx)
         return
 
     # ── Top submenu ───────────────────────────────────────────────────────
@@ -5952,6 +6007,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     txt = update.message.text.strip()
 
+    # ── Pending team-tag entry ────────────────────────────────────────────
+    # Admin tapped "🏷 Команды → ✏️ <player>" and the next message is
+    # expected to be the team name. Consume the message there before
+    # any of the menu / wizard / feedback dispatchers pick it up.
+    if await handle_pending_team_tag_text(update, ctx):
+        return
+
     # Main menu label tap → exit any wizard, go to that section
     if txt in MENU_LABELS:
         _wizard_clear(ctx)
@@ -6300,6 +6362,10 @@ async def job_reminders(ctx: ContextTypes.DEFAULT_TYPE):
                                 "r64": "1/32", "r32": "1/16", "r16": "1/8",
                                 "qf": "1/4", "sf": "1/2", "final": "Финал",
                                 "third": "3-е место"}
+                # Render opponent name with their per-tournament team
+                # tag (when configured) so DM reminders read like
+                # "vs phoenileo - Германия (@Phoenileo)".
+                from handlers._helpers import format_player_with_tag_html
                 # Group bucket first (since groups are played before playoff).
                 for label, bucket_name in (("Группа", "group"), ("Плей-офф", "playoff")):
                     bucket = buckets[bucket_name]
@@ -6310,17 +6376,26 @@ async def job_reminders(ctx: ContextTypes.DEFAULT_TYPE):
                         opp = db.get_player_by_id(opp_pid)
                         if not opp:
                             continue
+                        try:
+                            opp_tag = db.get_tournament_player_tag(tid, opp_pid)
+                        except Exception:
+                            opp_tag = ""
+                        opp_label = (
+                            format_player_with_tag_html(opp, opp_tag)
+                            if opp_tag
+                            else mention(opp["username"])
+                        )
                         suffix = ""
                         if entry["count"] > 1:
                             suffix = f" (×{entry['count']})"
                         if bucket_name == "playoff":
                             stg = stage_pretty.get(entry["stage"], entry["stage"])
                             opp_lines.append(
-                                f"  • {stg} vs {mention(opp['username'])}{suffix}"
+                                f"  • {stg} vs {opp_label}{suffix}"
                             )
                         else:
                             opp_lines.append(
-                                f"  • vs {mention(opp['username'])}{suffix}"
+                                f"  • vs {opp_label}{suffix}"
                             )
 
                 if not opp_lines:
@@ -6381,6 +6456,21 @@ async def job_reminders(ctx: ContextTypes.DEFAULT_TYPE):
                         real_rows.append(rd)
             if not real_rows:
                 continue
+            from handlers._helpers import format_player_with_tag_html  # local
+
+            def _name_for(player_row, pid: int) -> str:
+                if not player_row:
+                    return mention("?")
+                try:
+                    tt = db.get_tournament_player_tag(tid, int(pid))
+                except Exception:
+                    tt = ""
+                return (
+                    format_player_with_tag_html(player_row, tt)
+                    if tt
+                    else mention(player_row.get("username") or "?")
+                )
+
             lines = [f"⏰ <b>{html.escape(t['name'])}</b> — несыгранные матчи:"]
             for rd in real_rows[:15]:
                 p1 = db.get_player_by_id(rd["player1_id"])
@@ -6396,8 +6486,9 @@ async def job_reminders(ctx: ContextTypes.DEFAULT_TYPE):
                 leg = rd.get("leg") or 1
                 leg_str = f" L{leg}" if leg and leg != 1 else ""
                 lines.append(
-                    f"  {stage_lbl}{leg_str} {mention(p1['username'])} vs "
-                    f"{mention(p2['username'])}"
+                    f"  {stage_lbl}{leg_str} "
+                    f"{_name_for(p1, rd['player1_id'])} vs "
+                    f"{_name_for(p2, rd['player2_id'])}"
                 )
             if t.get("deadline_at"):
                 lines.append(
@@ -6417,6 +6508,104 @@ async def job_reminders(ctx: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception:
                 log.exception("chat reminder failed for tournament %s", tid)
+
+        # ── Signup-phase reminders ────────────────────────────────────
+        # Posted in the bound chat while the tournament is still
+        # accepting registrations (open_signup=1, no matches generated
+        # yet). Cadence is verbatim from ``signup_reminder_minutes`` —
+        # admins set it via /set_signup_reminder; 0 disables. The
+        # message includes the admin-supplied ``signup_link`` (URL or
+        # free-form text) when set, plus the same inline "🙋
+        # Записаться" button used by /tournaments so users can
+        # one-tap join right from the reminder.
+        try:
+            interval_min = int(t.get("signup_reminder_minutes") or 0)
+        except (TypeError, ValueError):
+            interval_min = 0
+        if interval_min > 0 and t.get("chat_id"):
+            stage_lower = (t.get("stage") or "groups").lower()
+            try:
+                signups_open = (
+                    int(t.get("open_signup") or 0) == 1
+                    and stage_lower in ("groups", "")
+                    and len(db.get_tournament_matches(tid)) == 0
+                )
+            except Exception:
+                signups_open = False
+            if signups_open and _reminder_should_fire(
+                tid, "signup_chat", interval_min * 60,
+            ):
+                try:
+                    members = db.get_tournament_players(tid)
+                except Exception:
+                    members = []
+                lines: list[str] = [
+                    f"🙋 <b>Запись на «{html.escape(t['name'])}» открыта!</b>",
+                    f"Уже записалось: <b>{len(members)}</b> игроков.",
+                ]
+                deadline_raw = t.get("signup_deadline_at")
+                if deadline_raw:
+                    try:
+                        lines.append(
+                            f"📅 Дедлайн записи: "
+                            f"<b>{_fmt_minute_local(deadline_raw)} "
+                            f"{_tz_label()}</b>"
+                        )
+                    except Exception:
+                        # Fall back to the raw value rather than dropping
+                        # the deadline silently.
+                        lines.append(
+                            f"📅 Дедлайн записи: <b>{html.escape(str(deadline_raw))}</b>"
+                        )
+                link_raw = (t.get("signup_link") or "").strip()
+                if link_raw:
+                    # The link / free-form text might contain HTML
+                    # special chars (admins paste random URLs and prose
+                    # into it). We escape it so a stray '&' or '<'
+                    # doesn't break the parse_mode='HTML' send.
+                    lines.append(
+                        f"🔗 Где регаться: {html.escape(link_raw)}"
+                    )
+                else:
+                    lines.append(
+                        "Жми кнопку ниже, чтобы записаться 👇"
+                    )
+                # Inline "🙋 Записаться" button — same callback as in
+                # /tournaments so the existing self-signup flow handles
+                # the rest. (Players already in the lobby see the
+                # "🚪 Покинуть турнир" variant only inside /tournaments —
+                # in the chat reminder we always show the join button;
+                # the callback itself is idempotent and replies "уже
+                # записан" if they already are.)
+                kb = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🙋 Записаться",
+                        callback_data=f"t:join:{tid}",
+                    ),
+                ]])
+                # Append per-tournament chat-reminder footer for parity
+                # with the match-reminder branch above.
+                try:
+                    from handlers.common import (
+                        FOOTER_CTX_REMINDER,
+                        get_random_footer,
+                    )
+                    _signup_footer = get_random_footer(t, FOOTER_CTX_REMINDER)
+                    if _signup_footer:
+                        lines.append(_signup_footer)
+                except Exception:
+                    pass
+                try:
+                    await ctx.bot.send_message(
+                        int(t["chat_id"]),
+                        "\n".join(lines),
+                        parse_mode="HTML",
+                        reply_markup=kb,
+                    )
+                except Exception:
+                    log.exception(
+                        "signup reminder failed for tournament %s", tid,
+                    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6761,6 +6950,18 @@ def main():
     app.add_handler(CommandHandler("set_third_place", cmd_set_third_place))
     app.add_handler(CommandHandler("setthirdplace", cmd_set_third_place))
     app.add_handler(CommandHandler("third_place", cmd_set_third_place))
+    app.add_handler(CommandHandler("skip_third_place", cmd_skip_third_place))
+    app.add_handler(CommandHandler("skipthirdplace", cmd_skip_third_place))
+    app.add_handler(CommandHandler("cancel_third_place", cmd_skip_third_place))
+    app.add_handler(CommandHandler("cancelthirdplace", cmd_skip_third_place))
+    app.add_handler(CommandHandler("skip_bronze", cmd_skip_third_place))
+    # Per-tournament team / club tags (admin command + self-service).
+    app.add_handler(CommandHandler("set_team", cmd_set_team))
+    app.add_handler(CommandHandler("setteam", cmd_set_team))
+    app.add_handler(CommandHandler("team_set", cmd_set_team))
+    app.add_handler(CommandHandler("myteam", cmd_myteam))
+    app.add_handler(CommandHandler("my_team", cmd_myteam))
+    app.add_handler(CommandHandler("setmyteam", cmd_myteam))
     app.add_handler(CommandHandler("set_penalties", cmd_set_penalties))
     app.add_handler(CommandHandler("setpenalties", cmd_set_penalties))
     app.add_handler(CommandHandler("penalties", cmd_set_penalties))
@@ -6781,6 +6982,21 @@ def main():
     app.add_handler(CommandHandler("set_reminders", cmd_set_reminders))
     app.add_handler(CommandHandler("setreminders", cmd_set_reminders))
     app.add_handler(CommandHandler("reminders", cmd_set_reminders))
+    # Signup-phase reminders (admin sets cadence in minutes + optional link).
+    app.add_handler(CommandHandler("set_signup_reminder", cmd_set_signup_reminder))
+    app.add_handler(CommandHandler("setsignupreminder", cmd_set_signup_reminder))
+    app.add_handler(CommandHandler("signup_reminder", cmd_set_signup_reminder))
+    app.add_handler(CommandHandler("signupreminder", cmd_set_signup_reminder))
+    app.add_handler(CommandHandler("set_signup_link", cmd_set_signup_link))
+    app.add_handler(CommandHandler("setsignuplink", cmd_set_signup_link))
+    app.add_handler(CommandHandler("signup_link", cmd_set_signup_link))
+    app.add_handler(CommandHandler("clear_signup_link", cmd_clear_signup_link))
+    app.add_handler(CommandHandler("clearsignuplink", cmd_clear_signup_link))
+    app.add_handler(CommandHandler("set_signup_deadline", cmd_set_signup_deadline))
+    app.add_handler(CommandHandler("setsignupdeadline", cmd_set_signup_deadline))
+    app.add_handler(CommandHandler("signup_deadline", cmd_set_signup_deadline))
+    app.add_handler(CommandHandler("clear_signup_deadline", cmd_clear_signup_deadline))
+    app.add_handler(CommandHandler("clearsignupdeadline", cmd_clear_signup_deadline))
     # Technical draw and per-match deadline editor.
     app.add_handler(CommandHandler("tech_draw", cmd_tech_draw))
     app.add_handler(CommandHandler("techdraw",  cmd_tech_draw))

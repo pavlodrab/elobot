@@ -29,13 +29,37 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 
 from bg_helper import make_canvas
-from database import get_player_by_id, get_tournament, get_tournament_matches
+from database import get_player_by_id, get_tournament, get_tournament_matches, get_tournament_players
 from tournament import (
     PLAYOFF_STAGES,
     _pair_key,
     _resolve_pair_winner,
     get_stage_config,
 )
+
+
+
+# ── Per-render team-tag cache ───────────────────────────────────────────────
+# Populated by ``_load_tag_map(tid)`` at the start of every public
+# ``render_playoff_png(s)`` call and consumed by ``_display_name`` so
+# we don't have to plumb a ``tag_by_pid`` dict through every helper
+# (``_render_card`` / ``_render_card_dyn`` / ``_resolve_name`` etc).
+# Single-threaded asyncio worker → no race conditions in practice.
+_TAG_BY_PID: dict[int, str] = {}
+
+
+def _load_tag_map(tid: int) -> None:
+    """Refresh ``_TAG_BY_PID`` with the per-tournament team tags."""
+    _TAG_BY_PID.clear()
+    try:
+        rows = get_tournament_players(tid)
+    except Exception:
+        return
+    for r in rows:
+        pid = r.get("player_id")
+        tag = (r.get("team_tag") or "").strip()
+        if isinstance(pid, int) and tag:
+            _TAG_BY_PID[pid] = tag
 
 
 # ── palette (matches standings_image.py) ────────────────────────────────────
@@ -227,26 +251,47 @@ def _truncate(
     return text[:lo] + ell
 
 
-def _display_name(p: dict | None, *, fallback: str = "?") -> str:
+def _display_name(p: dict | None, *, fallback: str = "?", team_tag: str = "") -> str:
     """Bracket-card name. Hides synthetic ``id_<digits>`` placeholders so
     we never render an unclickable ``@id_77777`` for a user without a
     public ``@username`` — they show as their game nickname (or
     ``id 77777``) instead.
+
+    When ``team_tag`` is provided (per-tournament tag from
+    ``tournament_players``), it's woven into the rendered name as
+    ``"<nick> - <Team> (@user)"`` so playoff bracket cards make team
+    affiliations visible at a glance. If ``team_tag`` is empty AND
+    the module-level ``_TAG_BY_PID`` cache (populated by
+    ``render_playoff_png(s)``) has an entry for this player, that
+    cached value is used — saves plumbing the tag map through every
+    intermediate ``_render_card`` call.
     """
+    tag = (team_tag or "").strip()
+    if not tag and p is not None:
+        pid_local = p.get("id")
+        if isinstance(pid_local, int):
+            tag = (_TAG_BY_PID.get(pid_local) or "").strip()
     if not p:
+        if tag:
+            return tag
         return fallback
     nick = (p.get("game_nickname") or "").strip()
     user = (p.get("username") or "").strip()
     is_synthetic = bool(user) and bool(re.match(r"^id_\d+$", user.lower()))
     if is_synthetic:
-        if nick:
-            return nick
-        return user.lower().replace("id_", "id ", 1)
-    if nick and user and nick.lower() != user.lower():
+        synth = nick or user.lower().replace("id_", "id ", 1)
+        return f"{synth} - {tag}" if tag else synth
+    if user and nick:
+        if tag:
+            return f"{nick} - {tag} (@{user})"
+        if nick.lower() == user.lower():
+            return f"@{user}"
         return f"{nick} (@{user})"
     if user:
+        if tag:
+            return f"{tag} (@{user})"
         return f"@{user}"
-    return nick or fallback
+    return f"{nick} - {tag}" if (nick and tag) else (nick or tag or fallback)
 
 
 def _stage_label(stage: str) -> str:
@@ -1530,6 +1575,10 @@ def render_playoff_pngs(tid: int) -> list[bytes]:
     on the FIRST image only (avoids duplicating the bronze match
     across split halves of huge brackets).
     """
+    # Refresh the per-tournament team-tag cache so every nested
+    # ``_display_name`` call resolves the right per-tournament tag
+    # without us plumbing a tag map through every helper.
+    _load_tag_map(tid)
     t = get_tournament(tid) or {}
     stages = _collect_pairs_full(tid)
     third_pairs = _collect_third_place(tid)

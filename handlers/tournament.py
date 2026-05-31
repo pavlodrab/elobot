@@ -73,8 +73,11 @@ from standings_image import (
 from tournament import (
     GROUP_LETTERS,
     PLAYOFF_STAGES,
+    THIRD_PLACE_STAGE,
     _dedup_playoff_legs,
     _resolve_pair_winner,
+    _third_place_complete,
+    advance_playoff,
     draw_groups,
     format_playoff_bracket,
     format_standings_message,
@@ -86,7 +89,10 @@ from tournament import (
 from handlers._helpers import (
     _can_manage_tournament,
     _player_from_user,
+    _resolve_player_arg,
     _resolve_tournament_from_args,
+    format_player_with_tag_html,
+    normalize_team_tag,
 )
 from handlers.common import (
     _fmt_dt,
@@ -1235,6 +1241,431 @@ async def cmd_set_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     await send(update, "\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Team / club tags (per-tournament)
+#
+# Per-tournament label attached to each ``tournament_players`` row so
+# the bot can render names as ``nick - Team (@username)`` everywhere
+# (standings PNG, playoff bracket PNG, podium, summary, reminders…).
+# Storage: ``tournament_players.team_tag``. Empty string clears the tag.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_set_team(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/set_team [ID] @user <команда>`` — admin-only.
+
+    Set (or clear) the team / club tag for a player in a tournament.
+    Pass ``clear`` / ``-`` / empty as the team to remove the tag.
+
+    Without a tournament ID, the chat-bound or single-active tournament
+    is used (same fallback rules as ``/set_group``).
+
+    Examples::
+
+        /set_team 12 @phoenileo Германия
+        /set_team @phoenileo "Реал Мадрид"
+        /set_team 12 @phoenileo clear
+    """
+    user = update.effective_user
+    if not user:
+        return
+
+    args = list(ctx.args or [])
+    if not args:
+        await send(
+            update,
+            "Использование: <code>/set_team [ID] @user &lt;команда&gt;</code>\n"
+            "Сброс: <code>/set_team [ID] @user clear</code>",
+        )
+        return
+
+    t, rest, err = _resolve_target_tournament_for_group_admin(update, ctx, args)
+    if t is None:
+        await send(update, err or "❌ Нет активного турнира.")
+        return
+    if not _can_manage_tournament(user.id, t):
+        await send(update, "❌ Только создатель турнира или админ.")
+        return
+    if not rest:
+        await send(
+            update,
+            "❌ Не указан игрок: "
+            "<code>/set_team [ID] @user &lt;команда&gt;</code>",
+        )
+        return
+
+    user_arg = rest[0]
+    raw_tag = " ".join(rest[1:]).strip()
+    p = _resolve_player_arg(user_arg)
+    if not p:
+        await send(
+            update,
+            f"❌ Не нашёл игрока <code>{html.escape(user_arg)}</code>. "
+            "Использовал @username, ник или telegram_id.",
+        )
+        return
+    if not db.is_player_in_tournament(t["id"], p["id"]):
+        await send(
+            update,
+            f"❌ {html.escape(p.get('username') or '?')} не записан в "
+            f"<b>{html.escape(t['name'])}</b>. Сначала "
+            "<code>/add_player</code>.",
+        )
+        return
+
+    new_tag = normalize_team_tag(raw_tag)
+    db.update_tournament_player(t["id"], p["id"], team_tag=new_tag or None)
+
+    log_tournament_action(
+        t["id"],
+        actor_telegram_id=user.id,
+        actor_username=user.username,
+        action="set_team_tag",
+        details=f"player_id={p['id']} tag={new_tag!r}",
+    )
+
+    if new_tag:
+        await send(
+            update,
+            f"✅ Команда для {format_player_with_tag_html(p, new_tag)} "
+            f"в <b>{html.escape(t['name'])}</b> сохранена.",
+        )
+    else:
+        await send(
+            update,
+            f"✅ Метка команды у {format_player_with_tag_html(p)} "
+            f"в <b>{html.escape(t['name'])}</b> снята.",
+        )
+
+
+async def cmd_myteam(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/myteam [ID] <команда>`` — игрок сам ставит свою метку.
+
+    Available only while the tournament's signup window is still open
+    (no matches generated yet). After the draw runs, only admins can
+    change tags via ``/set_team`` to prevent mid-tournament identity
+    swaps.
+
+    Pass ``clear`` / ``-`` / empty payload to remove the tag.
+    """
+    user = update.effective_user
+    if not user:
+        return
+
+    p = _player_from_user(user)
+    if not p:
+        await send(update, "❌ Сначала зарегистрируйся: /register")
+        return
+
+    args = list(ctx.args or [])
+    tid: int | None = None
+    if args and args[0].lstrip("#").isdigit():
+        tid = int(args.pop(0).lstrip("#"))
+
+    t: dict | None = None
+    if tid is not None:
+        t = get_tournament(tid)
+        if not t:
+            await send(update, f"❌ Турнир {tid} не найден.")
+            return
+    else:
+        chat = update.effective_chat
+        if chat:
+            t = get_tournament_by_chat(chat.id)
+        if t is None:
+            # Fallback: a single tournament the player is in.
+            actives = [
+                x for x in get_active_tournaments()
+                if db.is_player_in_tournament(x["id"], p["id"])
+            ]
+            if len(actives) == 1:
+                t = actives[0]
+    if not t:
+        await send(
+            update,
+            "❌ Не нашёл турнир. Укажи ID: "
+            "<code>/myteam &lt;ID&gt; &lt;команда&gt;</code>.",
+        )
+        return
+
+    if not db.is_player_in_tournament(t["id"], p["id"]):
+        await send(
+            update,
+            f"❌ Ты не записан в <b>{html.escape(t['name'])}</b>. "
+            "Сначала запишись через /tournaments.",
+        )
+        return
+
+    # Lock down once the bracket has started so a player can't
+    # rebrand themselves mid-tournament. Admins can still override
+    # via /set_team.
+    matches = db.get_tournament_matches(t["id"])
+    stage_lower = (t.get("stage") or "groups").lower()
+    if matches or stage_lower not in ("groups", ""):
+        await send(
+            update,
+            "❌ Турнир уже стартовал — игроки больше не могут менять "
+            "метку команды. Попроси админа: <code>/set_team "
+            f"{t['id']} @{p.get('username') or p['id']} &lt;команда&gt;</code>.",
+        )
+        return
+
+    raw_tag = " ".join(args).strip()
+    new_tag = normalize_team_tag(raw_tag)
+    db.update_tournament_player(t["id"], p["id"], team_tag=new_tag or None)
+    log_tournament_action(
+        t["id"],
+        actor_telegram_id=user.id,
+        actor_username=user.username,
+        action="set_team_tag_self",
+        details=f"player_id={p['id']} tag={new_tag!r}",
+    )
+
+    if new_tag:
+        await send(
+            update,
+            f"✅ Команда сохранена: {format_player_with_tag_html(p, new_tag)} "
+            f"в <b>{html.escape(t['name'])}</b>.",
+        )
+    else:
+        await send(
+            update,
+            f"✅ Метка команды снята в <b>{html.escape(t['name'])}</b>.",
+        )
+
+
+async def _render_team_list(
+    query, ctx: ContextTypes.DEFAULT_TYPE, t: dict,
+) -> None:
+    """Render the "🏷 Команды" picker for tournament ``t`` into ``query``.
+
+    Extracted from ``cb_team_buttons`` so the post-clear refresh and
+    the post-text-tag refresh can re-show the list without re-parsing
+    ``query.data``.
+    """
+    tid = int(t["id"])
+    members = sorted(
+        db.get_tournament_players(tid),
+        key=lambda r: ((r.get("username") or "").lower()),
+    )
+    if not members:
+        try:
+            await query.edit_message_text(
+                f"ℹ️ В турнире <b>{html.escape(t['name'])}</b> пока нет "
+                f"записанных игроков.",
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
+        return
+    kb_rows: list[list[InlineKeyboardButton]] = []
+    text_lines = [
+        f"🏷 <b>Команды в турнире</b> {html.escape(t['name'])} (ID {tid})",
+        "Жми по игроку, чтобы изменить или снять метку.",
+        "",
+    ]
+    for m in members[:50]:
+        tag = (m.get("team_tag") or "").strip()
+        label = format_player_with_tag_html(m, tag)
+        text_lines.append(f"• {label}")
+        btn_label_short = (
+            m.get("username") or m.get("game_nickname") or f"id{m['player_id']}"
+        )
+        if tag:
+            btn_label_short = f"{btn_label_short} • {tag}"
+        if len(btn_label_short) > 50:
+            btn_label_short = btn_label_short[:48] + "…"
+        kb_rows.append([
+            InlineKeyboardButton(
+                f"✏️ {btn_label_short}",
+                callback_data=f"team:edit:{tid}:{m['player_id']}",
+            ),
+        ])
+    if len(members) > 50:
+        text_lines.append(
+            f"\n…ещё {len(members) - 50} игроков. "
+            f"Используй <code>/set_team</code> для остальных."
+        )
+    kb_rows.append([InlineKeyboardButton(
+        "✖️ Закрыть", callback_data="team:close",
+    )])
+    try:
+        await query.edit_message_text(
+            "\n".join(text_lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+        )
+    except TelegramError:
+        pass
+
+
+async def cb_team_buttons(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Callback handler for the "🏷 Команды" picker.
+
+    Layout:
+      ``team:list:<tid>``           — render the list of players + tags.
+      ``team:edit:<tid>:<pid>``     — prompt for a tag (sets pending state).
+      ``team:clear:<tid>:<pid>``    — remove the tag for one player.
+    """
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    await query.answer()
+    user = update.effective_user
+    parts = query.data.split(":")
+    if len(parts) < 3:
+        return
+    sub = parts[1]
+    try:
+        tid = int(parts[2])
+    except ValueError:
+        return
+
+    t = get_tournament(tid)
+    if not t:
+        await query.edit_message_text("❌ Турнир не найден.")
+        return
+    if not _can_manage_tournament(user.id if user else None, t):
+        await query.edit_message_text("❌ Только создатель или админ.")
+        return
+
+    if sub == "list":
+        await _render_team_list(query, ctx, t)
+        return
+
+    if sub == "edit":
+        if len(parts) < 4:
+            return
+        try:
+            pid = int(parts[3])
+        except ValueError:
+            return
+        p = get_player_by_id(pid)
+        if not p:
+            await query.edit_message_text("❌ Игрок не найден.")
+            return
+        cur_tag = db.get_tournament_player_tag(tid, pid)
+        # Stash a "pending team-tag" entry in user_data so the next
+        # plain-text message from this admin in this chat is treated
+        # as the new tag. Cleared on cancel / setting / TTL.
+        ctx.user_data["pending_team_tag"] = {
+            "tid": tid,
+            "pid": pid,
+        }
+        cur_block = (
+            f"\n\nТекущая команда: <b>{html.escape(cur_tag)}</b>"
+            if cur_tag else "\n\nКоманда сейчас не задана."
+        )
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🗑 Снять метку",
+                    callback_data=f"team:clear:{tid}:{pid}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ К списку", callback_data=f"team:list:{tid}",
+                ),
+            ],
+        ])
+        await query.edit_message_text(
+            f"🏷 Меняем команду для "
+            f"<b>{format_player_with_tag_html(p, cur_tag)}</b>.\n"
+            f"Отправь следующим сообщением название команды "
+            f"(например, <code>Германия</code>) — я сохраню."
+            + cur_block,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        return
+
+    if sub == "clear":
+        if len(parts) < 4:
+            return
+        try:
+            pid = int(parts[3])
+        except ValueError:
+            return
+        db.update_tournament_player(tid, pid, team_tag=None)
+        ctx.user_data.pop("pending_team_tag", None)
+        log_tournament_action(
+            tid,
+            actor_telegram_id=user.id if user else None,
+            actor_username=user.username if user else None,
+            action="set_team_tag",
+            details=f"player_id={pid} tag=''",
+        )
+        # Refresh the picker so the change is visible immediately.
+        await _render_team_list(query, ctx, t)
+        return
+
+    if sub == "close":
+        try:
+            await query.edit_message_text("🏷 Закрыто.")
+        except TelegramError:
+            pass
+        return
+
+
+async def handle_pending_team_tag_text(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """If the user is in the "pending team tag" state, treat the next
+    text message as the team name and save it.
+
+    Returns ``True`` if the message was consumed (caller should stop
+    routing it elsewhere), ``False`` otherwise.
+    """
+    pending = (ctx.user_data or {}).get("pending_team_tag")
+    if not pending:
+        return False
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return False
+    text = msg.text.strip()
+    if text.startswith("/"):
+        # User issued another command — drop the pending state.
+        ctx.user_data.pop("pending_team_tag", None)
+        return False
+    user = update.effective_user
+    tid = int(pending.get("tid", 0))
+    pid = int(pending.get("pid", 0))
+    if not tid or not pid:
+        ctx.user_data.pop("pending_team_tag", None)
+        return False
+    t = get_tournament(tid)
+    p = get_player_by_id(pid)
+    if not t or not p:
+        ctx.user_data.pop("pending_team_tag", None)
+        return False
+    if not _can_manage_tournament(user.id if user else None, t):
+        ctx.user_data.pop("pending_team_tag", None)
+        return False
+    new_tag = normalize_team_tag(text)
+    db.update_tournament_player(tid, pid, team_tag=new_tag or None)
+    log_tournament_action(
+        tid,
+        actor_telegram_id=user.id if user else None,
+        actor_username=user.username if user else None,
+        action="set_team_tag",
+        details=f"player_id={pid} tag={new_tag!r}",
+    )
+    ctx.user_data.pop("pending_team_tag", None)
+    if new_tag:
+        await msg.reply_text(
+            f"✅ Команда сохранена: {format_player_with_tag_html(p, new_tag)} "
+            f"в <b>{html.escape(t['name'])}</b>.",
+            parse_mode="HTML",
+        )
+    else:
+        await msg.reply_text(
+            f"✅ Метка команды снята в <b>{html.escape(t['name'])}</b>.",
+            parse_mode="HTML",
+        )
+    return True
 
 
 async def cmd_clear_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2687,15 +3118,43 @@ async def cmd_finish_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    kb = InlineKeyboardMarkup([[
+    # Detect a bronze fixture that's still pending so we can offer the
+    # admin a one-tap "finish + skip bronze" path. ``_third_place_complete``
+    # returns False when there are bronze rows that haven't all been
+    # confirmed yet (None/True mean "no bronze rows" / "fully played").
+    bronze_pending = False
+    try:
+        bronze_pending = _third_place_complete(t["id"], t) is False
+    except Exception:
+        log.exception(
+            "cmd_finish_tournament: third_place state check failed for tid=%s",
+            t["id"],
+        )
+
+    kb_rows = [[
         InlineKeyboardButton("✅ Да, завершить", callback_data=f"fin_t:{t['id']}"),
         InlineKeyboardButton("❌ Отмена",        callback_data="fin_cancel"),
-    ]])
+    ]]
+    if bronze_pending:
+        kb_rows.insert(1, [
+            InlineKeyboardButton(
+                "🥉 Завершить + пропустить бронзу",
+                callback_data=f"fin_t_skip3:{t['id']}",
+            ),
+        ])
+    kb = InlineKeyboardMarkup(kb_rows)
+    extra = ""
+    if bronze_pending:
+        extra = (
+            "\n\n⚠️ Матч за 3-е место ещё не доигран. Если SF-проигравшие "
+            "не сыграют бронзу — нажми «🥉 Завершить + пропустить бронзу», "
+            "чтобы 3-е место было поделено между ними."
+        )
     await update.message.reply_text(
         f"⚠️ Завершить турнир <b>{t['name']}</b> (ID {t['id']}, "
         f"{t_full_label(t)})?\n"
         f"После завершения новые матчи в нём приниматься не будут — "
-        f"только финальный лидерборд.",
+        f"только финальный лидерборд.{extra}",
         parse_mode="HTML",
         reply_markup=kb,
     )
@@ -2707,14 +3166,27 @@ def _do_finish_tournament(tid: int) -> dict | None:
     return get_tournament(tid)
 
 
-def _player_tag(player_id: int | None) -> str:
-    """Render a player id as ``@username`` / nickname / fallback id."""
+def _player_tag(player_id: int | None, *, tid: int | None = None) -> str:
+    """Render a player id as a chat-safe HTML mention.
+
+    When ``tid`` is provided, the per-tournament team tag (from
+    ``tournament_players.team_tag``) is woven into the rendered name
+    so podium / stage announcement messages show
+    ``"phoenileo - Германия (@Phoenileo)"`` for a player tagged with a
+    team.
+    """
     if not player_id:
         return "—"
     p = get_player_by_id(player_id)
     if not p:
         return f"id {player_id}"
-    return mention(p.get("username") or "") or f"id {player_id}"
+    tag = ""
+    if tid is not None:
+        try:
+            tag = db.get_tournament_player_tag(int(tid), int(player_id))
+        except Exception:
+            tag = ""
+    return format_player_with_tag_html(p, tag) or f"id {player_id}"
 
 
 def format_tournament_podium(t: dict) -> str:
@@ -2735,15 +3207,17 @@ def format_tournament_podium(t: dict) -> str:
     podium = get_tournament_podium(tid)
     lines: list[str] = []
     if "first" in podium:
-        lines.append(f"🥇 1-е место: {_player_tag(podium.get('first'))}")
+        lines.append(f"🥇 1-е место: {_player_tag(podium.get('first'), tid=tid)}")
     if "second" in podium:
-        lines.append(f"🥈 2-е место: {_player_tag(podium.get('second'))}")
+        lines.append(f"🥈 2-е место: {_player_tag(podium.get('second'), tid=tid)}")
     if "third" in podium:
-        lines.append(f"🥉 3-е место: {_player_tag(podium.get('third'))}")
+        lines.append(f"🥉 3-е место: {_player_tag(podium.get('third'), tid=tid)}")
         if "fourth" in podium:
-            lines.append(f"4-е место: {_player_tag(podium.get('fourth'))}")
+            lines.append(f"4-е место: {_player_tag(podium.get('fourth'), tid=tid)}")
     elif podium.get("third_tied"):
-        tied = ", ".join(_player_tag(pid) for pid in podium["third_tied"])
+        tied = ", ".join(
+            _player_tag(pid, tid=tid) for pid in podium["third_tied"]
+        )
         lines.append(f"🥉 3-е место (поровну): {tied}")
 
     if lines:
@@ -2757,9 +3231,10 @@ def format_tournament_podium(t: dict) -> str:
     medals = ["🥇 1-е место", "🥈 2-е место", "🥉 3-е место"]
     out: list[str] = []
     for medal, r in zip(medals, rows[:3]):
-        p = get_player_by_id(r["player_id"])
-        tag = mention(p.get("username") or "") if p else f"id {r['player_id']}"
-        out.append(f"{medal}: {tag} — <b>{round(r['elo'])}</b> ELO")
+        out.append(
+            f"{medal}: {_player_tag(r['player_id'], tid=tid)} — "
+            f"<b>{round(r['elo'])}</b> ELO"
+        )
     return "\n".join(out)
 
 
@@ -3625,12 +4100,21 @@ async def cb_finish_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "fin_cancel":
         await query.edit_message_text("❌ Отменено.")
         return
-    if not data.startswith("fin_t:"):
-        return
-    try:
-        tid = int(data.split(":", 1)[1])
-    except ValueError:
-        await query.edit_message_text("❌ Невалидный ID.")
+    skip_bronze = False
+    if data.startswith("fin_t_skip3:"):
+        skip_bronze = True
+        try:
+            tid = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.edit_message_text("❌ Невалидный ID.")
+            return
+    elif data.startswith("fin_t:"):
+        try:
+            tid = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.edit_message_text("❌ Невалидный ID.")
+            return
+    else:
         return
     t = get_tournament(tid)
     if not t:
@@ -3644,6 +4128,26 @@ async def cb_finish_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"ℹ️ Турнир <b>{t['name']}</b> уже был завершён.", parse_mode="HTML"
         )
         return
+
+    # When the admin chose "finish + skip bronze" — wipe the pending
+    # bronze rows first so the podium falls back to "third_tied" before
+    # we flip the stage to 'finished'.
+    if skip_bronze:
+        try:
+            removed = _delete_third_place_rows(tid)
+            update_tournament(tid, playoff_third_place=0)
+            log_tournament_action(
+                tid,
+                actor_telegram_id=update.effective_user.id,
+                actor_username=update.effective_user.username,
+                action="skip_third_place",
+                details=f"removed={removed} (via finish dialog)",
+            )
+        except Exception:
+            log.exception(
+                "cb_finish_tournament: skip-bronze cleanup failed for tid=%s", tid,
+            )
+
     _do_finish_tournament(tid)
     log_tournament_action(
         tid,
@@ -4092,6 +4596,32 @@ async def _handle_tournament_settings_cb(
         )
         return
 
+    if action == "third_skip":
+        # One-tap "cancel the unfinished bronze match" from the
+        # playoff settings panel. Mirrors /skip_third_place.
+        ok, msg, _t = await _skip_third_place_for(
+            ctx, tid, user_id, update.effective_user.username,
+        )
+        # Refresh the panel inline so the admin sees the bronze button
+        # disappear and any "tournament finished" hint show up.
+        t = get_tournament(tid) or t
+        from bot import _submenu_ts_playoff
+        try:
+            await query.edit_message_text(
+                f"🏆 <b>Плей-офф и формат</b> — {html.escape(t['name'])} (ID {tid})",
+                parse_mode="HTML",
+                reply_markup=_submenu_ts_playoff(t),
+            )
+        except TelegramError:
+            pass
+        # Also send the human-readable result as a follow-up so the
+        # admin gets the explicit "✅ ..." / "ℹ️ ..." confirmation.
+        try:
+            await query.message.reply_text(msg, parse_mode="HTML")
+        except TelegramError:
+            pass
+        return
+
     if action == "pen":
         new_val = 0 if int(t.get("playoff_penalties") or 0) else 1
         update_tournament(tid, playoff_penalties=new_val)
@@ -4244,6 +4774,113 @@ async def _handle_tournament_settings_cb(
             f"🔔 <b>Напоминания</b> — {html.escape(t['name'])} (ID {tid})",
             parse_mode="HTML",
             reply_markup=_submenu_ts_remind(t),
+        )
+        return
+
+    # ── Signup reminder settings ─────────────────────────────────────
+    # ``ts:remsignup`` opens a quick picker for the cadence (in
+    # minutes); selecting an entry writes ``signup_reminder_minutes``.
+    # ``ts:remsignup_link`` / ``ts:remsignup_deadline`` give admins
+    # quick instructions to set / clear the link and deadline via
+    # plain commands, since asking them to type a URL through inline
+    # buttons would be awkward.
+    if action == "remsignup":
+        cur = int(t.get("signup_reminder_minutes") or 0)
+        cur_lbl = "выкл" if cur <= 0 else f"{cur} мин"
+        opts = [
+            ("выкл",  f"ts:remsignup_set:{tid}:0"),
+            ("15м",   f"ts:remsignup_set:{tid}:15"),
+            ("30м",   f"ts:remsignup_set:{tid}:30"),
+            ("60м",   f"ts:remsignup_set:{tid}:60"),
+            ("3ч",    f"ts:remsignup_set:{tid}:180"),
+            ("6ч",    f"ts:remsignup_set:{tid}:360"),
+            ("12ч",   f"ts:remsignup_set:{tid}:720"),
+            ("24ч",   f"ts:remsignup_set:{tid}:1440"),
+        ]
+        await query.edit_message_text(
+            f"📣 Как часто напоминать в чате о записи на турнир?\n"
+            f"Текущее: <b>{cur_lbl}</b>\n"
+            f"Точное значение можно задать командой "
+            f"<code>/set_signup_reminder {tid} &lt;минут&gt;</code>.",
+            parse_mode="HTML",
+            reply_markup=_picker("remsignup", opts),
+        )
+        return
+    if action == "remsignup_set":
+        try:
+            m = int(parts[3])
+        except (ValueError, IndexError):
+            m = 0
+        m = max(0, min(10080, m))
+        update_tournament(tid, signup_reminder_minutes=m)
+        t = get_tournament(tid)
+        from bot import _submenu_ts_remind
+        await query.edit_message_text(
+            f"🔔 <b>Напоминания</b> — {html.escape(t['name'])} (ID {tid})",
+            parse_mode="HTML",
+            reply_markup=_submenu_ts_remind(t),
+        )
+        if m > 0 and not t.get("chat_id"):
+            try:
+                await query.message.reply_text(
+                    "ℹ️ Напоминалка о записи включена, но к турниру ещё не "
+                    f"привязан чат. Зайди в нужный чат и выполни "
+                    f"<code>/bind_tournament {tid}</code>.",
+                    parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
+        return
+
+    if action == "remsignup_link":
+        link_raw = (t.get("signup_link") or "").strip()
+        if link_raw:
+            cur_block = (
+                f"\nТекущая ссылка/текст:\n<code>"
+                f"{html.escape(link_raw)}</code>"
+            )
+        else:
+            cur_block = "\nСейчас ссылка не задана."
+        await query.edit_message_text(
+            f"🔗 <b>Ссылка / текст для записи</b> — {html.escape(t['name'])}\n"
+            f"Используй команды:\n"
+            f"  • <code>/set_signup_link {tid} &lt;url или текст&gt;</code>\n"
+            f"  • <code>/clear_signup_link {tid}</code>"
+            + cur_block,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "⬅️ Назад", callback_data=f"ts:open:{tid}",
+                ),
+            ]]),
+        )
+        return
+
+    if action == "remsignup_deadline":
+        from handlers.common import _fmt_minute_local, _tz_label  # local: avoid cycle
+        raw_dl = t.get("signup_deadline_at")
+        if raw_dl:
+            try:
+                cur_block = (
+                    f"\nТекущий дедлайн: <b>"
+                    f"{_fmt_minute_local(raw_dl)} {_tz_label()}</b>"
+                )
+            except Exception:
+                cur_block = f"\nТекущий дедлайн: <b>{html.escape(str(raw_dl))}</b>"
+        else:
+            cur_block = "\nДедлайн записи не задан."
+        await query.edit_message_text(
+            f"📅 <b>Дедлайн записи</b> — {html.escape(t['name'])}\n"
+            f"Используй команды:\n"
+            f"  • <code>/set_signup_deadline {tid} YYYY-MM-DD HH:MM</code>\n"
+            f"  • <code>/clear_signup_deadline {tid}</code>"
+            + cur_block,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "⬅️ Назад", callback_data=f"ts:open:{tid}",
+                ),
+            ]]),
         )
         return
 
@@ -5168,6 +5805,187 @@ async def cmd_set_third_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _delete_third_place_rows(tid: int) -> int:
+    """Hard-delete every ``stage='third'`` match row for ``tid``.
+
+    Returns the number of rows that were removed. Used by
+    ``/skip_third_place`` and the "finish + skip bronze" button so
+    ``get_tournament_podium`` falls back to ``third_tied`` (the two SF
+    losers) instead of seeing half-confirmed bronze rows.
+    """
+    conn = db.get_conn()
+    cur = conn.execute(
+        "DELETE FROM matches WHERE tournament_id=? AND stage=?",
+        (tid, THIRD_PLACE_STAGE),
+    )
+    removed = int(getattr(cur, "rowcount", 0) or 0)
+    conn.commit()
+    conn.close()
+    return removed
+
+
+async def _skip_third_place_for(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    tid: int,
+    actor_telegram_id: int | None,
+    actor_username: str | None,
+) -> tuple[bool, str, dict | None]:
+    """Cancel the optional 3rd-place fixture for ``tid``.
+
+    Behaviour:
+      * If the bronze series is already fully confirmed
+        (``_third_place_complete is True``) the call is a no-op and
+        returns ``(False, "...", t)`` so the caller can render an
+        info message.
+      * Otherwise every ``stage='third'`` row is hard-deleted, the
+        tournament's ``playoff_third_place`` flag is set to 0 (so a
+        future ``advance_playoff`` doesn't re-spawn the fixture), and
+        ``advance_playoff`` is invoked. If the final has already been
+        confirmed, the tournament flips to ``stage='finished'``
+        immediately and a chat broadcast (``_announce_stage_advance``
+        with ``"finished"``) is posted.
+
+    Returns ``(ok, human_text, tournament)`` where ``human_text`` is
+    a Russian message ready to be shown to the actor.
+    """
+    t = get_tournament(tid)
+    if not t:
+        return False, f"❌ Турнир {tid} не найден.", None
+    if t.get("stage") == "finished":
+        # Tournament already closed — nothing to advance, but the
+        # bronze rows might still be hanging around. Best-effort cleanup
+        # so podium switches to ``third_tied`` retroactively.
+        removed = _delete_third_place_rows(tid)
+        update_tournament(tid, playoff_third_place=0)
+        log_tournament_action(
+            tid,
+            actor_telegram_id=actor_telegram_id,
+            actor_username=actor_username,
+            action="skip_third_place",
+            details=f"removed={removed} (tournament already finished)",
+        )
+        return (
+            True,
+            f"✅ Матч за 3-е место в турнире "
+            f"<b>{html.escape(t['name'])}</b> отменён "
+            f"(удалено строк: {removed}). Турнир уже был завершён — "
+            f"итог обновится при следующем просмотре.",
+            t,
+        )
+
+    state = _third_place_complete(tid, t)
+    if state is True:
+        return (
+            False,
+            f"ℹ️ Матч за 3-е место в турнире "
+            f"<b>{html.escape(t['name'])}</b> уже сыгран — отменять нечего.",
+            t,
+        )
+
+    removed = _delete_third_place_rows(tid)
+    # Disable so a later ``advance_playoff`` (e.g. when SF gets re-checked)
+    # doesn't immediately re-spawn the bronze fixture.
+    update_tournament(tid, playoff_third_place=0)
+    log_tournament_action(
+        tid,
+        actor_telegram_id=actor_telegram_id,
+        actor_username=actor_username,
+        action="skip_third_place",
+        details=f"removed={removed}",
+    )
+
+    # Try to push the bracket forward — if the final is already
+    # confirmed, this flips stage='finished'. Swallow exceptions so a
+    # bracket-state edge case doesn't block the caller's response.
+    advanced_to: str | None = None
+    try:
+        advanced_to = advance_playoff(tid)
+    except Exception:
+        log.exception("skip_third_place: advance_playoff(%s) failed", tid)
+
+    if advanced_to == "finished":
+        try:
+            await _announce_stage_advance(ctx, tid, "finished")
+        except Exception:
+            log.exception(
+                "skip_third_place: announce(finished) failed for tid=%s", tid,
+            )
+        return (
+            True,
+            f"✅ Матч за 3-е место отменён, турнир "
+            f"<b>{html.escape(t['name'])}</b> завершён. "
+            f"3-е место поделят полуфиналисты-проигравшие.",
+            get_tournament(tid),
+        )
+
+    return (
+        True,
+        f"✅ Матч за 3-е место в турнире "
+        f"<b>{html.escape(t['name'])}</b> отменён "
+        f"(удалено строк: {removed}). Турнир продолжается; финал ещё "
+        f"не сыгран — он закроется обычным порядком.",
+        get_tournament(tid),
+    )
+
+
+async def cmd_skip_third_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /skip_third_place [tournament_id]
+    /cancel_third_place [tournament_id]
+
+    Cancel the bronze (3rd-place) fixture so a stuck tournament can be
+    closed even when the SF losers refuse to play it. Equivalent to
+    ``/set_third_place off`` PLUS hard-deleting the already-spawned
+    ``stage='third'`` rows. If the final is already confirmed, the
+    tournament is flipped to ``finished`` immediately and the podium
+    switches to "3-е место (поровну)" between the two SF losers.
+
+    Without a ``tournament_id`` argument, falls back to the chat-bound
+    tournament (when invoked in a chat with ``/bind_tournament``).
+    """
+    user = update.effective_user
+    tid: int | None = None
+    if ctx.args:
+        try:
+            tid = int(ctx.args[0].lstrip("#"))
+        except ValueError:
+            await send(
+                update,
+                "Использование: <code>/skip_third_place &lt;ID&gt;</code> "
+                "(или просто <code>/skip_third_place</code> в чате, "
+                "привязанном к турниру).",
+            )
+            return
+
+    t: dict | None = None
+    if tid is not None:
+        t = get_tournament(tid)
+    else:
+        chat = update.effective_chat
+        if chat:
+            t = get_tournament_by_chat(chat.id)
+        if t is None:
+            t = get_active_tournament()
+    if not t:
+        await send(
+            update,
+            "❌ Не нашёл турнир. Укажи ID: "
+            "<code>/skip_third_place &lt;ID&gt;</code>.",
+        )
+        return
+    if not _can_manage_tournament(user.id, t):
+        await send(
+            update,
+            "❌ Отменить матч за 3-е место может только создатель или админ.",
+        )
+        return
+
+    ok, msg, _t = await _skip_third_place_for(
+        ctx, int(t["id"]), user.id, user.username,
+    )
+    await send(update, msg)
+
+
 async def cmd_set_penalties(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
     /set_penalties <tournament_id> on|off
@@ -5492,6 +6310,320 @@ async def cmd_set_reminders(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
     await send(update, "❌ Неизвестная подкоманда. См. <code>/set_reminders</code>.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Signup-phase reminders: per-tournament cadence (minutes), optional
+# admin-supplied registration link, optional signup deadline.
+# Wires into the ``signup_reminder_minutes`` / ``signup_link`` /
+# ``signup_deadline_at`` columns; the bot's reminder loop reads these
+# every 15 min and posts in the bound chat while signups are open.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_set_signup_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /set_signup_reminder <tournament_id> <minutes>
+
+    Set how often the bot reminds the tournament's bound chat that
+    signup is open. ``0`` disables the reminder. Cap is 7 days
+    (10080 min) so a typo doesn't silently wipe the cadence.
+
+    Without a tournament id (when invoked in a chat bound to a
+    tournament) the chat-bound tournament is used; in that case
+    ``minutes`` is the only argument.
+    """
+    user = update.effective_user
+    args = ctx.args or []
+
+    # Parse: either "<tid> <min>" or just "<min>" inside a bound chat.
+    tid: int | None = None
+    minutes: int | None = None
+    if len(args) >= 2:
+        try:
+            tid = int(args[0].lstrip("#"))
+            minutes = int(args[1])
+        except ValueError:
+            tid = None
+            minutes = None
+    elif len(args) == 1:
+        # Maybe just minutes — needs a chat-bound tournament.
+        try:
+            minutes = int(args[0])
+        except ValueError:
+            minutes = None
+
+    if minutes is None:
+        await send(
+            update,
+            "Использование:\n"
+            "  <code>/set_signup_reminder &lt;ID&gt; &lt;минут&gt;</code>\n"
+            "  <code>/set_signup_reminder &lt;минут&gt;</code> — в "
+            "привязанном чате\n"
+            "  <code>0</code> = выключить.",
+        )
+        return
+    if tid is None:
+        chat = update.effective_chat
+        if chat is not None:
+            bound = get_tournament_by_chat(chat.id)
+            if bound:
+                tid = int(bound["id"])
+    if tid is None:
+        await send(
+            update,
+            "❌ Укажи ID турнира: <code>/set_signup_reminder &lt;ID&gt; "
+            "&lt;минут&gt;</code> или вызови команду в привязанном чате.",
+        )
+        return
+    t = get_tournament(tid)
+    if not t:
+        await send(update, f"❌ Турнир {tid} не найден.")
+        return
+    if not _can_manage_tournament(user.id, t):
+        await send(update, "❌ Только создатель турнира или админ.")
+        return
+    if minutes < 0:
+        minutes = 0
+    if minutes > 10080:
+        minutes = 10080
+    update_tournament(tid, signup_reminder_minutes=minutes)
+    if minutes == 0:
+        await send(
+            update,
+            f"✅ Напоминания о записи в <b>{html.escape(t['name'])}</b> "
+            f"<b>выключены</b>.",
+        )
+    else:
+        msg = (
+            f"✅ Напоминания о записи в <b>{html.escape(t['name'])}</b> — "
+            f"каждые <b>{minutes}</b> мин."
+        )
+        if not t.get("chat_id"):
+            msg += (
+                "\n⚠️ Чат к турниру не привязан — выполни "
+                "<code>/bind_tournament</code> в нужном чате, "
+                "иначе напоминания не отправятся."
+            )
+        await send(update, msg)
+
+
+async def cmd_set_signup_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /set_signup_link <tournament_id> <url-or-text...>
+
+    Set the registration link / instructions text shown in every
+    signup reminder. The argument is taken verbatim — admins paste
+    Google Form URLs, ``@username`` contacts, free-form Russian
+    prose, whatever. Limit 500 chars.
+
+    Without a tournament id (in a chat bound to a tournament) the
+    chat-bound tournament is used. Pass an empty argument or
+    ``/clear_signup_link <tid>`` to remove.
+    """
+    user = update.effective_user
+    args = ctx.args or []
+    tid: int | None = None
+    link_parts: list[str] = []
+
+    if args:
+        head = args[0]
+        if head.lstrip("#").isdigit():
+            tid = int(head.lstrip("#"))
+            link_parts = list(args[1:])
+        else:
+            link_parts = list(args)
+    if tid is None:
+        chat = update.effective_chat
+        if chat is not None:
+            bound = get_tournament_by_chat(chat.id)
+            if bound:
+                tid = int(bound["id"])
+    if tid is None:
+        await send(
+            update,
+            "Использование: "
+            "<code>/set_signup_link &lt;ID&gt; &lt;ссылка/текст&gt;</code>\n"
+            "В привязанном чате ID можно опустить.",
+        )
+        return
+    t = get_tournament(tid)
+    if not t:
+        await send(update, f"❌ Турнир {tid} не найден.")
+        return
+    if not _can_manage_tournament(user.id, t):
+        await send(update, "❌ Только создатель турнира или админ.")
+        return
+
+    raw = " ".join(link_parts).strip()
+    if len(raw) > 500:
+        raw = raw[:500].rstrip()
+    update_tournament(tid, signup_link=raw or None)
+    if raw:
+        await send(
+            update,
+            f"✅ Ссылка для записи в <b>{html.escape(t['name'])}</b> "
+            f"сохранена:\n{html.escape(raw)}",
+        )
+    else:
+        await send(
+            update,
+            f"✅ Ссылка для записи в <b>{html.escape(t['name'])}</b> очищена.",
+        )
+
+
+async def cmd_clear_signup_link(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /clear_signup_link [tournament_id] — drop the registration link.
+
+    Convenience wrapper around ``/set_signup_link`` with an empty
+    payload. Falls back to the chat-bound tournament when no ID is
+    provided.
+    """
+    # Reuse the setter's argument parsing by clearing ctx.args to
+    # "<tid>" (or nothing in a bound chat).
+    user = update.effective_user
+    args = ctx.args or []
+    tid: int | None = None
+    if args and args[0].lstrip("#").isdigit():
+        tid = int(args[0].lstrip("#"))
+    if tid is None:
+        chat = update.effective_chat
+        if chat is not None:
+            bound = get_tournament_by_chat(chat.id)
+            if bound:
+                tid = int(bound["id"])
+    if tid is None:
+        await send(
+            update,
+            "Использование: <code>/clear_signup_link &lt;ID&gt;</code> "
+            "или вызови в привязанном чате.",
+        )
+        return
+    t = get_tournament(tid)
+    if not t:
+        await send(update, f"❌ Турнир {tid} не найден.")
+        return
+    if not _can_manage_tournament(user.id, t):
+        await send(update, "❌ Только создатель турнира или админ.")
+        return
+    update_tournament(tid, signup_link=None)
+    await send(
+        update,
+        f"✅ Ссылка для записи в <b>{html.escape(t['name'])}</b> очищена.",
+    )
+
+
+async def cmd_set_signup_deadline(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /set_signup_deadline <tournament_id> <YYYY-MM-DD HH:MM>
+
+    Set the displayed registration deadline (informational — does NOT
+    auto-close signup). The deadline is shown verbatim in every signup
+    reminder. Stored as UTC string in ``signup_deadline_at``.
+    """
+    user = update.effective_user
+    args = ctx.args or []
+    if not args:
+        await send(
+            update,
+            "Использование: "
+            "<code>/set_signup_deadline &lt;ID&gt; &lt;YYYY-MM-DD HH:MM&gt;</code>\n"
+            "В привязанном чате ID можно опустить.",
+        )
+        return
+
+    tid: int | None = None
+    raw_parts: list[str] = []
+    if args[0].lstrip("#").isdigit():
+        tid = int(args[0].lstrip("#"))
+        raw_parts = list(args[1:])
+    else:
+        raw_parts = list(args)
+    if tid is None:
+        chat = update.effective_chat
+        if chat is not None:
+            bound = get_tournament_by_chat(chat.id)
+            if bound:
+                tid = int(bound["id"])
+    if tid is None:
+        await send(
+            update,
+            "❌ Укажи ID турнира или вызови команду в привязанном чате.",
+        )
+        return
+    t = get_tournament(tid)
+    if not t:
+        await send(update, f"❌ Турнир {tid} не найден.")
+        return
+    if not _can_manage_tournament(user.id, t):
+        await send(update, "❌ Только создатель турнира или админ.")
+        return
+
+    raw = " ".join(raw_parts).strip()
+    if not raw:
+        await send(
+            update,
+            "❌ Дата не указана. Пример: <code>2026-06-15 21:00</code>",
+        )
+        return
+    parsed = None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            break
+        except ValueError:
+            continue
+    if not parsed:
+        await send(
+            update,
+            "❌ Не понял дату. Примеры: "
+            "<code>2026-06-15 21:00</code>, <code>15.06.2026 21:00</code>",
+        )
+        return
+    utc_str = _local_to_utc_str(parsed)
+    update_tournament(tid, signup_deadline_at=utc_str)
+    await send(
+        update,
+        f"✅ Дедлайн записи в <b>{html.escape(t['name'])}</b>: "
+        f"<b>{parsed.strftime('%Y-%m-%d %H:%M')}</b> {_tz_label()}.",
+    )
+
+
+async def cmd_clear_signup_deadline(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /clear_signup_deadline [tournament_id] — remove the signup deadline.
+    """
+    user = update.effective_user
+    args = ctx.args or []
+    tid: int | None = None
+    if args and args[0].lstrip("#").isdigit():
+        tid = int(args[0].lstrip("#"))
+    if tid is None:
+        chat = update.effective_chat
+        if chat is not None:
+            bound = get_tournament_by_chat(chat.id)
+            if bound:
+                tid = int(bound["id"])
+    if tid is None:
+        await send(
+            update,
+            "Использование: <code>/clear_signup_deadline &lt;ID&gt;</code> "
+            "или вызови в привязанном чате.",
+        )
+        return
+    t = get_tournament(tid)
+    if not t:
+        await send(update, f"❌ Турнир {tid} не найден.")
+        return
+    if not _can_manage_tournament(user.id, t):
+        await send(update, "❌ Только создатель турнира или админ.")
+        return
+    update_tournament(tid, signup_deadline_at=None)
+    await send(
+        update,
+        f"✅ Дедлайн записи в <b>{html.escape(t['name'])}</b> снят.",
+    )
 
 
 async def cmd_advance_playoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -5821,11 +6953,23 @@ __all__ = [
     '_bool_arg',
     'cmd_set_auto_confirm',
     'cmd_set_third_place',
+    'cmd_skip_third_place',
+    '_skip_third_place_for',
+    '_delete_third_place_rows',
+    'cmd_set_team',
+    'cmd_myteam',
+    'cb_team_buttons',
+    'handle_pending_team_tag_text',
     'cmd_set_penalties',
     'cmd_set_matches_per_pair',
     'cmd_set_overlay',
     'cmd_set_row_alpha',
     'cmd_set_reminders',
+    'cmd_set_signup_reminder',
+    'cmd_set_signup_link',
+    'cmd_clear_signup_link',
+    'cmd_set_signup_deadline',
+    'cmd_clear_signup_deadline',
     'cmd_advance_playoff',
     'cmd_prune_phantoms',
     'cmd_fill_missing_matches',

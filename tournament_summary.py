@@ -86,20 +86,71 @@ def _stage_label(stage: str) -> str:
     return _STAGE_LABELS_RU.get(stage, stage.upper())
 
 
+# ── Per-render team-tag cache ───────────────────────────────────────────────
+# Mirrors the same approach used in ``playoff_image``. Populated by
+# ``compute_tournament_summary(tid)`` and consumed by every
+# ``_player_label*`` call so the produced ``.txt`` / Telegra.ph blocks
+# include team tags ("phoenileo - Германия (@Phoenileo)") wherever a
+# player name appears, without us having to thread a tag map through
+# every helper.
+_TAG_BY_PID: dict[int, str] = {}
+
+
+def _load_tag_map(tid: int) -> None:
+    """Refresh ``_TAG_BY_PID`` with the per-tournament team tags."""
+    _TAG_BY_PID.clear()
+    try:
+        rows = db.get_tournament_players(tid)
+    except Exception:
+        return
+    for r in rows:
+        pid = r.get("player_id")
+        tag = (r.get("team_tag") or "").strip()
+        if isinstance(pid, int) and tag:
+            _TAG_BY_PID[pid] = tag
+
+
 def _player_label(p: dict | None) -> str:
-    """Human-readable @username (preferred), nickname, or fallback id.
-    Never returns an empty string — always something the user can map to
-    a real participant.
+    """Human-readable name. Prefers ``"<nick> - <Team> (@user)"`` when a
+    per-tournament team tag is registered for the player (via the
+    ``_TAG_BY_PID`` cache populated at the top of
+    ``compute_tournament_summary``); falls back through ``@username``,
+    nickname and synthetic-id-aware shortenings.
+
+    Never returns an empty string — always something the user can map
+    to a real participant.
     """
     if not p:
         return "—"
-    u = (p.get("username") or "").strip()
-    if u:
-        return f"@{u}"
-    nick = (p.get("game_nickname") or "").strip()
-    if nick:
-        return nick
     pid = p.get("id") or p.get("player_id")
+    tag = ""
+    if isinstance(pid, int):
+        tag = _TAG_BY_PID.get(pid, "") or ""
+    nick = (p.get("game_nickname") or "").strip()
+    user = (p.get("username") or "").strip()
+    # Hide synthetic ``id_<digits>`` placeholder usernames the same way
+    # the standings / bracket renderers do.
+    if user and user.lower().startswith("id_") and user[3:].isdigit():
+        synth = nick or user.lower().replace("id_", "id ", 1)
+        return f"{synth} - {tag}" if tag else synth
+    if user and nick:
+        # When no tag is set, drop the nickname if it duplicates the
+        # username case-insensitively (avoids "phoenileo (@phoenileo)").
+        # When a tag IS set, always keep both so the team affiliation
+        # has clear context: "phoenileo - Германия (@Phoenileo)".
+        if tag:
+            return f"{nick} - {tag} (@{user})"
+        if nick.lower() == user.lower():
+            return f"@{user}"
+        return f"{nick} (@{user})"
+    if user:
+        if tag:
+            return f"{tag} (@{user})"
+        return f"@{user}"
+    if nick:
+        return f"{nick} - {tag}" if tag else nick
+    if tag:
+        return tag
     return f"id{pid}" if pid else "—"
 
 
@@ -693,6 +744,10 @@ def compute_tournament_summary(tid: int) -> dict | None:
     t = db.get_tournament(tid)
     if not t:
         return None
+
+    # Load per-tournament team tags before any ``_player_label`` call —
+    # the cache is consumed implicitly by the label helper.
+    _load_tag_map(tid)
 
     players = db.get_tournament_players(tid)
     confirmed = _confirmed_matches(tid)
