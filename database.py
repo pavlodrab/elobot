@@ -102,6 +102,21 @@ __all__ = [
     "list_tournament_audit_log",
     "get_recent_tournaments",
     "get_audit_distinct_actors",
+    # Player titles / awards
+    "add_player_title",
+    "list_player_titles",
+    "remove_player_title_by_text",
+    "player_title_strings",
+    # Quotes & per-chat settings
+    "add_quote",
+    "list_quotes",
+    "get_quote",
+    "random_quote_for_chat",
+    "delete_quote",
+    "get_chat_settings",
+    "set_chat_quote_interval",
+    "mark_chat_quote_sent",
+    "list_chats_with_quote_interval",
 ]
 
 
@@ -770,6 +785,64 @@ def init_db():
         c.execute(
             "ALTER TABLE tournament_players ADD COLUMN team_tag TEXT"
         )
+
+    # ── Player titles / awards (2026-05) ─────────────────────────────────
+    # Free-form titles awarded to players by admins. Multiple titles per
+    # player allowed (granted_at orders the list). Shown in /profile and
+    # in text-table / tablebomb listings as a small badge after the name.
+    # ``title`` is admin-typed text including any emojis they want
+    # (e.g. "🐐 GOAT" or "Чемпион №1"); ``note`` is an optional reason.
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS player_titles (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id     INTEGER NOT NULL,
+            title         TEXT NOT NULL,
+            granted_by    INTEGER,
+            granted_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            note          TEXT,
+            FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE
+        )
+        """
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_player_titles_player "
+        "ON player_titles(player_id)"
+    )
+
+    # ── Quotes & per-chat quote settings (2026-05) ───────────────────────
+    # User-submitted quotations the bot rotates through every N minutes
+    # in chats that opt in via /set_quote_interval. ``author`` is the
+    # *attribution* (free-form text — "Pep", "@somebody", "Народная
+    # мудрость"); ``added_by`` is the player_id of the registered user
+    # who submitted the quote (for /delquote / audit).
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS quotes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id     TEXT,
+            text        TEXT NOT NULL,
+            author      TEXT,
+            added_by    INTEGER,
+            added_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_quotes_chat ON quotes(chat_id)"
+    )
+
+    # Per-chat settings (interval in minutes for the quote loop, 0 =
+    # disabled; ``last_quote_at`` is updated by the job to throttle).
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_settings (
+            chat_id                  TEXT PRIMARY KEY,
+            quote_interval_minutes   INTEGER NOT NULL DEFAULT 0,
+            last_quote_at            DATETIME
+        )
+        """
+    )
 
     conn.commit()
     conn.close()
@@ -2878,6 +2951,242 @@ def get_h2h_matches(player_a_id: int, player_b_id: int) -> list[dict]:
             int(player_a_id), int(player_b_id),
             int(player_b_id), int(player_a_id),
         ),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+
+# ── Player titles / awards ───────────────────────────────────────────────────
+
+def add_player_title(
+    player_id: int,
+    title: str,
+    *,
+    granted_by: int | None = None,
+    note: str | None = None,
+) -> int:
+    """Insert a new title for ``player_id``. Returns the new row id.
+
+    Multiple identical titles are allowed (admin can re-award the same
+    title with a different note). Use ``remove_player_title`` to drop
+    by id, or ``remove_player_title_by_text`` to drop by exact title
+    match.
+    """
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("title is required")
+    conn = get_conn()
+    new_id = conn.insert_returning_id(
+        "INSERT INTO player_titles (player_id, title, granted_by, note) "
+        "VALUES (?, ?, ?, ?)",
+        (int(player_id), title[:120], granted_by, note),
+    )
+    conn.commit()
+    conn.close()
+    return int(new_id)
+
+
+def list_player_titles(player_id: int) -> list[dict]:
+    """Return every title for ``player_id`` in newest-first order."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, player_id, title, granted_by, granted_at, note "
+        "FROM player_titles WHERE player_id=? "
+        "ORDER BY granted_at DESC, id DESC",
+        (int(player_id),),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def remove_player_title_by_text(player_id: int, title: str) -> int:
+    """Delete every row of ``player_titles`` for ``(player_id, title)``.
+
+    Match is case-insensitive (Python ``str.lower()`` so Cyrillic works
+    correctly — the SQLite ``LOWER()`` builtin only handles ASCII).
+    Returns the number of rows removed (0 if no such title was on the
+    player).
+    """
+    title_norm = (title or "").strip().lower()
+    if not title_norm:
+        return 0
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, title FROM player_titles WHERE player_id=?",
+        (int(player_id),),
+    ).fetchall()
+    ids_to_remove = [
+        r["id"] for r in rows
+        if (r["title"] or "").strip().lower() == title_norm
+    ]
+    removed = 0
+    for tid_row in ids_to_remove:
+        conn.execute(
+            "DELETE FROM player_titles WHERE id=?", (int(tid_row),),
+        )
+        removed += 1
+    conn.commit()
+    conn.close()
+    return removed
+
+
+def player_title_strings(player_id: int) -> list[str]:
+    """Return just the title text for ``player_id`` — convenience helper
+    for renderers that build ``"<nick> [🐐 GOAT, Чемпион]"`` lines."""
+    return [t["title"] for t in list_player_titles(player_id)]
+
+
+# ── Quotes & per-chat settings ──────────────────────────────────────────────
+
+def add_quote(
+    text: str,
+    *,
+    author: str | None = None,
+    chat_id: str | None = None,
+    added_by: int | None = None,
+) -> int:
+    """Persist a new quote. Returns the row id."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("text is required")
+    conn = get_conn()
+    new_id = conn.insert_returning_id(
+        "INSERT INTO quotes (chat_id, text, author, added_by) "
+        "VALUES (?, ?, ?, ?)",
+        (
+            str(chat_id) if chat_id is not None else None,
+            text[:2000],
+            (author or "").strip()[:120] or None,
+            added_by,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return int(new_id)
+
+
+def list_quotes(
+    chat_id: str | int | None = None, limit: int = 30,
+) -> list[dict]:
+    """List quotes for ``chat_id`` (or all chats when None), newest first."""
+    conn = get_conn()
+    if chat_id is not None:
+        rows = conn.execute(
+            "SELECT id, chat_id, text, author, added_by, added_at "
+            "FROM quotes WHERE chat_id=? "
+            "ORDER BY id DESC LIMIT ?",
+            (str(chat_id), int(limit)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, chat_id, text, author, added_by, added_at "
+            "FROM quotes ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_quote(quote_id: int) -> dict | None:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM quotes WHERE id=?", (int(quote_id),),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def random_quote_for_chat(chat_id: str | int) -> dict | None:
+    """Pick a uniformly random quote for the chat. Returns None if
+    none exist for this chat (and the bot won't post anything)."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id, chat_id, text, author, added_by, added_at "
+        "FROM quotes WHERE chat_id=? "
+        "ORDER BY RANDOM() LIMIT 1",
+        (str(chat_id),),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def delete_quote(quote_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.execute(
+        "DELETE FROM quotes WHERE id=?", (int(quote_id),),
+    )
+    removed = bool(getattr(cur, "rowcount", 0) or 0)
+    conn.commit()
+    conn.close()
+    return removed
+
+
+def get_chat_settings(chat_id: str | int) -> dict:
+    """Fetch the chat_settings row for ``chat_id`` (creating defaults
+    when missing)."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM chat_settings WHERE chat_id=?",
+        (str(chat_id),),
+    ).fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return {
+        "chat_id": str(chat_id),
+        "quote_interval_minutes": 0,
+        "last_quote_at": None,
+    }
+
+
+def set_chat_quote_interval(chat_id: str | int, minutes: int) -> None:
+    """Upsert ``quote_interval_minutes`` for ``chat_id``."""
+    minutes = max(0, int(minutes))
+    conn = get_conn()
+    # Try update first; if no row, insert.
+    cur = conn.execute(
+        "UPDATE chat_settings SET quote_interval_minutes=? WHERE chat_id=?",
+        (minutes, str(chat_id)),
+    )
+    if not getattr(cur, "rowcount", 0):
+        conn.execute(
+            "INSERT INTO chat_settings (chat_id, quote_interval_minutes) "
+            "VALUES (?, ?)",
+            (str(chat_id), minutes),
+        )
+    conn.commit()
+    conn.close()
+
+
+def mark_chat_quote_sent(chat_id: str | int) -> None:
+    """Update ``last_quote_at`` to UTC-now after the bot posts a quote
+    so the loop throttles correctly."""
+    from datetime import datetime as _dt  # local import: keep helper standalone
+    conn = get_conn()
+    now = _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute(
+        "UPDATE chat_settings SET last_quote_at=? WHERE chat_id=?",
+        (now, str(chat_id)),
+    )
+    if not getattr(cur, "rowcount", 0):
+        conn.execute(
+            "INSERT INTO chat_settings "
+            "(chat_id, quote_interval_minutes, last_quote_at) "
+            "VALUES (?, 0, ?)",
+            (str(chat_id), now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def list_chats_with_quote_interval() -> list[dict]:
+    """All chats with ``quote_interval_minutes > 0``. Used by the
+    background quote loop."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT chat_id, quote_interval_minutes, last_quote_at "
+        "FROM chat_settings WHERE quote_interval_minutes > 0"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]

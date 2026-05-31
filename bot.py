@@ -219,6 +219,9 @@ from handlers.admin import (  # noqa: E402
     cmd_elo,
     cmd_give_owner,
     cmd_grant_admin,
+    cmd_award,
+    cmd_revoke_award,
+    cmd_awards,
     cmd_owners,
     cmd_remove_tadmin,
     cmd_revoke_admin,
@@ -682,13 +685,14 @@ M_PROFILE     = "👤 Профиль"
 M_REPORT      = "📨 Репорт"
 M_TOP         = "📊 Топ"
 M_SETTINGS    = "🔧 Настройки"
+M_QUOTES      = "💬 Цитаты"
 M_FEEDBACK    = "🐞 Связь"
 M_ADMIN       = "👮 Админ"
 M_HELP        = "ℹ️ Помощь"
 
 MENU_LABELS = {
     M_TOURNAMENTS, M_PROFILE, M_REPORT, M_TOP,
-    M_SETTINGS, M_FEEDBACK, M_ADMIN, M_HELP,
+    M_SETTINGS, M_QUOTES, M_FEEDBACK, M_ADMIN, M_HELP,
 }
 
 
@@ -697,7 +701,8 @@ def main_menu_kb(user_id: int | None = None) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(M_TOURNAMENTS), KeyboardButton(M_PROFILE)],
         [KeyboardButton(M_REPORT),      KeyboardButton(M_TOP)],
-        [KeyboardButton(M_SETTINGS),    KeyboardButton(M_FEEDBACK)],
+        [KeyboardButton(M_SETTINGS),    KeyboardButton(M_QUOTES)],
+        [KeyboardButton(M_FEEDBACK)],
     ]
     if user_id is not None and is_admin(user_id):
         rows.append([KeyboardButton(M_ADMIN), KeyboardButton(M_HELP)])
@@ -757,6 +762,9 @@ def main_menu_inline_kb(user_id: int | None = None) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(M_SETTINGS,    callback_data="gmenu:settings"),
+            InlineKeyboardButton(M_QUOTES,      callback_data="gmenu:quotes"),
+        ],
+        [
             InlineKeyboardButton(M_FEEDBACK,    callback_data="gmenu:feedback"),
         ],
     ]
@@ -997,6 +1005,10 @@ def _submenu_ts_style(t: dict) -> InlineKeyboardMarkup:
     layout_lbl = "линейная" if layout == "linear" else "симметричная"
     overlay_alpha = int(t.get("bg_overlay_alpha") or 165)
     overlay_pct = int(round(overlay_alpha * 100 / 255))
+    # ``row_bg_alpha`` is 0–255 like the overlay; mirror the same UX so
+    # admins don't have to remember /set_row_alpha syntax.
+    row_alpha = int(t.get("row_bg_alpha") or 255)
+    row_pct = int(round(row_alpha * 100 / 255))
     rows = [
         [InlineKeyboardButton(
             f"🎨 Стиль сетки: {layout_lbl}",
@@ -1005,6 +1017,10 @@ def _submenu_ts_style(t: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             f"🌫 Затемнение фона: {overlay_pct}%",
             callback_data=f"ts:overlay:{tid}",
+        )],
+        [InlineKeyboardButton(
+            f"🪟 Прозрачность строк: {row_pct}%",
+            callback_data=f"ts:rowa:{tid}",
         )],
         [InlineKeyboardButton("⬅️ Назад к настройкам", callback_data=f"ts:open:{tid}")],
     ]
@@ -1253,7 +1269,14 @@ def _album_panel_render_text(album_state: dict) -> str:
         elif s == "skipped":
             lines.append(f"⏭ {i}) {m.get('summary', '?')} — исключено")
         elif s == "error":
-            err_line = f"✗ {i}) {html.escape(m.get('error_text') or 'не распознан')}"
+            # error_text is built by the producer with safe HTML (we
+            # control the substitution and do not interpolate raw user
+            # input). Keep the existing trust contract: html.escape was
+            # historically applied here, but that double-escapes ``<b>``
+            # tags from match summaries. Sanitise just the user-provided
+            # bits (usernames in mention()) on the producer side, and
+            # render the line as HTML so ``<b>2:0</b>`` shows correctly.
+            err_line = f"✗ {i}) {m.get('error_text') or 'не распознан'}"
             lines.append(err_line)
             # Show /reocr hint for errors where the photo is available
             if m.get("file_id"):
@@ -1610,8 +1633,32 @@ async def _do_report(
     Returns the resulting ``match_id`` (or ``None`` on early bailout)
     so the caller can wire up follow-up state — e.g. recording the match
     against an album-merge session.
+
+    On every early bailout the reason is stashed on
+    ``ctx.user_data['_last_report_error']`` (a short Russian phrase
+    suitable for ``— …`` suffix in the album panel). Album/caller code
+    pops this to surface the actual reason instead of a generic "не
+    удалось записать". The slot is cleared on success.
     """
+    def _bail(reason: str) -> None:
+        # Helper to record the bailout reason for the album panel /
+        # caller. Keep it concise — it gets shown right after the
+        # match summary line.
+        try:
+            ctx.user_data["_last_report_error"] = reason
+        except Exception:
+            pass
+
+    # Clear any stale slot from a previous call before we evaluate
+    # this one — otherwise a successful report would still leave a
+    # ghost reason hanging around.
+    try:
+        ctx.user_data.pop("_last_report_error", None)
+    except Exception:
+        pass
+
     if opponent["id"] == reporter["id"]:
+        _bail("нельзя сыграть с самим собой")
         await send(update, "❌ Нельзя сыграть с самим собой.")
         return None
 
@@ -1619,6 +1666,7 @@ async def _do_report(
     for who, p in (("ты", reporter), ("соперник", opponent)):
         if is_player_banned(p):
             until = p.get("banned_until")
+            _bail(f"{who} в бане до {until}")
             await send(
                 update,
                 f"❌ Не могу засчитать матч: {who} ({mention(p['username'])}) "
@@ -1635,7 +1683,59 @@ async def _do_report(
     if t and t.get("required_channel"):
         ok, msg = await check_required_channel(ctx, reporter.get("telegram_id"), t["required_channel"])
         if not ok:
+            _bail(f"требуется подписка на {html.escape(str(t['required_channel']))}")
             await send(update, msg + f"\n(Турнир «{t['name']}» требует подписку на {t['required_channel']})")
+            return None
+
+    # ── Cross-group guard ─────────────────────────────────────────────
+    # If the tournament is in the group stage and BOTH players are
+    # registered in tournament_players but in DIFFERENT groups, refuse —
+    # otherwise we'd silently record a phantom cross-group match that
+    # never shows up in either group's standings.
+    if tid and t and (t.get("stage") or "groups") == "groups":
+        try:
+            tp_rows = db.get_tournament_players(tid)
+            groups_by_pid = {r["player_id"]: r.get("group_name") for r in tp_rows}
+        except Exception:
+            groups_by_pid = {}
+        g1 = groups_by_pid.get(reporter["id"])
+        g2 = groups_by_pid.get(opponent["id"])
+        # Both must be IN the tournament; if either is missing,
+        # surface that as the reason. "?" is the lobby placeholder
+        # used before the draw — treat it as "in tournament but
+        # without a group yet" and skip the same-group check.
+        in_tournament_a = reporter["id"] in groups_by_pid
+        in_tournament_b = opponent["id"] in groups_by_pid
+        if not in_tournament_a or not in_tournament_b:
+            who_missing = (
+                opponent.get("username") or "?"
+                if not in_tournament_b
+                else reporter.get("username") or "?"
+            )
+            _bail(
+                f"@{html.escape(who_missing)} "
+                f"не записан в турнир «{html.escape(t['name'])}»"
+            )
+            await send(
+                update,
+                f"❌ @{who_missing} не записан в турнир "
+                f"<b>{html.escape(t['name'])}</b>. "
+                f"Сначала <code>/add_player</code>.",
+            )
+            return None
+        if g1 and g2 and g1 != "?" and g2 != "?" and g1 != g2:
+            _bail(
+                f"игроки в разных группах "
+                f"({html.escape(str(g1))} и {html.escape(str(g2))})"
+            )
+            await send(
+                update,
+                f"❌ {mention(reporter.get('username'))} и "
+                f"{mention(opponent.get('username'))} в разных группах "
+                f"(<b>{html.escape(g1)}</b> и <b>{html.escape(g2)}</b>) "
+                f"турнира <b>{html.escape(t['name'])}</b>. Между разными "
+                f"группами групповые матчи не играются.",
+            )
             return None
 
     # ── Pick the row we're going to update ────────────────────────────────
@@ -1666,6 +1766,7 @@ async def _do_report(
         # playoffs where matches are pre-created with correct stage/leg).
         if not force_new and existing["reported_by"] == reporter["id"] and \
                 existing.get("status") in ("reported", "awaiting_admin"):
+            _bail("ты уже сообщил результат этого матча")
             await send(update, "⚠️ Ты уже сообщил результат этого матча. Ожидай проверки админа.")
             return None
         upd_kwargs = dict(
@@ -1703,6 +1804,7 @@ async def _do_report(
 
         # ── Guard: group stage closed (playoff_started or stage moved) ──
         if tid and t and match_stage == "group" and t.get("playoff_started"):
+            _bail("групповой этап закрыт — плей-офф уже идёт")
             await send(
                 update,
                 "🔒 Групповой этап закрыт — новые групповые матчи "
@@ -1719,6 +1821,9 @@ async def _do_report(
                 reporter["id"], opponent["id"], tid,
             )
             if pair_count >= mpp:
+                _bail(
+                    f"уже сыграно {pair_count}/{mpp} групповых матчей в этой паре"
+                )
                 await send(
                     update,
                     f"⚠️ Вы уже сыграли {pair_count} из {mpp} групповых "
@@ -2229,6 +2334,13 @@ def resolve_tournament_for_photo(
 
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    # Channel posts have ``effective_user is None`` because there's no
+    # authoring user behind a channel message — just a channel acting
+    # as a sender. Silently drop them so the bot doesn't blast
+    # "❌ Сначала зарегистрируйся" at posts forwarded from a linked
+    # channel into the discussion group.
+    if user is None:
+        return
 
     # PTB routes ``filters.PHOTO`` not only to plain user messages but also
     # to ``edited_message`` / ``channel_post`` / ``business_message`` /
@@ -3253,9 +3365,29 @@ async def _process_match_photo(
                         ),
                     })
                 else:
+                    # Pull the bailout reason from the helper's last
+                    # call so the panel surfaces e.g. "уже сыграно 1/1
+                    # групповых матчей в этой паре" instead of the
+                    # generic "не удалось записать". Cleared by
+                    # _do_report on the next call so it doesn't leak
+                    # across album entries.
+                    bail_reason = (
+                        ctx.user_data.pop("_last_report_error", None)
+                        or "не удалось записать"
+                    )
+                    # ``short_apx`` carries literal HTML (``<b>...</b>``)
+                    # for the score, but the album panel runs the whole
+                    # error_text through ``html.escape``, which turns
+                    # those tags into visible ``<b>`` text. Strip the
+                    # HTML markup here so the rendered line stays clean.
+                    plain_apx = (
+                        f"👮 @{p1.get('username') or '?'} "
+                        f"{res.score1}:{res.score2} "
+                        f"@{p2.get('username') or '?'}"
+                    )
                     matches_a.append({
                         "status": "error",
-                        "error_text": f"{short_apx} — не удалось записать",
+                        "error_text": f"{plain_apx} — {bail_reason}",
                         "file_id": file_id,
                         "ocr_model": _apx_model,
                         "target_tid": target_tournament["id"] if target_tournament else None,
@@ -3555,11 +3687,13 @@ async def _process_match_photo(
                         album_state["p1_id"] = reporter["id"]
                         album_state["p2_id"] = opponent["id"]
                 else:
+                    bail_reason_2 = (
+                        ctx.user_data.pop("_last_report_error", None)
+                        or "не удалось записать"
+                    )
                     matches.append({
                         "status": "error",
-                        "error_text": (
-                            f"{short_summary} — не удалось записать"
-                        ),
+                        "error_text": f"{short_summary} — {bail_reason_2}",
                         "file_id": file_id,
                         "ocr_model": _model_used_in(res) or "tesseract",
                         "target_tid": target_tournament["id"] if target_tournament else None,
@@ -4835,6 +4969,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await cb_team_buttons(update, ctx)
         return
 
+    # ── Quote settings menu ───────────────────────────────────────────────
+    if data.startswith("qs:"):
+        from handlers.quotes import cb_quote_settings
+        await cb_quote_settings(update, ctx)
+        return
+
     # ── Top submenu ───────────────────────────────────────────────────────
     if data == "top:elo":
         await cmd_top(update, ctx)
@@ -5007,9 +5147,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 and int(target_tournament_pick.get("auto_confirm") or 0) == 1
             )
         else:
+            bail_reason_pick = (
+                ctx.user_data.pop("_last_report_error", None)
+                or "не удалось записать"
+            )
             match_entry["status"] = "error"
             match_entry["error_text"] = (
-                f"{match_entry.get('summary', '?')} — не удалось записать"
+                f"{match_entry.get('summary', '?')} — {bail_reason_pick}"
             )
         if chat_id_cb is not None:
             await _album_panel_send_or_edit(
@@ -5546,6 +5690,16 @@ async def _send_settings_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def _send_quotes_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Open the quote-settings panel for the current chat. The panel
+    shows current cadence + quote count + preset buttons. Lazy-imports
+    the implementation to avoid the bot ↔ handlers.quotes cycle at
+    module load.
+    """
+    from handlers.quotes import cmd_quote_settings
+    await cmd_quote_settings(update, ctx)
+
+
 async def _send_feedback_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg is None:
@@ -5581,6 +5735,7 @@ MENU_DISPATCH = {
     M_REPORT:      _send_report_section,
     M_TOP:         _send_top_section,
     M_SETTINGS:    _send_settings_section,
+    M_QUOTES:      _send_quotes_section,
     M_FEEDBACK:    _send_feedback_section,
     M_ADMIN:       _send_admin_section,
     M_HELP:        cmd_help,
@@ -5686,6 +5841,26 @@ async def _inline_settings_section(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await _send_settings_section(update, ctx)
 
 
+async def _inline_quotes_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Group inline-menu version: open the quote-settings panel by
+    editing the current message in place. Falls back to a fresh
+    message if the edit fails (e.g. the original message is gone).
+    """
+    from handlers.quotes import _quote_settings_text, _quote_settings_kb
+    query = update.callback_query
+    chat = update.effective_chat
+    if not query or chat is None:
+        return await _send_quotes_section(update, ctx)
+    try:
+        await query.edit_message_text(
+            _quote_settings_text(chat.id),
+            parse_mode="HTML",
+            reply_markup=_quote_settings_kb(chat.id),
+        )
+    except TelegramError:
+        await _send_quotes_section(update, ctx)
+
+
 async def _inline_feedback_section(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -5770,6 +5945,7 @@ MENU_DISPATCH_INLINE = {
     M_REPORT:      _inline_report_section,
     M_TOP:         _inline_top_section,
     M_SETTINGS:    _inline_settings_section,
+    M_QUOTES:      _inline_quotes_section,
     M_FEEDBACK:    _inline_feedback_section,
     M_ADMIN:       _inline_admin_section,
     M_HELP:        _inline_help_section,
@@ -5783,6 +5959,7 @@ _GMENU_TO_LABEL = {
     "report":      M_REPORT,
     "top":         M_TOP,
     "settings":    M_SETTINGS,
+    "quotes":      M_QUOTES,
     "feedback":    M_FEEDBACK,
     "admin":       M_ADMIN,
     "help":        M_HELP,
@@ -6004,6 +6181,13 @@ async def _handle_wizard_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE, wi
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Master text router."""
     if not update.message or not update.message.text:
+        return
+    # Skip channel posts and other messages without a real authoring
+    # user — those would otherwise hit the "❌ Сначала зарегистрируйся"
+    # branch (or any other handler that blindly does
+    # update.effective_user.id) and spam noise into linked discussion
+    # groups every time a channel posts something.
+    if update.effective_user is None:
         return
     txt = update.message.text.strip()
 
@@ -6609,6 +6793,80 @@ async def job_reminders(ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Background job: per-chat random-quote rotation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def job_quotes(ctx: ContextTypes.DEFAULT_TYPE):
+    """Per-chat quote loop — runs every ~5 min.
+
+    For each chat in ``chat_settings`` with
+    ``quote_interval_minutes > 0``, post a random quote drawn from
+    that chat's submissions if at least ``quote_interval_minutes``
+    have passed since ``last_quote_at``. Throttled per chat (not
+    per bot) so multiple chats can have completely different
+    cadences without interfering.
+
+    Silently skips chats that have no quotes yet (admin enabled the
+    cadence but nobody has used ``/quote`` yet) — no spam, no error.
+    """
+    from datetime import datetime as _dt
+    try:
+        chats = db.list_chats_with_quote_interval()
+    except Exception:
+        log.exception("job_quotes: list chats failed")
+        return
+    now = _dt.utcnow()
+    for c in chats:
+        chat_id = c.get("chat_id")
+        try:
+            interval_min = int(c.get("quote_interval_minutes") or 0)
+        except (TypeError, ValueError):
+            interval_min = 0
+        if interval_min <= 0 or not chat_id:
+            continue
+        last_raw = c.get("last_quote_at")
+        last = None
+        if last_raw:
+            try:
+                last = _dt.strptime(str(last_raw), "%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError):
+                last = None
+        if last and (now - last).total_seconds() < interval_min * 60:
+            continue
+        # Pick a random quote and post it. Skip silently when no
+        # submissions exist yet.
+        try:
+            q = db.random_quote_for_chat(chat_id)
+        except Exception:
+            log.exception("job_quotes: random_quote_for_chat(%s)", chat_id)
+            continue
+        if not q:
+            # Mark as sent anyway so we don't re-poll the same empty
+            # chat on every tick.
+            try:
+                db.mark_chat_quote_sent(chat_id)
+            except Exception:
+                pass
+            continue
+        from handlers.quotes import _format_quote
+        body = _format_quote(q.get("text") or "", q.get("author") or "")
+        try:
+            await ctx.bot.send_message(
+                int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id,
+                body,
+                parse_mode="HTML",
+            )
+        except Exception:
+            log.exception("job_quotes: send to %s failed", chat_id)
+            continue
+        try:
+            db.mark_chat_quote_sent(chat_id)
+        except Exception:
+            log.exception("job_quotes: mark sent for %s failed", chat_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -6656,6 +6914,33 @@ def main():
     app.add_handler(CommandHandler("toggle_menu", cmd_keyboard))
     # Custom group-friendly start command
     app.add_handler(CommandHandler("elodrak", cmd_start))
+    # ── Quotes (per-chat user-submitted quotations + scheduled rotation) ──
+    from handlers.quotes import (
+        cmd_quote, cmd_quotes, cmd_delete_quote, cmd_set_quote_interval,
+        cmd_quote_settings,
+    )
+    app.add_handler(CommandHandler("quote", cmd_quote))
+    app.add_handler(CommandHandler("addquote", cmd_quote))
+    app.add_handler(CommandHandler("add_quote", cmd_quote))
+    # Common typo from the user — keep it as a friendly alias
+    app.add_handler(CommandHandler("quto", cmd_quote))
+    app.add_handler(CommandHandler("quotes", cmd_quotes))
+    app.add_handler(CommandHandler("listquotes", cmd_quotes))
+    app.add_handler(CommandHandler("list_quotes", cmd_quotes))
+    app.add_handler(CommandHandler("delquote", cmd_delete_quote))
+    app.add_handler(CommandHandler("del_quote", cmd_delete_quote))
+    app.add_handler(CommandHandler("delete_quote", cmd_delete_quote))
+    app.add_handler(CommandHandler("set_quote_interval", cmd_set_quote_interval))
+    app.add_handler(CommandHandler("setquoteinterval", cmd_set_quote_interval))
+    app.add_handler(CommandHandler("quote_interval", cmd_set_quote_interval))
+    app.add_handler(CommandHandler("quoteinterval", cmd_set_quote_interval))
+    # Inline button menu for the cadence + quick stats.
+    app.add_handler(CommandHandler("quote_settings", cmd_quote_settings))
+    app.add_handler(CommandHandler("quotesettings", cmd_quote_settings))
+    app.add_handler(CommandHandler("quote_menu", cmd_quote_settings))
+    app.add_handler(CommandHandler("quotemenu", cmd_quote_settings))
+    app.add_handler(CommandHandler("citaty", cmd_quote_settings))
+    app.add_handler(CommandHandler("цитаты", cmd_quote_settings))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("admincmd", cmd_admincmd))
     app.add_handler(CommandHandler("admin_cmd", cmd_admincmd))
@@ -6938,6 +7223,19 @@ def main():
     app.add_handler(CommandHandler("awardpoints", cmd_award_points))
     app.add_handler(CommandHandler("give_points", cmd_award_points))
     app.add_handler(CommandHandler("givepoints", cmd_award_points))
+    # Player titles / awards (free-form, multiple per player)
+    app.add_handler(CommandHandler("award", cmd_award))
+    app.add_handler(CommandHandler("title", cmd_award))
+    app.add_handler(CommandHandler("give_title", cmd_award))
+    app.add_handler(CommandHandler("givetitle", cmd_award))
+    app.add_handler(CommandHandler("revoke_award", cmd_revoke_award))
+    app.add_handler(CommandHandler("revokeaward", cmd_revoke_award))
+    app.add_handler(CommandHandler("revoke_title", cmd_revoke_award))
+    app.add_handler(CommandHandler("revoketitle", cmd_revoke_award))
+    app.add_handler(CommandHandler("awards", cmd_awards))
+    app.add_handler(CommandHandler("titles", cmd_awards))
+    app.add_handler(CommandHandler("my_titles", cmd_awards))
+    app.add_handler(CommandHandler("mytitles", cmd_awards))
     app.add_handler(CommandHandler("set_playoff_slots", cmd_set_playoff_slots))
     app.add_handler(CommandHandler("setplayoffslots", cmd_set_playoff_slots))
     app.add_handler(CommandHandler("playoff_slots", cmd_set_playoff_slots))
@@ -7028,6 +7326,9 @@ def main():
     # Reminder loop — every 15 minutes; per-tournament cadence is decided
     # inside `job_reminders` (DM hours + escalating chat schedule).
     app.job_queue.run_repeating(job_reminders, interval=15 * 60, first=120)
+    # Quote loop — every 5 minutes; per-chat cadence (admin-set) is
+    # checked inside ``job_quotes``. Idle chats no-op cheaply.
+    app.job_queue.run_repeating(job_quotes, interval=5 * 60, first=300)
     app.add_error_handler(error_handler)
 
     log.info("Bot started ✅")

@@ -2200,3 +2200,168 @@ __all__ = [
     "cmd_tadmins",
     "cmd_unban",
 ]
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Player titles / awards
+#
+# Free-form titles attached to a player (e.g. "🐐 GOAT", "Чемпион №76").
+# Multiple titles per player. Visible in /profile, /table_text and
+# /tablebomb. Admins / owners only.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_award(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/award @user <титул>`` — выдать игроку титул.
+
+    Title can be any free-form text (emoji allowed). Multiple titles
+    per player are allowed — re-running with the same title creates
+    a duplicate row, which the renderer dedupes when displaying.
+
+    Admin-only (bot admin or tournament admin of any tournament).
+    """
+    user = update.effective_user
+    if user is None:
+        return
+    from handlers.common import is_admin, mention, send
+
+    if not is_admin(user.id):
+        # Allow tournament admins to award titles too (their tournament's
+        # players); they often run sub-leagues and want to hand out
+        # custom titles without bothering bot admins.
+        if not db.list_tournament_admin_for_user(user.id):
+            await send(update, "❌ Только админ.")
+            return
+
+    args = list(ctx.args or [])
+    if len(args) < 2:
+        await send(
+            update,
+            "Использование: <code>/award @user &lt;титул&gt;</code>\n"
+            "Например: <code>/award @phoenileo 🐐 GOAT</code>",
+        )
+        return
+
+    target = _resolve_player_arg(args[0])
+    if not target:
+        await send(
+            update,
+            f"❌ Игрок <code>{html.escape(args[0])}</code> не найден.",
+        )
+        return
+
+    title = " ".join(args[1:]).strip()
+    if not title:
+        await send(update, "❌ Не указан титул.")
+        return
+    if len(title) > 120:
+        title = title[:120].rstrip()
+
+    new_id = db.add_player_title(
+        target["id"], title,
+        granted_by=user.id,
+    )
+    await send(
+        update,
+        f"🏅 Титул <b>{html.escape(title)}</b> выдан игроку "
+        f"{mention(target.get('username') or '?')} (id титула: {new_id}).",
+    )
+
+
+async def cmd_revoke_award(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/revoke_award @user <титул>`` — снять у игрока титул.
+
+    Match is case-insensitive on the title text. Removes every row
+    that matches (so duplicates are cleared in one shot). Admins only.
+    """
+    user = update.effective_user
+    if user is None:
+        return
+    from handlers.common import is_admin, mention, send
+
+    if not is_admin(user.id):
+        if not db.list_tournament_admin_for_user(user.id):
+            await send(update, "❌ Только админ.")
+            return
+
+    args = list(ctx.args or [])
+    if len(args) < 2:
+        await send(
+            update,
+            "Использование: <code>/revoke_award @user &lt;титул&gt;</code>",
+        )
+        return
+    target = _resolve_player_arg(args[0])
+    if not target:
+        await send(
+            update,
+            f"❌ Игрок <code>{html.escape(args[0])}</code> не найден.",
+        )
+        return
+    title = " ".join(args[1:]).strip()
+    if not title:
+        await send(update, "❌ Не указан титул.")
+        return
+    removed = db.remove_player_title_by_text(target["id"], title)
+    if removed:
+        await send(
+            update,
+            f"🗑 У игрока {mention(target.get('username') or '?')} снят "
+            f"титул <b>{html.escape(title)}</b> (удалено записей: "
+            f"{removed}).",
+        )
+    else:
+        await send(
+            update,
+            f"ℹ️ У игрока {mention(target.get('username') or '?')} "
+            f"нет титула <b>{html.escape(title)}</b>.",
+        )
+
+
+async def cmd_awards(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/awards [@user]`` — показать титулы игрока (свои если без аргумента)."""
+    from handlers.common import mention, send
+    from handlers._helpers import _player_from_user
+
+    args = list(ctx.args or [])
+    target = None
+    if args:
+        target = _resolve_player_arg(args[0])
+        if not target:
+            await send(
+                update,
+                f"❌ Игрок <code>{html.escape(args[0])}</code> не найден.",
+            )
+            return
+    else:
+        target = _player_from_user(update.effective_user)
+        if not target:
+            await send(update, "❌ Сначала зарегистрируйся: /register")
+            return
+
+    titles = db.list_player_titles(target["id"])
+    name = mention(target.get("username") or "?")
+    if not titles:
+        await send(update, f"🤷 У {name} пока нет титулов.")
+        return
+    lines = [f"🏅 <b>Титулы</b> {name}:"]
+    for t in titles:
+        note = (t.get("note") or "").strip()
+        # Format: "• 🐐 GOAT — за победу" (note optional)
+        if note:
+            lines.append(
+                f"• {html.escape(t['title'])} — "
+                f"<i>{html.escape(note)}</i>"
+            )
+        else:
+            lines.append(f"• {html.escape(t['title'])}")
+    await send(update, "\n".join(lines))
+
+
+__all__.extend([
+    "cmd_award",
+    "cmd_revoke_award",
+    "cmd_awards",
+])
