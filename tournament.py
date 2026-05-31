@@ -182,6 +182,32 @@ def get_group_standings(tid: int) -> dict[str, list[dict]]:
 
 
 def format_standings_message(tid: int) -> str:
+    # Best-effort load of per-player titles ("🏅 Чемпион №76") so the
+    # text-table renders them inline. Fail-soft: if anything goes wrong,
+    # we just skip the titles and render the legacy plain-username
+    # column.
+    titles_by_pid: dict[int, list[str]] = {}
+    try:
+        from database import list_player_titles  # local: avoid cycle
+        # Resolve only for the players that actually appear in
+        # standings — saves a query per non-tournament player.
+        rows_for_pids = get_group_standings(tid)
+        seen_pids: set[int] = set()
+        for _, ps in rows_for_pids.items():
+            for r in ps:
+                pid = r.get("player_id") or r.get("id")
+                if isinstance(pid, int):
+                    seen_pids.add(pid)
+        for pid in seen_pids:
+            try:
+                titles_by_pid[pid] = [
+                    t["title"] for t in list_player_titles(pid)
+                ]
+            except Exception:
+                continue
+    except Exception:
+        titles_by_pid = {}
+
     standings = get_group_standings(tid)
     lines = ["📊 <b>Турнирная таблица</b>\n"]
     for g, players in sorted(standings.items()):
@@ -196,7 +222,30 @@ def format_standings_message(tid: int) -> str:
                 f"{pos:<3} {p['username']:<15} {played:>3} {p['group_wins']:>3} "
                 f"{p['group_draws']:>3} {p['group_losses']:>3} {gd:>6} {p['group_points']:>4}"
             )
-        lines.append("```\n")
+        lines.append("```")
+        # Append a per-group titles block when at least one player has
+        # awards. Kept separate from the monospace box above so emoji
+        # in titles render correctly without breaking column widths.
+        title_lines: list[str] = []
+        for p in players:
+            pid = p.get("player_id") or p.get("id")
+            tts = titles_by_pid.get(int(pid) if isinstance(pid, int) else 0) if pid else []
+            if tts:
+                # Dedup while keeping order.
+                seen_t: set[str] = set()
+                uniq_t: list[str] = []
+                for t in tts:
+                    k = (t or "").strip().lower()
+                    if k in seen_t:
+                        continue
+                    seen_t.add(k)
+                    uniq_t.append(t)
+                title_lines.append(
+                    f"🏅 {p['username']}: {' • '.join(uniq_t)}"
+                )
+        if title_lines:
+            lines.extend(title_lines)
+        lines.append("")
     return "\n".join(lines)
 
 

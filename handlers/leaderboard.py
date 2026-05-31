@@ -494,8 +494,30 @@ async def cmd_table_bomb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f" <i>({html.escape(r['game_nickname'])})</i>"
                 if r.get("game_nickname") else ""
             )
+            # Per-player titles are appended after the goal counts so
+            # the bombardier list reads "🥇 @user [🐐 GOAT, Чемпион №76]
+            # — N ⚽". Failures here are non-fatal; we just skip the
+            # badge and keep the row.
+            titles_blob = ""
+            try:
+                tts = db.player_title_strings(r["player_id"])
+                if tts:
+                    seen_t: set[str] = set()
+                    uniq_t: list[str] = []
+                    for t_str in tts:
+                        k = (t_str or "").strip().lower()
+                        if k in seen_t:
+                            continue
+                        seen_t.add(k)
+                        uniq_t.append(t_str)
+                    titles_blob = (
+                        " 🏅 "
+                        + " • ".join(html.escape(t_str) for t_str in uniq_t)
+                    )
+            except Exception:
+                titles_blob = ""
             detail_lines.append(
-                f"{m} {mention(r['username'])}{nick} — "
+                f"{m} {mention(r['username'])}{nick}{titles_blob} — "
                 f"<b>{r['total_goals']}</b> ⚽  "
                 f"({r['home_goals']}🟢 / {r['away_goals']}🔵)"
             )

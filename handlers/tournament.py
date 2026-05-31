@@ -4987,6 +4987,45 @@ async def _handle_tournament_settings_cb(
         )
         return
 
+    if action == "rowa":
+        # Mirror of "overlay" but for ``row_bg_alpha`` (the per-row
+        # transparency on standings PNGs). Same picker UX so admins
+        # don't have to remember the /set_row_alpha command.
+        cur_alpha = int(t.get("row_bg_alpha") or 255)
+        cur_pct = int(round(cur_alpha * 100 / 255))
+        opts = [
+            ("0% (без подложки)",  f"ts:rowa_set:{tid}:0"),
+            ("25%",                f"ts:rowa_set:{tid}:25"),
+            ("50%",                f"ts:rowa_set:{tid}:50"),
+            ("75%",                f"ts:rowa_set:{tid}:75"),
+            ("100% (по умолчанию)", f"ts:rowa_set:{tid}:100"),
+        ]
+        await query.edit_message_text(
+            f"🪟 <b>Прозрачность строк таблицы</b> — насколько видна "
+            f"подложка под строками в /table.\n\n"
+            f"  • <b>0%</b> — подложки нет, текст поверх фона\n"
+            f"  • <b>100%</b> — плотная подложка (по умолчанию)\n\n"
+            f"Текущее: <b>{cur_pct}%</b>\n\n"
+            f"Для произвольного значения: "
+            f"<code>/set_row_alpha {tid} &lt;0–100&gt;</code>",
+            parse_mode="HTML",
+            reply_markup=_picker("rowa", opts),
+        )
+        return
+    if action == "rowa_set":
+        pct = int(parts[3]) if len(parts) > 3 else 100
+        pct = max(0, min(100, pct))
+        alpha = int(round(pct * 255 / 100))
+        update_tournament(tid, row_bg_alpha=alpha)
+        t = get_tournament(tid)
+        from bot import _submenu_ts_style
+        await query.edit_message_text(
+            f"🎨 <b>Оформление</b> — {html.escape(t['name'])} (ID {tid})",
+            parse_mode="HTML",
+            reply_markup=_submenu_ts_style(t),
+        )
+        return
+
     if action == "format":
         # Pick whether the tournament runs groups, playoff or both.
         # NOTE: only allowed while the tournament hasn't actually started
