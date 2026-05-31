@@ -46,9 +46,21 @@ NATIVE_EMOJI_SIZE = 109  # NotoColorEmoji ships as a 109 px bitmap font.
 # rendered through the color-emoji font instead of the regular text
 # font. Includes pictographic ranges, regional indicators (flags),
 # enclosed alphanumerics for ⓘ/Ⓜ-style icons, and the common dingbats.
+#
+# Country flags (🇺🇦, 🇩🇪, …) are encoded as a *pair* of regional-
+# indicator codepoints (U+1F1E6-U+1F1FF). NotoColorEmoji only renders
+# the combined flag glyph when the two indicators arrive together —
+# in isolation each indicator is drawn as a letter in a square box.
+# So we must match the pair as a single grapheme, never one at a time.
 _EMOJI_RE = re.compile(
+    "(?:"
+    # Country flag: exactly two consecutive regional indicators.
+    "[\U0001F1E6-\U0001F1FF]{2}"
+    "|"
+    # Single emoji codepoint from one of the supported ranges,
+    # optionally followed by VS-16 / ZWJ-joined continuations
+    # (handles 👨\u200d👩\u200d👧 family sequences, ❤\ufe0f, …).
     "["
-    "\U0001F1E6-\U0001F1FF"   # regional indicators (flag halves)
     "\U0001F300-\U0001F5FF"   # symbols & pictographs
     "\U0001F600-\U0001F64F"   # emoticons
     "\U0001F680-\U0001F6FF"   # transport & map
@@ -64,8 +76,8 @@ _EMOJI_RE = re.compile(
     "\u2B00-\u2BFF"           # misc symbols & arrows
     "\u3030\u303D\u3297\u3299"
     "]"
-    # Optional: variation selector + zero-width joiner sequences.
-    "(\ufe0f|\u200d.)*",
+    "(?:\ufe0f|\u200d.)*"
+    ")",
     flags=re.UNICODE,
 )
 
