@@ -238,17 +238,14 @@ def _truncate(
     max_w: int,
     draw: ImageDraw.ImageDraw,
 ) -> str:
-    if draw.textlength(text, font=font) <= max_w:
-        return text
-    ell = "…"
-    lo, hi = 0, len(text)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if draw.textlength(text[:mid] + ell, font=font) <= max_w:
-            lo = mid
-        else:
-            hi = mid - 1
-    return text[:lo] + ell
+    """Trim ``text`` with an ellipsis to fit ``max_w`` pixels.
+
+    Emoji-aware via :mod:`emoji_helper` so we don't slice through a
+    flag glyph or miscount the rendered width when team-tagged names
+    contain 🇩🇪 / 🐐 etc.
+    """
+    from emoji_helper import truncate_text_with_emoji
+    return truncate_text_with_emoji(text, font, max_w)
 
 
 def _display_name(p: dict | None, *, fallback: str = "?", team_tag: str = "") -> str:
@@ -707,9 +704,20 @@ def _render_card(
             badge = "🏅"
 
     # Top-line: name A
-    draw.text((x + pad, y + _s(10)), name_a_clip, font=name_font, fill=a_color)
-    # Bottom-line: name B
-    draw.text((x + pad, y + _s(34)), name_b_clip, font=name_font, fill=b_color)
+    _em_base = getattr(draw, "_em_base", None)
+    if _em_base is not None:
+        from emoji_helper import draw_text_with_emoji
+        draw_text_with_emoji(
+            _em_base, (x + pad, y + _s(10)),
+            name_a_clip, name_font, fill=a_color,
+        )
+        draw_text_with_emoji(
+            _em_base, (x + pad, y + _s(34)),
+            name_b_clip, name_font, fill=b_color,
+        )
+    else:
+        draw.text((x + pad, y + _s(10)), name_a_clip, font=name_font, fill=a_color)
+        draw.text((x + pad, y + _s(34)), name_b_clip, font=name_font, fill=b_color)
 
     # Aggregate score (right-aligned in upper-right corner) when all legs done.
     if all_done:
@@ -856,6 +864,12 @@ def _render_image(
         overlay_alpha=int(t.get("bg_overlay_alpha") or 165),
     )
     draw = ImageDraw.Draw(img)
+    # Stash the underlying canvas on the draw object so helpers
+    # (e.g. card renderers) can fall back to ``draw_text_with_emoji``
+    # for player-name labels containing color emoji / flags. This is
+    # cheaper than threading an ``img`` parameter through every
+    # ``_render_card*`` callsite and keeps the change local.
+    setattr(draw, "_em_base", img)
 
     # Row/card background opacity (0=transparent, 255=solid). Controlled
     # via /set_row_alpha <ID> <0-100> — same knob that already affects
@@ -1112,8 +1126,20 @@ def _render_card_dyn(
             a_color = LOSS; b_color = WIN
             badge = "🏅"
 
-    draw.text((x + pad, y + name_y_top), name_a_clip, font=name_font, fill=a_color)
-    draw.text((x + pad, y + name_y_bot), name_b_clip, font=name_font, fill=b_color)
+    _em_base_dyn = getattr(draw, "_em_base", None)
+    if _em_base_dyn is not None:
+        from emoji_helper import draw_text_with_emoji
+        draw_text_with_emoji(
+            _em_base_dyn, (x + pad, y + name_y_top),
+            name_a_clip, name_font, fill=a_color,
+        )
+        draw_text_with_emoji(
+            _em_base_dyn, (x + pad, y + name_y_bot),
+            name_b_clip, name_font, fill=b_color,
+        )
+    else:
+        draw.text((x + pad, y + name_y_top), name_a_clip, font=name_font, fill=a_color)
+        draw.text((x + pad, y + name_y_bot), name_b_clip, font=name_font, fill=b_color)
 
     if all_done:
         a_g, b_g = _aggregate_score(ms, a_id, b_id)
@@ -1356,6 +1382,9 @@ def _render_image_mirrored(
         overlay_alpha=int(t.get("bg_overlay_alpha") or 165),
     )
     draw = ImageDraw.Draw(img)
+    # Same trick as in _render_image: stash the canvas so helpers can
+    # render color emoji onto it for player-name labels.
+    setattr(draw, "_em_base", img)
 
     # Row/card opacity — same /set_row_alpha knob as standings.
     row_alpha = int(t.get("row_bg_alpha") or 255)

@@ -585,6 +585,112 @@ async def _send_match_to_admins(ctx: ContextTypes.DEFAULT_TYPE, match: dict):
     return delivered
 
 
+async def _send_failed_screenshot_to_admins(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    *,
+    file_id: str | None,
+    score1: int | None,
+    score2: int | None,
+    p1_username: str | None,
+    p2_username: str | None,
+    tournament: dict | None,
+    reporter_user,
+    reason: str,
+    extra_note: str = "",
+) -> int:
+    """Forward a failed-OCR screenshot to admins for manual handling.
+
+    Mirrors :func:`_send_match_to_admins` but for matches that *didn't*
+    make it into the DB. The admin gets:
+
+    * the original screenshot (or text fallback when there's no file_id)
+    * the parsed score (when known) and any opponent username/ID hints
+    * the failure reason (e.g. "уже сыграно 1/1 групповых матчей")
+    * a one-line ``/admin_report`` template the admin can copy-paste
+
+    Recipients are picked the same way as for awaiting matches via
+    :func:`_approver_telegram_ids` — tournament admins when the
+    tournament is known, root bot admins otherwise.
+
+    Returns the number of admins that received the message (0 means
+    nobody got it; caller may want to surface that to the user).
+    """
+    recipients = _approver_telegram_ids(tournament)
+    if not recipients:
+        return 0
+
+    score_str = (
+        f"<b>{int(score1)}:{int(score2)}</b>"
+        if score1 is not None and score2 is not None
+        else "<i>счёт не распознан</i>"
+    )
+    p1_label = f"@{p1_username}" if p1_username else "<i>?</i>"
+    p2_label = f"@{p2_username}" if p2_username else "<i>?</i>"
+
+    reporter_who = ""
+    if reporter_user is not None:
+        if getattr(reporter_user, "username", None):
+            reporter_who = f"@{reporter_user.username}"
+        else:
+            full = (getattr(reporter_user, "full_name", "") or "").strip()
+            reporter_who = full or f"id {reporter_user.id}"
+
+    t_block = ""
+    if tournament:
+        t_block = (
+            f"🏆 <i>{html.escape(tournament.get('name') or '?')}</i> "
+            f"[{t_full_label(tournament)}]\n"
+        )
+
+    body = (
+        f"🛂 <b>OCR не записал — посмотри</b>\n\n"
+        f"⚽ {p1_label} {score_str} {p2_label}\n"
+        f"{t_block}"
+        f"❗ Причина: {reason}\n"
+    )
+    if extra_note:
+        body += f"📝 {extra_note}\n"
+    if reporter_who:
+        body += f"👤 Прислал: {reporter_who}\n"
+    if tournament:
+        body += (
+            f"\nЕсли всё ок — ответь на это сообщение командой:\n"
+            f"<code>/admin_report {p1_label} {p2_label} "
+            f"{int(score1) if score1 is not None else 'X'}:"
+            f"{int(score2) if score2 is not None else 'Y'} "
+            f"{int(tournament['id'])}</code>"
+        )
+
+    delivered = 0
+    for admin_id in recipients:
+        sent = False
+        if file_id:
+            try:
+                await ctx.bot.send_photo(
+                    admin_id,
+                    photo=file_id,
+                    caption=body[:1024],   # Telegram caption limit
+                    parse_mode="HTML",
+                )
+                sent = True
+            except Exception as e:
+                log.warning(
+                    "OCR-fail photo to admin %s failed (%s) — falling back to text",
+                    admin_id, e,
+                )
+        if not sent:
+            try:
+                await ctx.bot.send_message(
+                    admin_id, body, parse_mode="HTML",
+                )
+                sent = True
+            except Exception as e:
+                log.warning("OCR-fail notification %s failed: %s", admin_id, e)
+        if sent:
+            delivered += 1
+    return delivered
+
+
 async def _after_opponent_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE, m: dict):
     """Move a match from ``reported`` to ``awaiting_admin``, notify admins
     + players."""
@@ -4818,6 +4924,7 @@ __all__ = [
     "_announce_stage_advance",
     "_approver_telegram_ids",
     "_send_match_to_admins",
+    "_send_failed_screenshot_to_admins",
     "_after_opponent_confirm",
     "_finalize_match_after_admin",
     "_list_pending_matches_for",
