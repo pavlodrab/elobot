@@ -8,6 +8,7 @@ Three flavours:
 * ``/quotes [N]`` — list the most recent quotes in this chat.
 * ``/delquote <id>`` — admin-only: remove a quote by id.
 * ``/set_quote_interval <minutes>`` — per-chat cadence; 0 disables.
+* ``/quote_settings`` — inline button menu for cadence + quick stats.
 
 Quotes are kept per ``chat_id`` (string) so groups don't see each
 other's content. The background ``job_quotes`` loop in ``bot.py``
@@ -20,7 +21,12 @@ from __future__ import annotations
 import html
 import logging
 
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database as db
@@ -277,4 +283,161 @@ __all__ = [
     "cmd_quotes",
     "cmd_delete_quote",
     "cmd_set_quote_interval",
+    "cmd_quote_settings",
+    "cb_quote_settings",
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /quote_settings — inline button menu for cadence + quick stats.
+#
+# Per-chat (because ``chat_settings`` is per chat). Shows current
+# cadence, total quote count, and a 1-tap picker for common intervals.
+# Designed to be the easy-mode entry-point — admins who prefer typing
+# can still use ``/set_quote_interval``.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _quote_settings_kb(tid_chat: str | int) -> InlineKeyboardMarkup:
+    """Build the cadence picker keyboard for a chat.
+
+    The chat_id is embedded in the callback so the same buttons work
+    if the menu was opened in another chat (sub-chats / forwarded
+    interactions). Single-row, six options.
+    """
+    cid = str(tid_chat)
+    rows = [
+        [
+            InlineKeyboardButton("🔕 Выкл", callback_data=f"qs:set:{cid}:0"),
+            InlineKeyboardButton("30 мин",  callback_data=f"qs:set:{cid}:30"),
+        ],
+        [
+            InlineKeyboardButton("1 ч",   callback_data=f"qs:set:{cid}:60"),
+            InlineKeyboardButton("3 ч",   callback_data=f"qs:set:{cid}:180"),
+        ],
+        [
+            InlineKeyboardButton("6 ч",   callback_data=f"qs:set:{cid}:360"),
+            InlineKeyboardButton("12 ч",  callback_data=f"qs:set:{cid}:720"),
+        ],
+        [InlineKeyboardButton("24 ч",  callback_data=f"qs:set:{cid}:1440")],
+        [InlineKeyboardButton("✖️ Закрыть", callback_data="qs:close")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _quote_settings_text(chat_id: str | int) -> str:
+    """Render the settings panel body — current cadence, quote count
+    and a one-line hint for /quote / /quotes."""
+    settings = db.get_chat_settings(chat_id)
+    cur_min = int(settings.get("quote_interval_minutes") or 0)
+    cur_lbl = "выкл" if cur_min <= 0 else f"каждые {cur_min} мин"
+    try:
+        total = len(db.list_quotes(chat_id=str(chat_id), limit=1000))
+    except Exception:
+        total = 0
+    last_raw = settings.get("last_quote_at")
+    last_str = ""
+    if last_raw:
+        last_str = f"\n   Последняя цитата отправлена: <code>{html.escape(str(last_raw))}</code> UTC"
+    return (
+        "💬 <b>Настройки цитат</b>\n\n"
+        f"Текущая частота: <b>{cur_lbl}</b>\n"
+        f"Цитат в чате: <b>{total}</b>{last_str}\n\n"
+        "Жми кнопку ниже, чтобы выставить частоту. Точное значение "
+        "(в минутах) можно задать командой "
+        "<code>/set_quote_interval &lt;минут&gt;</code>.\n\n"
+        "📥 Добавить цитату: <code>/quote &lt;автор&gt;: &lt;текст&gt;</code>\n"
+        "📜 Список цитат: <code>/quotes</code>"
+    )
+
+
+async def _user_can_change_quotes(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Allow bot admins always; in groups, also allow Telegram chat
+    administrators. DM with the bot — only the user themselves (and bot
+    admins). Best-effort: API failures default to allowing the change.
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    if user is None or chat is None:
+        return False
+    if is_admin(user.id):
+        return True
+    if chat.type in ("group", "supergroup"):
+        try:
+            member = await ctx.bot.get_chat_member(chat.id, user.id)
+            return member.status in ("creator", "administrator")
+        except Exception:
+            return True  # best-effort fallback
+    return True  # private chats: only one user can ever interact
+
+
+async def cmd_quote_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/quote_settings`` — open the inline cadence picker for this chat."""
+    chat = update.effective_chat
+    if chat is None:
+        return
+    body = _quote_settings_text(chat.id)
+    kb = _quote_settings_kb(chat.id)
+    await send(update, body, reply_markup=kb)
+
+
+async def cb_quote_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Inline callback handler for the ``qs:*`` namespace.
+
+    * ``qs:set:<chat_id>:<minutes>`` — apply a new cadence and refresh panel.
+    * ``qs:close`` — drop the panel.
+    """
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    await query.answer()
+    data = query.data
+    if data == "qs:close":
+        try:
+            await query.edit_message_text("💬 Закрыто.")
+        except TelegramError:
+            pass
+        return
+    if not data.startswith("qs:set:"):
+        return
+    parts = data.split(":")
+    if len(parts) < 4:
+        return
+    chat_id_raw = parts[2]
+    try:
+        minutes = max(0, min(10080, int(parts[3])))
+    except ValueError:
+        return
+
+    if not await _user_can_change_quotes(update, ctx):
+        try:
+            await query.message.reply_text(
+                "❌ Менять настройки цитат может только админ чата "
+                "или админ бота.",
+            )
+        except TelegramError:
+            pass
+        return
+
+    try:
+        db.set_chat_quote_interval(chat_id_raw, minutes)
+    except Exception:
+        log.exception("qs:set: persist failed for chat=%s", chat_id_raw)
+        try:
+            await query.message.reply_text(
+                "❌ Не удалось сохранить настройку. Попробуй ещё раз.",
+            )
+        except TelegramError:
+            pass
+        return
+
+    body = _quote_settings_text(chat_id_raw)
+    kb = _quote_settings_kb(chat_id_raw)
+    try:
+        await query.edit_message_text(body, parse_mode="HTML", reply_markup=kb)
+    except TelegramError:
+        # "Message is not modified" if the user tapped the same value
+        # twice; ignore.
+        pass

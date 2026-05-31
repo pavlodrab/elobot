@@ -4964,6 +4964,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await cb_team_buttons(update, ctx)
         return
 
+    # ── Quote settings menu ───────────────────────────────────────────────
+    if data.startswith("qs:"):
+        from handlers.quotes import cb_quote_settings
+        await cb_quote_settings(update, ctx)
+        return
+
     # ── Top submenu ───────────────────────────────────────────────────────
     if data == "top:elo":
         await cmd_top(update, ctx)
@@ -6873,6 +6879,7 @@ def main():
     # ── Quotes (per-chat user-submitted quotations + scheduled rotation) ──
     from handlers.quotes import (
         cmd_quote, cmd_quotes, cmd_delete_quote, cmd_set_quote_interval,
+        cmd_quote_settings,
     )
     app.add_handler(CommandHandler("quote", cmd_quote))
     app.add_handler(CommandHandler("addquote", cmd_quote))
@@ -6889,6 +6896,13 @@ def main():
     app.add_handler(CommandHandler("setquoteinterval", cmd_set_quote_interval))
     app.add_handler(CommandHandler("quote_interval", cmd_set_quote_interval))
     app.add_handler(CommandHandler("quoteinterval", cmd_set_quote_interval))
+    # Inline button menu for the cadence + quick stats.
+    app.add_handler(CommandHandler("quote_settings", cmd_quote_settings))
+    app.add_handler(CommandHandler("quotesettings", cmd_quote_settings))
+    app.add_handler(CommandHandler("quote_menu", cmd_quote_settings))
+    app.add_handler(CommandHandler("quotemenu", cmd_quote_settings))
+    app.add_handler(CommandHandler("citaty", cmd_quote_settings))
+    app.add_handler(CommandHandler("цитаты", cmd_quote_settings))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("admincmd", cmd_admincmd))
     app.add_handler(CommandHandler("admin_cmd", cmd_admincmd))
