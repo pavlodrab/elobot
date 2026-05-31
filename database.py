@@ -59,6 +59,7 @@ __all__ = [
     "remove_player_from_tournament",
     "get_tournament_players",
     "update_tournament_player",
+    "get_tournament_player_tag",
     "create_match",
     "get_match",
     "find_match_by_screenshot_hash",
@@ -728,6 +729,46 @@ def init_db():
     if not _column_exists(conn, "tournaments", "footer_places"):
         c.execute(
             "ALTER TABLE tournaments ADD COLUMN footer_places TEXT"
+        )
+
+    # ── Signup-phase reminders (2026-05) ─────────────────────────────────
+    # When ``signup_reminder_minutes`` > 0 AND ``open_signup`` = 1 AND
+    # the tournament is bound to a chat AND no matches have been
+    # generated yet, the reminder loop posts a periodic chat message
+    # nagging unregistered players to sign up. The interval is taken
+    # verbatim from ``signup_reminder_minutes`` (admin sets it via
+    # ``/set_signup_reminder``). 0 = disabled (default).
+    if not _column_exists(conn, "tournaments", "signup_reminder_minutes"):
+        c.execute(
+            "ALTER TABLE tournaments "
+            "ADD COLUMN signup_reminder_minutes INTEGER NOT NULL DEFAULT 0"
+        )
+    # Optional admin-set deadline for the registration window. Stored
+    # as ISO datetime string ('YYYY-MM-DD HH:MM:SS', UTC). Shown in the
+    # reminder message; does NOT auto-close signup on its own — admins
+    # still flip ``open_signup`` themselves (or it auto-closes when the
+    # group draw runs).
+    if not _column_exists(conn, "tournaments", "signup_deadline_at"):
+        c.execute(
+            "ALTER TABLE tournaments ADD COLUMN signup_deadline_at DATETIME"
+        )
+    # Optional admin-supplied registration link / form URL / instructions
+    # text. Appended verbatim to every signup reminder message. NULL or
+    # empty → reminder just shows the inline "🙋 Записаться" button.
+    if not _column_exists(conn, "tournaments", "signup_link"):
+        c.execute(
+            "ALTER TABLE tournaments ADD COLUMN signup_link TEXT"
+        )
+
+    # ── Per-tournament team / club tag for participants (2026-05) ────────
+    # Free-form short label (≤32 chars) shown next to the player's name
+    # in standings PNG, playoff bracket PNG, podium message, summary
+    # report, reminders, etc. Per-tournament so the same Telegram user
+    # can play for "Реал" in one tournament and "Спартак" in another.
+    # NULL / empty = no tag.
+    if not _column_exists(conn, "tournament_players", "team_tag"):
+        c.execute(
+            "ALTER TABLE tournament_players ADD COLUMN team_tag TEXT"
         )
 
     conn.commit()
@@ -1865,6 +1906,32 @@ def update_tournament_player(tid: int, player_id: int, **kwargs):
     )
     conn.commit()
     conn.close()
+
+
+def get_tournament_player_tag(tid: int, player_id: int) -> str:
+    """Return the team / club tag (``team_tag``) for ``player_id`` in
+    tournament ``tid``, or empty string if no tag is set / the player
+    isn't in this tournament. Single-row helper for display sites that
+    have just a player + tid (and don't already pull the full
+    tournament_players row).
+
+    Cheap & cached via the regular get_conn() — callers in render hot
+    paths should batch-fetch ``get_tournament_players(tid)`` themselves
+    if they need many lookups in a row.
+    """
+    if not tid or not player_id:
+        return ""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT team_tag FROM tournament_players "
+        "WHERE tournament_id=? AND player_id=? LIMIT 1",
+        (tid, player_id),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return ""
+    val = row["team_tag"] if isinstance(row, dict) or hasattr(row, "keys") else row[0]
+    return (val or "").strip()
 
 
 def late_join_tournament_group(

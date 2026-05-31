@@ -211,7 +211,14 @@ def _podium_message_lines(tid: int) -> list[str]:
     ``cb_finish_tournament`` via ``handlers/tournament.py`` so the
     chat broadcast and the manual /finish_tournament reply stay in
     sync.
+
+    Per-tournament team tags (``tournament_players.team_tag``) are
+    woven into each line via ``format_player_with_tag_html`` so the
+    podium reads as ``"phoenileo - Германия (@Phoenileo)"`` rather
+    than just ``@Phoenileo`` when teams are configured.
     """
+    from handlers._helpers import format_player_with_tag_html  # local: avoid cycle
+    import database as _db
     podium = get_tournament_podium(tid)
 
     def tag(pid: int | None) -> str:
@@ -220,7 +227,11 @@ def _podium_message_lines(tid: int) -> list[str]:
         p = get_player_by_id(pid)
         if not p:
             return f"id {pid}"
-        return mention(p.get("username") or "") or f"id {pid}"
+        try:
+            tt = _db.get_tournament_player_tag(int(tid), int(pid))
+        except Exception:
+            tt = ""
+        return format_player_with_tag_html(p, tt) or f"id {pid}"
 
     lines: list[str] = []
     if "first" in podium:
@@ -331,6 +342,24 @@ async def _announce_stage_advance(
 
     # ── Bound chat broadcast ────────────────────────────────────────────
     if chat_id:
+        # Helper: render player by id with the per-tournament team tag
+        # (when configured). Falls back to ``@username`` for un-tagged
+        # players, preserving the legacy chat output.
+        from handlers._helpers import format_player_with_tag_html  # local: avoid cycle
+        import database as _db
+
+        def _name_with_tag(pid: int) -> str:
+            p = get_player_by_id(pid)
+            if not p:
+                return mention("?")
+            try:
+                tt = _db.get_tournament_player_tag(int(tournament_id), int(pid))
+            except Exception:
+                tt = ""
+            if tt:
+                return format_player_with_tag_html(p, tt)
+            return mention(p.get("username") or "?")
+
         chat_lines: list[str] = []
         if pairs:
             chat_lines.append(
@@ -338,11 +367,8 @@ async def _announce_stage_advance(
                 f"в турнире {t_label}!"
             )
             for (a, b), ms in pairs.items():
-                pa = get_player_by_id(a)
-                pb = get_player_by_id(b)
                 chat_lines.append(
-                    f"  • {mention(pa['username'] if pa else '?')} "
-                    f"vs {mention(pb['username'] if pb else '?')}"
+                    f"  • {_name_with_tag(a)} vs {_name_with_tag(b)}"
                     + (f" — {len(ms)} матча" if len(ms) > 1 else "")
                 )
         if third_pairs_for_announce:
@@ -354,11 +380,8 @@ async def _announce_stage_advance(
                 f"в турнире {t_label}:"
             )
             for (a, b), ms in third_pairs_for_announce.items():
-                pa = get_player_by_id(a)
-                pb = get_player_by_id(b)
                 chat_lines.append(
-                    f"  • {mention(pa['username'] if pa else '?')} "
-                    f"vs {mention(pb['username'] if pb else '?')}"
+                    f"  • {_name_with_tag(a)} vs {_name_with_tag(b)}"
                     + (f" — {len(ms)} матча" if len(ms) > 1 else "")
                 )
         # Show the deadline of the first leg as a guide. All legs of
@@ -397,6 +420,9 @@ async def _announce_stage_advance(
     async def _dm_pair_real(
         a: int, b: int, ms: list[dict], stage_label_dm: str, stage_tag: str,
     ) -> None:
+        from handlers._helpers import format_player_with_tag_html  # local: avoid cycle
+        import database as _db_local
+
         pa = get_player_by_id(a)
         pb = get_player_by_id(b)
         first_dl = next(
@@ -410,7 +436,19 @@ async def _announce_stage_advance(
             if tg in notified:
                 continue
             notified.add(tg)
-            opp_label = mention(opp["username"]) if opp else "?"
+            # Render opponent with their per-tournament team tag (when set).
+            opp_label = "?"
+            if opp:
+                try:
+                    opp_tag = _db_local.get_tournament_player_tag(
+                        int(tournament_id), int(opp.get("id") or 0),
+                    )
+                except Exception:
+                    opp_tag = ""
+                if opp_tag:
+                    opp_label = format_player_with_tag_html(opp, opp_tag)
+                else:
+                    opp_label = mention(opp.get("username") or "?")
             body_lines = [
                 f"🚀 Тебе предстоит <b>{html.escape(stage_label_dm)}</b> "
                 f"в турнире {t_label}.",

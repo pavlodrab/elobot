@@ -205,21 +205,36 @@ def _display_name(p: dict) -> str:
     Hides the synthetic ``id_<digits>`` placeholder (created for users
     without a public ``@username``) — for those we just render the
     nickname plain, or ``id 12345`` if no nickname is set yet.
+
+    When a per-tournament ``team_tag`` is attached to the row (the
+    ``tournament_players`` JOIN propagates it as ``p['team_tag']``),
+    it's woven into the rendered name as ``"<nick> - <Team> (@user)"``
+    so standings PNGs make team affiliations visible at a glance.
     """
     nick = (p.get("game_nickname") or "").strip()
     user = (p.get("username") or "").strip()
+    tag = (p.get("team_tag") or "").strip()
     is_synthetic = bool(user) and bool(re.match(r"^id_\d+$", user.lower()))
     if is_synthetic:
-        if nick:
-            return nick
-        # ``id_<digits>`` → ``id <digits>`` so we never render the
-        # placeholder verbatim (and never as an unclickable @id_…).
-        return user.lower().replace("id_", "id ", 1)
+        synth = nick or user.lower().replace("id_", "id ", 1)
+        return f"{synth} - {tag}" if tag else synth
     if not user:
         # Last-resort: no username at all. Use the nickname or a dash.
-        return nick or "?"
-    if nick and nick.lower() != user.lower():
+        if not nick:
+            return tag or "?"
+        return f"{nick} - {tag}" if tag else nick
+    # Both nick and username present — prefer "nick - tag (@user)" so a
+    # team-tagged player always shows their full identity. Without a
+    # tag, drop the nick when it duplicates the username case-
+    # insensitively to avoid "phoenileo (@phoenileo)" redundancy.
+    if nick:
+        if tag:
+            return f"{nick} - {tag} (@{user})"
+        if nick.lower() == user.lower():
+            return f"@{user}"
         return f"{nick} (@{user})"
+    if tag:
+        return f"{tag} (@{user})"
     return f"@{user}"
 
 

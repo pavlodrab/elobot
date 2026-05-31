@@ -91,11 +91,19 @@
 | `/set_series_length`, `/setserieslength`, `/series_length <ID> <N>` | Серии бо-N (0/1=одна игра, 3/5/7=серии). |
 | `/set_auto_confirm`, `/setautoconfirm`, `/auto_confirm <ID> on\|off` | Мгновенное засчитывание скрина без подтверждения соперника. |
 | `/set_third_place`, `/setthirdplace`, `/third_place <ID> on\|off` | Матч за 3-е место (после полуфиналов, параллельно с финалом). По умолчанию `on`. |
+| `/skip_third_place`, `/cancel_third_place`, `/skip_bronze [ID]` | Отменить незавершённый матч за 3-е место. Удаляет уже созданные строки бронзы; если финал сыгран — турнир сразу закроется, на подиуме «3-е место (поровну)» между двумя SF-проигравшими. |
 | `/set_matches_per_pair`, `/setmatchesperpair`, `/matches_per_pair <ID> group\|playoff <N>` | Сколько игр каждый с каждым / в паре. |
 | `/set_reminders`, `/setreminders`, `/reminders <ID> dm <часы>` | Напоминания в DM каждые N часов. |
 | `/set_reminders <ID> chat on\|off` | Напоминания в чате (escalating). |
 | `/set_reminders <ID> deadline YYYY-MM-DD HH:MM` | Общий дедлайн турнира. |
 | `/set_reminders <ID> show` | Текущие настройки напоминаний. |
+| `/set_signup_reminder`, `/signup_reminder <ID> <минут>` | Напоминалка о наборе на турнир каждые N минут (0 = выкл). Шлётся в привязанный чат, пока запись открыта и матчи ещё не сгенерированы. |
+| `/set_signup_link`, `/signup_link <ID> <URL/текст>` | Ссылка на форму регистрации (или произвольный текст). Подклеивается к каждой напоминалке записи. |
+| `/clear_signup_link [ID]` | Снять ссылку на запись. |
+| `/set_signup_deadline, /signup_deadline <ID> YYYY-MM-DD HH:MM` | Опциональный дедлайн записи (показывается в напоминалке, не закрывает запись автоматически). |
+| `/clear_signup_deadline [ID]` | Снять дедлайн записи. |
+| `/set_team`, `/setteam <ID> @user <команда>` | Поставить/обновить метку команды для игрока в турнире. `clear`/`-`/пусто = снять. Имя в чатах/таблицах/сетке отображается как `nick - <команда> (@user)`. |
+| `/myteam, /my_team [ID] <команда>` | Игрок сам ставит свою метку (только пока запись открыта). |
 
 ### Кастомизация (фон таблиц / сетки)
 
