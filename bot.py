@@ -6940,7 +6940,14 @@ def main():
     app.add_handler(CommandHandler("quote_menu", cmd_quote_settings))
     app.add_handler(CommandHandler("quotemenu", cmd_quote_settings))
     app.add_handler(CommandHandler("citaty", cmd_quote_settings))
-    app.add_handler(CommandHandler("цитаты", cmd_quote_settings))
+    # Cyrillic alias /цитаты — Telegram Bot API only allows [a-z0-9_] in
+    # command names so CommandHandler rejects it (ValueError "is not a
+    # valid bot command"). Register via MessageHandler+regex so users can
+    # still type /цитаты and have the same handler fire.
+    app.add_handler(MessageHandler(
+        filters.Regex(r"^/цитаты(?:@\w+)?(?:\s|$)"),
+        cmd_quote_settings,
+    ))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("admincmd", cmd_admincmd))
     app.add_handler(CommandHandler("admin_cmd", cmd_admincmd))
