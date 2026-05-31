@@ -92,17 +92,13 @@ def _truncate(
     max_w: int,
     draw: ImageDraw.ImageDraw,
 ) -> str:
-    if draw.textlength(text, font=font) <= max_w:
-        return text
-    ell = "..."
-    lo, hi = 0, len(text)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if draw.textlength(text[:mid] + ell, font=font) <= max_w:
-            lo = mid
-        else:
-            hi = mid - 1
-    return text[:lo] + ell
+    """Trim ``text`` with an ellipsis to fit ``max_w`` pixels.
+
+    Emoji-aware via :mod:`emoji_helper` so we don't slice through a
+    flag glyph or miscount the rendered width when names contain emoji.
+    """
+    from emoji_helper import truncate_text_with_emoji
+    return truncate_text_with_emoji(text, font, max_w, suffix="...")
 
 
 def _paste_player_asset(img: Image.Image, x: int, y: int, h: int) -> None:
@@ -201,7 +197,15 @@ def _draw_medal_card(
         user = (row_data.get("username") or "").strip()
         raw_name = nick or user or "?"
     raw_name = _truncate(raw_name, name_font, inner_w - (name_x - x - pad) - _s(100), draw)
-    draw.text((name_x, y + _s(10)), raw_name, font=name_font, fill=TEXT)
+    _em_base = getattr(draw, "_em_base", None)
+    if _em_base is not None:
+        from emoji_helper import draw_text_with_emoji
+        draw_text_with_emoji(
+            _em_base, (name_x, y + _s(10)),
+            raw_name, name_font, fill=TEXT,
+        )
+    else:
+        draw.text((name_x, y + _s(10)), raw_name, font=name_font, fill=TEXT)
 
     # Owner
     owner = (row_data.get("username") or "").strip()
@@ -292,6 +296,7 @@ def render_tablebomb_png(
         bg_image_data=t.get("bg_image_data"),
         overlay_alpha=int(t.get("bg_overlay_alpha") or 180))
     draw = ImageDraw.Draw(img)
+    setattr(draw, "_em_base", img)
     row_alpha = int(t.get("row_bg_alpha") or 230)
 
     # Title
@@ -316,6 +321,7 @@ def render_tablebomb_png(
 
     # Re-create draw after asset paste
     draw = ImageDraw.Draw(img)
+    setattr(draw, "_em_base", img)
 
     # Scorer cards
     y = title_h
