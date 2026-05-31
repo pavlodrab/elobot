@@ -4,11 +4,18 @@ FROM python:3.11-slim
 # match-screenshot OCR (see ocr.py).
 # fonts-dejavu-core is needed by standings_image.py for rendering the
 # /table standings table as a PNG with Cyrillic glyphs.
+# libraqm0 + libfribidi0 enable HarfBuzz/Raqm text shaping inside Pillow
+# (loaded via dlopen at runtime). Without them subdivision-flag emojis
+# like 🏴󠁧󠁢󠁥󠁮󠁧󠁿 (England) / 🏴󠁧󠁢󠁳󠁣󠁴󠁿 (Scotland) / 🏴󠁧󠁢󠁷󠁬󠁳󠁿 (Wales) render
+# as a plain black flag because GSUB tag-sequence substitutions in
+# NotoColorEmoji aren't applied.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr \
         tesseract-ocr-rus \
         tesseract-ocr-eng \
         fonts-dejavu-core \
+        libraqm0 \
+        libfribidi0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
