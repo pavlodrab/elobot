@@ -115,6 +115,7 @@ __all__ = [
     "delete_quote",
     "get_chat_settings",
     "set_chat_quote_interval",
+    "set_chat_quote_quiet_hours",
     "mark_chat_quote_sent",
     "list_chats_with_quote_interval",
 ]
@@ -843,6 +844,21 @@ def init_db():
         )
         """
     )
+    # Quiet hours for the quote-rotation loop. Stored as the start /
+    # end hour in the operator's display TZ (МСК by default).
+    # Defaults: 23..12 — i.e. quotes are posted only between 12:00
+    # and 23:00 МСК; from 23:00 to 12:00 the loop stays silent so the
+    # bot doesn't ping at night.
+    if not _column_exists(conn, "chat_settings", "quiet_start_hour"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN quiet_start_hour INTEGER NOT NULL DEFAULT 23"
+        )
+    if not _column_exists(conn, "chat_settings", "quiet_end_hour"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN quiet_end_hour INTEGER NOT NULL DEFAULT 12"
+        )
 
     conn.commit()
     conn.close()
@@ -3124,7 +3140,13 @@ def delete_quote(quote_id: int) -> bool:
 
 def get_chat_settings(chat_id: str | int) -> dict:
     """Fetch the chat_settings row for ``chat_id`` (creating defaults
-    when missing)."""
+    when missing).
+
+    Default quiet hours are 23..12 in the operator's display TZ — the
+    quote loop stays silent at night so the bot doesn't ping at 3 AM.
+    Admins can override via :func:`set_chat_quote_quiet_hours` (same
+    settings panel button).
+    """
     conn = get_conn()
     row = conn.execute(
         "SELECT * FROM chat_settings WHERE chat_id=?",
@@ -3132,12 +3154,46 @@ def get_chat_settings(chat_id: str | int) -> dict:
     ).fetchone()
     conn.close()
     if row:
-        return dict(row)
+        d = dict(row)
+        # Backfill defaults so callers don't have to handle NULLs from
+        # rows that pre-date the quiet-hour columns.
+        if d.get("quiet_start_hour") is None:
+            d["quiet_start_hour"] = 23
+        if d.get("quiet_end_hour") is None:
+            d["quiet_end_hour"] = 12
+        return d
     return {
         "chat_id": str(chat_id),
         "quote_interval_minutes": 0,
         "last_quote_at": None,
+        "quiet_start_hour": 23,
+        "quiet_end_hour": 12,
     }
+
+
+def set_chat_quote_quiet_hours(
+    chat_id: str | int, start_hour: int, end_hour: int,
+) -> None:
+    """Upsert quiet-hour window (in display TZ). Both bounds clamped
+    to ``0..23``. ``start == end`` disables quiet hours (24/7 quotes).
+    """
+    start_hour = max(0, min(23, int(start_hour)))
+    end_hour = max(0, min(23, int(end_hour)))
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE chat_settings SET quiet_start_hour=?, quiet_end_hour=? "
+        "WHERE chat_id=?",
+        (start_hour, end_hour, str(chat_id)),
+    )
+    if not getattr(cur, "rowcount", 0):
+        conn.execute(
+            "INSERT INTO chat_settings "
+            "(chat_id, quote_interval_minutes, quiet_start_hour, quiet_end_hour) "
+            "VALUES (?, 0, ?, ?)",
+            (str(chat_id), start_hour, end_hour),
+        )
+    conn.commit()
+    conn.close()
 
 
 def set_chat_quote_interval(chat_id: str | int, minutes: int) -> None:
@@ -3182,10 +3238,13 @@ def mark_chat_quote_sent(chat_id: str | int) -> None:
 
 def list_chats_with_quote_interval() -> list[dict]:
     """All chats with ``quote_interval_minutes > 0``. Used by the
-    background quote loop."""
+    background quote loop. Includes the quiet-hour bounds so the
+    loop can skip nights without an extra round-trip per chat.
+    """
     conn = get_conn()
     rows = conn.execute(
-        "SELECT chat_id, quote_interval_minutes, last_quote_at "
+        "SELECT chat_id, quote_interval_minutes, last_quote_at, "
+        "       quiet_start_hour, quiet_end_hour "
         "FROM chat_settings WHERE quote_interval_minutes > 0"
     ).fetchall()
     conn.close()
