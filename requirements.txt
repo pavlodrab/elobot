@@ -1,0 +1,4 @@
+python-telegram-bot[job-queue]==21.3
+pytesseract==0.3.13
+Pillow>=10.0
+psycopg2-binary>=2.9.9

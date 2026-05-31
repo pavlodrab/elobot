@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS}      # comma-separated Telegram user IDs
+      - DB_PATH=/data/league.db
+    volumes:
+      - bot_data:/data
+
+volumes:
+  bot_data:
