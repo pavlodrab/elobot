@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 
 from telegram import (
     InlineKeyboardButton,
@@ -78,12 +79,24 @@ def _split_author_and_text(raw: str) -> tuple[str, str]:
     return author, text or s
 
 
+def _strip_mentions(s: str) -> str:
+    """Break ``@username`` patterns so Telegram doesn't send notifications.
+
+    Inserts a zero-width space (U+200B) right after every ``@`` that is
+    followed by a word character, which keeps the visual appearance but
+    prevents Telegram from recognising the token as a mention.
+    """
+    return re.sub(r"@(?=\w)", "@\u200b", s)
+
+
 def _format_quote(text: str, author: str | None) -> str:
     """Render a single quote for chat output, HTML-safe."""
     body = html.escape((text or "").strip())
+    body = _strip_mentions(body)
     a = (author or "").strip()
     if a:
         a_safe = html.escape(a)
+        a_safe = _strip_mentions(a_safe)
         return f"💬 «{body}»\n— <b>{a_safe}</b>"
     return f"💬 «{body}»\n— <i>аноним</i>"
 
@@ -198,9 +211,9 @@ async def cmd_quotes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = [f"💬 <b>Последние цитаты</b> ({len(rows)}):"]
     for r in rows:
         a = (r.get("author") or "").strip() or "аноним"
-        body = html.escape((r.get("text") or "").strip())
+        body = _strip_mentions(html.escape((r.get("text") or "").strip()))
         lines.append(
-            f"<b>#{r['id']}</b>  «{body}» — <i>{html.escape(a)}</i>"
+            f"<b>#{r['id']}</b>  «{body}» — <i>{_strip_mentions(html.escape(a))}</i>"
         )
     lines.append("")
     is_a = bool(user and is_admin(user.id))
