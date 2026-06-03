@@ -7005,17 +7005,30 @@ async def job_quotes(ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             continue
-        from handlers.quotes import _format_quote
-        body = _format_quote(q.get("text") or "", q.get("author") or "")
-        try:
-            await ctx.bot.send_message(
-                int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id,
-                body,
-                parse_mode="HTML",
-            )
-        except Exception:
-            log.exception("job_quotes: send to %s failed", chat_id)
-            continue
+        from handlers.quotes import _format_quote, _format_voice_caption
+        voice_fid = q.get("voice_file_id")
+        if voice_fid:
+            try:
+                await ctx.bot.send_voice(
+                    int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id,
+                    voice=voice_fid,
+                    caption=_format_voice_caption(q.get("author") or ""),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                log.exception("job_quotes: send_voice to %s failed", chat_id)
+                continue
+        else:
+            body = _format_quote(q.get("text") or "", q.get("author") or "")
+            try:
+                await ctx.bot.send_message(
+                    int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id,
+                    body,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                log.exception("job_quotes: send to %s failed", chat_id)
+                continue
         try:
             db.mark_chat_quote_sent(chat_id)
         except Exception:

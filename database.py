@@ -860,6 +860,13 @@ def init_db():
             "ADD COLUMN quiet_end_hour INTEGER NOT NULL DEFAULT 12"
         )
 
+    # Voice message support for quotes — nullable file_id so we can
+    # repost voice messages as quotes too.
+    if not _column_exists(conn, "quotes", "voice_file_id"):
+        c.execute(
+            "ALTER TABLE quotes ADD COLUMN voice_file_id TEXT"
+        )
+
     conn.commit()
     conn.close()
 
@@ -3061,20 +3068,22 @@ def add_quote(
     author: str | None = None,
     chat_id: str | None = None,
     added_by: int | None = None,
+    voice_file_id: str | None = None,
 ) -> int:
     """Persist a new quote. Returns the row id."""
     text = (text or "").strip()
-    if not text:
-        raise ValueError("text is required")
+    if not text and not voice_file_id:
+        raise ValueError("text or voice_file_id is required")
     conn = get_conn()
     new_id = conn.insert_returning_id(
-        "INSERT INTO quotes (chat_id, text, author, added_by) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO quotes (chat_id, text, author, added_by, voice_file_id) "
+        "VALUES (?, ?, ?, ?, ?)",
         (
             str(chat_id) if chat_id is not None else None,
-            text[:2000],
+            text[:2000] if text else None,
             (author or "").strip()[:120] or None,
             added_by,
+            voice_file_id,
         ),
     )
     conn.commit()
@@ -3089,14 +3098,14 @@ def list_quotes(
     conn = get_conn()
     if chat_id is not None:
         rows = conn.execute(
-            "SELECT id, chat_id, text, author, added_by, added_at "
+            "SELECT id, chat_id, text, author, added_by, added_at, voice_file_id "
             "FROM quotes WHERE chat_id=? "
             "ORDER BY id DESC LIMIT ?",
             (str(chat_id), int(limit)),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, chat_id, text, author, added_by, added_at "
+            "SELECT id, chat_id, text, author, added_by, added_at, voice_file_id "
             "FROM quotes ORDER BY id DESC LIMIT ?",
             (int(limit),),
         ).fetchall()
@@ -3118,7 +3127,7 @@ def random_quote_for_chat(chat_id: str | int) -> dict | None:
     none exist for this chat (and the bot won't post anything)."""
     conn = get_conn()
     row = conn.execute(
-        "SELECT id, chat_id, text, author, added_by, added_at "
+        "SELECT id, chat_id, text, author, added_by, added_at, voice_file_id "
         "FROM quotes WHERE chat_id=? "
         "ORDER BY RANDOM() LIMIT 1",
         (str(chat_id),),
