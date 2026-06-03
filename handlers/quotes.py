@@ -243,7 +243,7 @@ async def cmd_quotes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         a = (r.get("author") or "").strip() or "аноним"
         if r.get("voice_file_id"):
             lines.append(
-                f"<b>#{r['id']}</b>  🎵 <i>Голосове повідомлення</i> — "
+                f"<b>#{r['id']}</b>  🎵 <i>Голосовое сообщение</i> — "
                 f"<i>{_strip_mentions(html.escape(a))}</i>"
             )
         else:
@@ -265,24 +265,30 @@ async def cmd_quotes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines.append("📖 Полный гайд: <code>/quote_help</code>")
 
     kb = None
-    if is_a:
-        kb_rows: list[list[InlineKeyboardButton]] = []
-        for r in rows[:10]:
-            qid = int(r["id"])
+    kb_rows: list[list[InlineKeyboardButton]] = []
+    for r in rows[:10]:
+        qid = int(r["id"])
+        row: list[InlineKeyboardButton] = []
+        if r.get("voice_file_id"):
+            row.append(InlineKeyboardButton(
+                f"▶️ #{qid}",
+                callback_data=f"qs:play:{qid}",
+            ))
+        if is_a:
             if r.get("voice_file_id"):
-                preview = "🎵 Голосове повідомлення"
+                preview = "🎵"
             else:
                 preview = (r.get("text") or "").strip()
                 if len(preview) > 28:
                     preview = preview[:26] + "…"
-            kb_rows.append([
-                InlineKeyboardButton(
-                    f"🗑 #{qid} — {preview}",
-                    callback_data=f"qs:del:{qid}",
-                ),
-            ])
-        if kb_rows:
-            kb = InlineKeyboardMarkup(kb_rows)
+            row.append(InlineKeyboardButton(
+                f"🗑 #{qid} — {preview}",
+                callback_data=f"qs:del:{qid}",
+            ))
+        if row:
+            kb_rows.append(row)
+    if kb_rows:
+        kb = InlineKeyboardMarkup(kb_rows)
     await send(update, "\n".join(lines), reply_markup=kb)
 
 
@@ -643,6 +649,38 @@ async def cb_quote_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         except TelegramError:
             pass
+        return
+
+    # ── Play voice quote from /quotes list ────────────────────────────
+    if action == "play":
+        if len(parts) < 3:
+            return
+        try:
+            qid = int(parts[2])
+        except ValueError:
+            return
+        q = db.get_quote(qid)
+        if not q or not q.get("voice_file_id"):
+            try:
+                await query.message.reply_text(
+                    "❌ Цитата не найдена или не содержит голосовое сообщение.",
+                )
+            except TelegramError:
+                pass
+            return
+        try:
+            await query.message.reply_voice(
+                voice=q["voice_file_id"],
+                caption=_format_voice_caption(q.get("author") or ""),
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            try:
+                await query.message.reply_text(
+                    "❌ Не удалось отправить голосовое сообщение.",
+                )
+            except TelegramError:
+                pass
         return
 
     # ── One-tap delete from /quotes admin keyboard ────────────────────
