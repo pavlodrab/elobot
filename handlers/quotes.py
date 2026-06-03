@@ -1,10 +1,12 @@
 """Quote system: per-chat user-submitted quotations + scheduled rotation.
 
-Three flavours:
+Four flavours:
 
 * ``/quote <author>: <text>``  — add a new quote (any registered player).
 * ``/quote`` (replying to a message) — quote the replied-to message,
   with the replied-to user as the attribution.
+* ``/quote`` (replying to a **voice** message) — quote the voice
+  message; the bot will re-send the audio later.
 * ``/quotes [N]`` — list the most recent quotes in this chat.
 * ``/delquote <id>`` — admin-only: remove a quote by id.
 * ``/set_quote_interval <minutes>`` — per-chat cadence; 0 disables.
@@ -101,15 +103,28 @@ def _format_quote(text: str, author: str | None) -> str:
     return f"💬 «{body}»\n— <i>аноним</i>"
 
 
+def _format_voice_caption(author: str | None) -> str:
+    """Caption for a voice-message quote."""
+    a = (author or "").strip()
+    if a:
+        a_safe = html.escape(a)
+        a_safe = _strip_mentions(a_safe)
+        return f"🎵 — <b>{a_safe}</b>"
+    return "🎵 — <i>аноним</i>"
+
+
 async def cmd_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """``/quote`` — add a quote to the current chat.
 
-    Two modes:
+    Three modes:
 
-    1. **Reply mode:** reply to a message with ``/quote`` (no args).
-       The replied message's text becomes the quote, the replied
-       user's display becomes the author.
-    2. **Inline mode:** ``/quote <author>: <text>`` (any of ``:``,
+    1. **Reply mode (text):** reply to a text message with ``/quote``
+       (no args). The replied message's text becomes the quote, the
+       replied user's display becomes the author.
+    2. **Reply mode (voice):** reply to a **voice** message with
+       ``/quote`` (no args). The bot saves the voice file so it can
+       re-send it later as a quote.
+    3. **Inline mode:** ``/quote <author>: <text>`` (any of ``:``,
        ``—``, ``-``, ``|`` as separator).
     """
     user = update.effective_user
@@ -125,14 +140,21 @@ async def cmd_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     raw = " ".join(ctx.args or []).strip()
     text = ""
     author = ""
+    voice_file_id = None
 
     if raw:
         author, text = _split_author_and_text(raw)
     elif msg.reply_to_message and (
-        msg.reply_to_message.text or msg.reply_to_message.caption
+        msg.reply_to_message.text
+        or msg.reply_to_message.caption
+        or msg.reply_to_message.voice
     ):
         rep = msg.reply_to_message
-        text = (rep.text or rep.caption or "").strip()
+        if rep.voice:
+            text = "🎵"
+            voice_file_id = rep.voice.file_id
+        else:
+            text = (rep.text or rep.caption or "").strip()
         # Attribution: prefer @username, then full name, then "id N".
         ru = rep.from_user
         if ru:
@@ -153,7 +175,7 @@ async def cmd_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if not text:
+    if not text and not voice_file_id:
         await send(
             update,
             "❌ Не понял текст цитаты.\nПример: "
@@ -177,11 +199,19 @@ async def cmd_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     qid = db.add_quote(
         text, author=author or None,
         chat_id=chat_id, added_by=added_by,
+        voice_file_id=voice_file_id,
     )
-    await send(
-        update,
-        f"💬 Цитата #{qid} сохранена.\n\n{_format_quote(text, author)}",
-    )
+
+    if voice_file_id:
+        await send(
+            update,
+            f"💬 Цитата #{qid} сохранена.\n\n{_format_voice_caption(author)}",
+        )
+    else:
+        await send(
+            update,
+            f"💬 Цитата #{qid} сохранена.\n\n{_format_quote(text, author)}",
+        )
 
 
 async def cmd_quotes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -211,10 +241,16 @@ async def cmd_quotes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = [f"💬 <b>Последние цитаты</b> ({len(rows)}):"]
     for r in rows:
         a = (r.get("author") or "").strip() or "аноним"
-        body = _strip_mentions(html.escape((r.get("text") or "").strip()))
-        lines.append(
-            f"<b>#{r['id']}</b>  «{body}» — <i>{_strip_mentions(html.escape(a))}</i>"
-        )
+        if r.get("voice_file_id"):
+            lines.append(
+                f"<b>#{r['id']}</b>  🎵 <i>Голосове повідомлення</i> — "
+                f"<i>{_strip_mentions(html.escape(a))}</i>"
+            )
+        else:
+            body = _strip_mentions(html.escape((r.get("text") or "").strip()))
+            lines.append(
+                f"<b>#{r['id']}</b>  «{body}» — <i>{_strip_mentions(html.escape(a))}</i>"
+            )
     lines.append("")
     is_a = bool(user and is_admin(user.id))
     if is_a:
@@ -233,9 +269,12 @@ async def cmd_quotes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         kb_rows: list[list[InlineKeyboardButton]] = []
         for r in rows[:10]:
             qid = int(r["id"])
-            preview = (r.get("text") or "").strip()
-            if len(preview) > 28:
-                preview = preview[:26] + "…"
+            if r.get("voice_file_id"):
+                preview = "🎵 Голосове повідомлення"
+            else:
+                preview = (r.get("text") or "").strip()
+                if len(preview) > 28:
+                    preview = preview[:26] + "…"
             kb_rows.append([
                 InlineKeyboardButton(
                     f"🗑 #{qid} — {preview}",
@@ -299,6 +338,9 @@ _QUOTE_GUIDE_HTML = (
     "<code>|</code>\n"
     "  • Можно ответом на сообщение: пишешь <code>/quote</code> в реплай — "
     "бот возьмёт текст и автора из цитируемого сообщения.\n"
+    "  • Можно ответом на <b>голосове повідомлення</b>: "
+    "<code>/quote</code> в реплай на voice — "
+    "бот сохранит аудио и будет пересылать его как цитату.\n"
     "  • Алиасы команды: <code>/addquote</code>, <code>/add_quote</code>, "
     "<code>/quto</code> (опечатка тоже работает).\n\n"
 
@@ -400,6 +442,7 @@ async def cmd_set_quote_interval(
 
 __all__ = [
     "_format_quote",
+    "_format_voice_caption",
     "cmd_quote",
     "cmd_quotes",
     "cmd_delete_quote",
