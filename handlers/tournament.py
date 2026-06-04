@@ -2869,22 +2869,36 @@ async def cmd_start_playoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_redraw_playoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    /redraw_playoff <tournament_id>
+    /redraw_playoff [--force] [--pairs|--auto] <tournament_id>
 
     Wipes the current bracket and re-seeds it from the current group
     standings using the cross-bracket draw. Useful when the auto-draw
     paired same-group players in the first round.
 
     Refuses if any real (non-bye) playoff match has been confirmed —
-    you can't pull a confirmed result back out of the bracket without
-    rewriting history.
+    add ``--force`` to wipe confirmed results and redraw anyway.
+
+    Pairing mode (only matters for 4 groups with 2 advancers each):
+      * ``--auto`` (default): interleave by group strength.
+      * ``--pairs``: A1×C2, B2×D1, A2×C1, B1×D2.
     """
     if not is_admin(update.effective_user.id):
         await send(update, "❌ Только админ.")
         return
 
-    t_type = parse_tournament_type_arg(ctx.args[0]) if ctx.args else None
-    t, err = _resolve_tournament_from_args(update, ctx, type_hint=t_type)
+    # Parse flags before arg resolver
+    raw_args = ctx.args or []
+    force = '--force' in raw_args
+    pairing_override: str | None = None
+    if '--pairs' in raw_args:
+        pairing_override = 'pairs'
+    elif '--auto' in raw_args:
+        pairing_override = 'auto'
+    flag_set = {'--force', '--pairs', '--auto'}
+    clean_args = [a for a in raw_args if a not in flag_set]
+
+    t_type = parse_tournament_type_arg(clean_args[0]) if clean_args else None
+    t, err = _resolve_tournament_from_args(update, ctx, type_hint=t_type, args=clean_args)
     if t is None:
         await send(update, err or "❌ Нет активного турнира.")
         return
@@ -2920,19 +2934,35 @@ async def cmd_redraw_playoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Block redraw once any real match has been confirmed — rewriting
     # history would destroy ELO + leaderboard state. Bye rows (player1
     # == player2, auto-confirmed at 1:0) don't count.
+    # Pass --force to skip this check (confirmed results will be wiped).
     confirmed_real = [
         m for m in playoff_matches
         if m.get("status") == "confirmed"
         and m.get("player1_id") != m.get("player2_id")
     ]
     if confirmed_real:
-        await send(
-            update,
-            f"❌ Нельзя пересеять: уже <b>{len(confirmed_real)}</b> "
-            f"плей-офф матча подтверждены. Если действительно нужно — "
-            f"откати их через <code>/edit_match</code> сначала.",
-        )
-        return
+        if force:
+            from handlers.match import _reverse_match_stats
+            from database import get_player_by_id as _gpbi
+            is_official = int(t.get("is_official") or 1)
+            for m in confirmed_real:
+                p1 = _gpbi(m["player1_id"]) or {}
+                p2 = _gpbi(m["player2_id"]) or {}
+                _reverse_match_stats(m, p1, p2, is_official, tid)
+            await send(
+                update,
+                f"⚠️ <b>Принудительное пересеивание!</b> Результаты "
+                f"<b>{len(confirmed_real)}</b> подтверждённого матча(ей) "
+                f"плей-офф отменены (ELO и статистика откачены).",
+            )
+        else:
+            await send(
+                update,
+                f"❌ Нельзя пересеять: уже <b>{len(confirmed_real)}</b> "
+                f"плей-офф матча подтверждены. Если действительно нужно — "
+                f"добавь <code>--force</code> (результаты будут сброшены).",
+            )
+            return
 
     # Wipe every playoff row (including any byes / unconfirmed legs).
     conn = db.get_conn()
@@ -2946,6 +2976,14 @@ async def cmd_redraw_playoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         conn.commit()
     finally:
         conn.close()
+
+    # Apply pairing override if requested (--pairs / --auto flags).
+    if pairing_override is not None:
+        try:
+            update_tournament(tid, playoff_pairing=pairing_override)
+        except Exception:
+            # Column may not exist yet (pre-migration); ignore silently.
+            pass
 
     # Re-run the seeder with the same slots setting as start_playoff.
     slots = max(1, int(t.get("playoff_slots") or 2))
