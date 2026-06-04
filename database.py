@@ -867,6 +867,16 @@ def init_db():
             "ALTER TABLE quotes ADD COLUMN voice_file_id TEXT"
         )
 
+    # Playoff pairing mode for 4-group tournaments.
+    # 'auto' (default): interleave by group strength.
+    # 'pairs': pair groups as (A,C) and (B,D) — A1-C2, B2-D1, A2-C1, B1-D2.
+    # Added 2026-06.
+    if not _column_exists(conn, "tournaments", "playoff_pairing"):
+        c.execute(
+            "ALTER TABLE tournaments "
+            "ADD COLUMN playoff_pairing TEXT NOT NULL DEFAULT 'auto'"
+        )
+
     conn.commit()
     conn.close()
 

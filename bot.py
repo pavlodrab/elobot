@@ -312,6 +312,7 @@ from handlers.tournament import (  # noqa: E402
     cmd_replace_player,
     cmd_set_auto_confirm,
     cmd_set_third_place,
+    cmd_set_playoff_pairing,
     cmd_skip_third_place,
     cmd_set_team,
     cmd_myteam,
@@ -7426,6 +7427,8 @@ def main():
     app.add_handler(CommandHandler("set_third_place", cmd_set_third_place))
     app.add_handler(CommandHandler("setthirdplace", cmd_set_third_place))
     app.add_handler(CommandHandler("third_place", cmd_set_third_place))
+    app.add_handler(CommandHandler("set_playoff_pairing", cmd_set_playoff_pairing))
+    app.add_handler(CommandHandler("setplayoffpairing", cmd_set_playoff_pairing))
     app.add_handler(CommandHandler("skip_third_place", cmd_skip_third_place))
     app.add_handler(CommandHandler("skipthirdplace", cmd_skip_third_place))
     app.add_handler(CommandHandler("cancel_third_place", cmd_skip_third_place))

@@ -297,6 +297,7 @@ def _bracket_seed_order(size: int) -> list[int]:
 def _seed_qualifiers(
     standings: dict[str, list[dict]],
     advance_per_group: int,
+    pairing: str = "auto",
 ) -> list[dict]:
     """Flatten group standings into a globally-seeded qualifier list.
 
@@ -307,17 +308,45 @@ def _seed_qualifiers(
     ``[1, 8, 4, 5, 2, 7, 3, 6]``, every QF pair is cross-group:
     ``A1×B4``, ``B2×A3``, ``B1×A4``, ``A2×B3``.
 
-    For 3+ groups (or 1 group) we fall back to the original point-based
-    sort: position-within-group first, then points / GD / GF / letter.
+    For 2+ groups we use the same interleaved approach: qualifiers are
+    ordered by group strength (winner's record), then by position,
+    so first-round opponents never come from the same group.
 
-    Group ordering for the cross draw: the group whose winner has the
-    strongest tier-0 record (pts → GD → GF → letter) becomes the
-    "primary" group (its #1 seed becomes overall seed 1).
+    When ``pairing="pairs"`` (and there are exactly 4 groups with 2
+    advancing each), groups are paired as (A,C) and (B,D) to produce
+    the specific pairs ``A1×C2``, ``B2×D1``, ``A2×C1``, ``B1×D2``.
+
+    For a single group qualifiers are returned in position order.
+
+    Group ordering: the group whose winner has the strongest record
+    (pts → GD → GF → letter) becomes the "primary" group.
     """
     if not standings:
         return []
 
     groups = sorted(standings.keys())
+
+    # ── Pairs mode for 4 groups (2 advancers each) ─────────────────────
+    # Pair groups as (A,C) and (B,D) so QF pairs are:
+    #   A1×C2, B2×D1, A2×C1, B1×D2
+    if pairing == "pairs" and len(groups) == 4 and advance_per_group == 2:
+        pair1 = (groups[0], groups[2])  # e.g. (A, C)
+        pair2 = (groups[1], groups[3])  # e.g. (B, D)
+        # Block order: pair1[0], pair2[0], pair2[1], pair1[1]
+        block_groups = [pair1[0], pair2[0], pair2[1], pair1[1]]
+        quals: list[dict] = []
+        for g in block_groups:
+            for pos, p in enumerate(standings[g][:advance_per_group]):
+                quals.append({
+                    **p,
+                    "_group": g,
+                    "_pos": pos,
+                    "_pts": int(p.get("group_points") or 0),
+                    "_gd": int(p.get("group_gf") or 0)
+                            - int(p.get("group_ga") or 0),
+                    "_gf": int(p.get("group_gf") or 0),
+                })
+        return quals
 
     # ── Cross-bracket interleave for the 2-group case ─────────────────
     # Same-group QF matchups were the seeding bug we hit on
@@ -356,19 +385,49 @@ def _seed_qualifiers(
                     })
         return quals
 
-    # ── Default path (1 group OR 3+ groups) ───────────────────────────
-    quals: list[dict] = []
-    for g in groups:
-        for pos, p in enumerate(standings[g][:advance_per_group]):
+    # ── Single group: just return qualifiers in position order ────────
+    if len(groups) == 1:
+        quals: list[dict] = []
+        for pos, p in enumerate(standings[groups[0]][:advance_per_group]):
             quals.append({
                 **p,
-                "_group": g,
+                "_group": groups[0],
                 "_pos": pos,
                 "_pts": int(p.get("group_points") or 0),
                 "_gd": int(p.get("group_gf") or 0) - int(p.get("group_ga") or 0),
                 "_gf": int(p.get("group_gf") or 0),
             })
-    quals.sort(key=lambda x: (x["_pos"], -x["_pts"], -x["_gd"], -x["_gf"], x["_group"]))
+        return quals
+
+    # ── 2+ groups: interleave by group to guarantee cross-group QF ────
+    def _grp_key(g: str) -> tuple[int, int, int, str]:
+        row = standings[g][0] if standings[g] else None
+        if row is None:
+            return (10**9, 10**9, 10**9, g)
+        return (
+            -int(row.get("group_points") or 0),
+            -((int(row.get("group_gf") or 0))
+              - (int(row.get("group_ga") or 0))),
+            -int(row.get("group_gf") or 0),
+            g,
+        )
+
+    ordered_groups = sorted(groups, key=_grp_key)
+    quals: list[dict] = []
+    for pos in range(advance_per_group):
+        for g in ordered_groups:
+            rows = standings[g]
+            if pos < len(rows):
+                p = rows[pos]
+                quals.append({
+                    **p,
+                    "_group": g,
+                    "_pos": pos,
+                    "_pts": int(p.get("group_points") or 0),
+                    "_gd": int(p.get("group_gf") or 0)
+                            - int(p.get("group_ga") or 0),
+                    "_gf": int(p.get("group_gf") or 0),
+                })
     return quals
 
 
@@ -464,7 +523,8 @@ def compute_playoff_preview(
         qualifiers_by_group = {
             g: standings[g][:advance_per_group] for g in groups
         }
-        seeded = _seed_qualifiers(standings, advance_per_group)
+        pairing = (t.get("playoff_pairing") or "auto").lower()
+        seeded = _seed_qualifiers(standings, advance_per_group, pairing=pairing)
     n = len(seeded)
     if n < 2:
         return {"stage": None, "pairs": [], "qualifiers": qualifiers_by_group,
@@ -571,7 +631,8 @@ def generate_playoff(
         if advance_per_group is None:
             advance_per_group = max(1, int(t.get("playoff_slots") or 2))
 
-        seeded = _seed_qualifiers(standings, advance_per_group)
+        pairing = (t.get("playoff_pairing") or "auto").lower()
+        seeded = _seed_qualifiers(standings, advance_per_group, pairing=pairing)
 
     n = len(seeded)
     if n < 2:
