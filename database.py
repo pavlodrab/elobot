@@ -930,6 +930,43 @@ def init_db():
     conn.close()
 
 
+def _maybe_add_tournament_fk(conn) -> None:
+    """Add ON DELETE CASCADE FK from {tournament_players, matches}.tournament_id
+    → tournaments(id), but only on Postgres and only if not already present.
+
+    Uses ``NOT VALID`` to avoid scanning existing rows; new inserts/updates
+    are fully validated. The constraint is then validated lazily — orphan
+    rows in legacy data won't block the migration.
+    """
+    if conn.backend != "postgres":
+        return
+    for table, fk_name in (
+        ("tournament_players", "fk_tp_tournament"),
+        ("matches",            "fk_match_tournament"),
+    ):
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM information_schema.table_constraints "
+                "WHERE table_name = ? AND constraint_name = ? LIMIT 1",
+                (table, fk_name),
+            ).fetchone()
+        except Exception:
+            continue
+        if row:
+            continue
+        try:
+            conn.execute(
+                f"ALTER TABLE {table} "
+                f"ADD CONSTRAINT {fk_name} "
+                f"FOREIGN KEY (tournament_id) "
+                f"REFERENCES tournaments(id) ON DELETE CASCADE NOT VALID"
+            )
+        except Exception:
+            # Migration is best-effort: an admin can fix orphaned rows
+            # manually and re-run init_db. Don't crash the bot on startup.
+            pass
+
+
 # ── Player helpers ────────────────────────────────────────────────────────────
 
 def upsert_player(username: str, telegram_id: int | None = None):
