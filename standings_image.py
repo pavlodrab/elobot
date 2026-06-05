@@ -407,7 +407,14 @@ def _render(t: dict, standings: dict, qualify_n: int) -> bytes:
 
         # group title bar
         _draw_rect_alpha(img, [gx0, y, gx0 + gw, y + GROUP_TITLE_H], CARD_BG, _row_alpha)
-        draw.text((gx0 + _s(16), y + _s(14)), f"Группа {g}", font=group_font, fill=TEXT)
+        # Use custom group name if set (single-group league) — falls
+        # back to "Группа A/B/..." for multi-group tournaments.
+        custom = (t.get("group_display_name") or "").strip()
+        if custom and len(standings) == 1:
+            group_label = custom
+        else:
+            group_label = f"Группа {g}"
+        draw.text((gx0 + _s(16), y + _s(14)), group_label, font=group_font, fill=TEXT)
         # tiny right-aligned hint with player count
         hint = f"{len(players)} {_ru_plural(len(players), ('игрок', 'игрока', 'игроков'))}"
         bbox = draw.textbbox((0, 0), hint, font=sub_font)

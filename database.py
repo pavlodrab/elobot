@@ -885,6 +885,14 @@ def init_db():
             "ADD COLUMN playoff_pairing TEXT NOT NULL DEFAULT 'auto'"
         )
 
+    # Custom display name for the single group in a league (Лига, Сетка 1, etc.)
+    # NULL = fall back to "Группа A".
+    if not _column_exists(conn, "tournaments", "group_display_name"):
+        c.execute(
+            "ALTER TABLE tournaments "
+            "ADD COLUMN group_display_name TEXT"
+        )
+
     # ── Tours (rounds) support ────────────────────────────────────────
     if not _column_exists(conn, "tournaments", "tours_enabled"):
         c.execute(

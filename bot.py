@@ -322,6 +322,8 @@ from handlers.tournament import (  # noqa: E402
     cmd_set_matches_per_pair,
     cmd_set_overlay,
     cmd_set_playoff_slots,
+    cmd_set_groupname,
+    cmd_clear_groupname,
     cmd_set_reminders,
     cmd_set_signup_reminder,
     cmd_set_signup_link,
@@ -1022,6 +1024,7 @@ def _submenu_ts_style(t: dict) -> InlineKeyboardMarkup:
     # admins don't have to remember /set_row_alpha syntax.
     row_alpha = int(t.get("row_bg_alpha") or 255)
     row_pct = int(round(row_alpha * 100 / 255))
+    gname = (t.get("group_display_name") or "").strip() or "Группа A"
     rows = [
         [InlineKeyboardButton(
             f"🎨 Стиль сетки: {layout_lbl}",
@@ -1034,6 +1037,10 @@ def _submenu_ts_style(t: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             f"🪟 Прозрачность строк: {row_pct}%",
             callback_data=f"ts:rowa:{tid}",
+        )],
+        [InlineKeyboardButton(
+            f"🏷 Имя группы: {gname}",
+            callback_data=f"ts:groupname:{tid}",
         )],
         [InlineKeyboardButton("⬅️ Назад к настройкам", callback_data=f"ts:open:{tid}")],
     ]
@@ -6351,6 +6358,30 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if await handle_pending_tpl_create_text(update, ctx, txt):
         return
 
+    # ── Pending groupname input (from settings panel / set_groupname prompt) ──
+    pending_g = ctx.user_data.pop("pending_groupname", None)
+    if pending_g:
+        from database import update_tournament as _upd_t
+        t_id = int(pending_g["tid"])
+        new_name = txt.strip()
+        if new_name.lower() in ("отмена", "cancel", "отменить"):
+            await send(update, "❌ Отменено.")
+            return
+        if new_name in ("-", "—", "сброс"):
+            _upd_t(t_id, group_display_name=None)
+            await send(update, f"✅ Имя группы сброшено на «Группа A».")
+            return
+        if len(new_name) > 64:
+            await send(update, "❌ Слишком длинное имя (макс. 64 символа).")
+            return
+        _upd_t(t_id, group_display_name=new_name)
+        await send(
+            update,
+            f"✅ Имя группы для <b>{html.escape(pending_g['t_name'])}</b>: "
+            f"<b>{html.escape(new_name)}</b>",
+        )
+        return
+
     # Main menu label tap → exit any wizard, go to that section
     if txt in MENU_LABELS:
         _wizard_clear(ctx)
@@ -7320,6 +7351,10 @@ def main():
     app.add_handler(CommandHandler("setfooter", cmd_set_footer))
     app.add_handler(CommandHandler("clear_footer", cmd_clear_footer))
     app.add_handler(CommandHandler("clearfooter", cmd_clear_footer))
+    app.add_handler(CommandHandler("set_groupname", cmd_set_groupname))
+    app.add_handler(CommandHandler("setgroupname", cmd_set_groupname))
+    app.add_handler(CommandHandler("clear_groupname", cmd_clear_groupname))
+    app.add_handler(CommandHandler("cleargroupname", cmd_clear_groupname))
     app.add_handler(CommandHandler("bind_tournament", cmd_bind_tournament))
     app.add_handler(CommandHandler("unbind_tournament", cmd_unbind_tournament))
     app.add_handler(CommandHandler("grant_admin", cmd_grant_admin))

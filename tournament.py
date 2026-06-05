@@ -213,9 +213,16 @@ def format_standings_message(tid: int) -> str:
         titles_by_pid = {}
 
     standings = get_group_standings(tid)
+    # Custom group name (if set via /set_groupname). Falls back to
+    # "Группа A/B/..." when empty.
+    t = get_tournament(tid) or {}
+    custom_name = (t.get("group_display_name") or "").strip()
     lines = ["📊 <b>Турнирная таблица</b>\n"]
     for g, players in sorted(standings.items()):
-        lines.append(f"<b>Группа {g}</b>")
+        if custom_name and len(standings) == 1:
+            lines.append(f"<b>{custom_name}</b>")
+        else:
+            lines.append(f"<b>Группа {g}</b>")
         lines.append("```")
         lines.append(f"{'#':<3} {'Игрок':<15} {'И':>3} {'В':>3} {'Н':>3} {'П':>3} {'Г':>6} {'О':>4}")
         lines.append("─" * 42)

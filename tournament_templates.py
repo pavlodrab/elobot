@@ -69,6 +69,9 @@ class TournamentTemplate:
     total_tours: int = 0
     auto_next_tour: int = 0
 
+    # Custom display name for the single group in a league (Лига ЧМ, Сетка 1)
+    group_display_name: str = ""
+
     def to_tournament_kwargs(self) -> dict:
         """Convert template to kwargs for create_tournament + update_tournament."""
         return {
@@ -92,6 +95,7 @@ class TournamentTemplate:
             "tours_enabled": self.tours_enabled,
             "total_tours": self.total_tours,
             "auto_next_tour": self.auto_next_tour,
+            "group_display_name": self.group_display_name or None,
         }
 
     def to_json(self) -> str:
@@ -112,7 +116,8 @@ BUILTIN_TEMPLATES: dict[str, TournamentTemplate] = {
         name="Лига (чемпионат)",
         description=(
             "Круговой турнир — все играют против всех в одной группе. "
-            "Победитель определяется по таблице. Плей-офф нет."
+            "Победитель определяется по таблице. Плей-офф нет. "
+            "Матчи разбиты на туры (2 круга = 2×(N-1) туров)."
         ),
         template_type="league",
         groups_only=1,
@@ -120,12 +125,15 @@ BUILTIN_TEMPLATES: dict[str, TournamentTemplate] = {
         group_matches_per_pair=2,  # double round-robin (home + away)
         playoff_third_place=0,
         draw_mode="random",
+        tours_enabled=1,
+        total_tours=0,  # auto = 2*(N-1)
+        group_display_name="Лига",
     ),
     "league_single": TournamentTemplate(
         name="Лига (один круг)",
         description=(
             "Круговой турнир в один круг — каждый играет с каждым один раз. "
-            "Победитель по таблице."
+            "Победитель по таблице. Матчи разбиты на туры (N-1 туров)."
         ),
         template_type="league",
         groups_only=1,
@@ -133,6 +141,9 @@ BUILTIN_TEMPLATES: dict[str, TournamentTemplate] = {
         group_matches_per_pair=1,
         playoff_third_place=0,
         draw_mode="random",
+        tours_enabled=1,
+        total_tours=0,  # auto = N-1
+        group_display_name="Лига",
     ),
     "league_groups": TournamentTemplate(
         name="Лига с группами",
