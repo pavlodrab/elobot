@@ -711,6 +711,7 @@ def _build_custom_template(base: str, cfg: dict) -> TournamentTemplate:
             draw_mode="random",
             tours_enabled=tours_enabled,
             total_tours=total_tours,
+            group_display_name="Лига",
         )
     elif base == "cup":
         mode = "wins" if legs >= 3 else "goals"
@@ -1557,12 +1558,16 @@ async def handle_pending_tpl_create_text(update, ctx, text: str) -> bool:
                 kwargs["description"] = description
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
             update_tournament(tid, **kwargs)
+            tours_line = ""
+            if tpl.tours_enabled:
+                total_str = str(tpl.total_tours) if tpl.total_tours else "авто"
+                tours_line = f"\n📅 Туры: <b>{total_str}</b> (старт по /next_tour или авто)"
             await send(
                 update,
                 f"🏆 Турнир <b>{html.escape(name)}</b> создан!\n"
                 f"📋 Шаблон: <b>{html.escape(tpl.name)}</b>\n"
                 f"⚽ Тип: <b>{t_type_label(t_type)}</b>\n"
-                f"{'📝 Правила: ' + html.escape(description) if description else ''}\n"
+                f"{'📝 Правила: ' + html.escape(description) if description else ''}{tours_line}\n"
                 f"ID: {tid}\n\n"
                 f"Добавляй игроков: <code>/add_player @user1, @user2</code>\n"
                 f"Запуск: <code>/start_tournament</code>",

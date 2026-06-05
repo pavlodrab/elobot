@@ -5486,6 +5486,21 @@ async def _handle_tournament_settings_cb(
         )
         return
 
+    if action == "groupname":
+        # Text-input flow — store pending request, the next text message
+        # in handle_text will be caught and applied.
+        ctx.user_data["pending_groupname"] = {"tid": tid, "t_name": t["name"]}
+        cur = (t.get("group_display_name") or "").strip() or "Группа A (по умолчанию)"
+        await query.edit_message_text(
+            f"🏷 <b>Имя группы</b> — {html.escape(t['name'])} (ID {tid})\n\n"
+            f"Текущее: <b>{html.escape(cur)}</b>\n\n"
+            f"Отправь новое имя одним сообщением.\n"
+            f"Или <code>-</code> чтобы сбросить на «Группа A».\n"
+            f"Или <code>отмена</code> чтобы выйти.",
+            parse_mode="HTML",
+        )
+        return
+
     if action == "tours_toggle":
         new_val = 0 if int(t.get("tours_enabled") or 0) else 1
         if new_val == 1:
@@ -5882,6 +5897,62 @@ async def cmd_clear_footer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     update_tournament(tid, footer_text="")
     await send(update, f"✅ Подпись для <b>{html.escape(t['name'])}</b> удалена.")
+
+
+async def cmd_set_groupname(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/set_groupname <tid> <name>`` — задать имя для группы лиги.
+
+    Используется в лигах (1 группа) вместо надписи «Группа A».
+    Пустое имя — сбросить на дефолт.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+    if not ctx.args:
+        await send(
+            update,
+            "Использование:\n"
+            "  <code>/set_groupname &lt;ID&gt; Лига ЧМ</code>\n"
+            "  <code>/set_groupname &lt;ID&gt;</code> — сбросить на «Группа A»\n"
+            "  <code>/clear_groupname &lt;ID&gt;</code> — то же самое",
+        )
+        return
+    try:
+        tid = int(ctx.args[0])
+    except ValueError:
+        await send(update, "❌ ID должен быть числом.")
+        return
+    t = get_tournament(tid)
+    if not t:
+        await send(update, f"❌ Турнир с ID {tid} не найден.")
+        return
+    if not _can_manage_tournament(update.effective_user.id, t):
+        await send(update, "❌ Только создатель турнира или админ.")
+        return
+    name = " ".join(ctx.args[1:]).strip() if len(ctx.args) > 1 else ""
+    if len(name) > 64:
+        await send(update, "❌ Слишком длинное имя (макс. 64 символа).")
+        return
+    update_tournament(tid, group_display_name=name or None)
+    if name:
+        await send(
+            update,
+            f"✅ Имя группы для <b>{html.escape(t['name'])}</b> установлено: "
+            f"<b>{html.escape(name)}</b>\n"
+            f"Теперь в таблице и PNG-картинке будет отображаться это имя.",
+        )
+    else:
+        await send(
+            update,
+            f"✅ Имя группы для <b>{html.escape(t['name'])}</b> сброшено "
+            f"на «Группа A».",
+        )
+
+
+async def cmd_clear_groupname(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/clear_groupname <tid>`` — алиас для /set_groupname <tid> без имени."""
+    ctx.args = list(ctx.args or [])
+    await cmd_set_groupname(update, ctx)
 
 
 async def cmd_set_playoff_slots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
