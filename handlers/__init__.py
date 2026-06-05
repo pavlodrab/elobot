@@ -8,5 +8,6 @@ keep working.
 """
 
 from . import common  # noqa: F401  (re-exported for "from handlers import common")
+from . import tours   # noqa: F401
 
-__all__ = ["common"]
+__all__ = ["common", "tours"]
