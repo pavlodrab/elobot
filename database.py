@@ -1121,8 +1121,12 @@ def get_player_by_game_nickname(nick: str | None):
     return dict(p) if p else None
 
 
-def find_players_by_fuzzy_game_nickname(query: str) -> list[dict]:
-    """Return players whose game_nickname contains ``query`` (case-insensitive)."""
+def find_players_by_fuzzy_game_nickname(query: str) -> list[tuple[dict, float]]:
+    """Return ``[(player_dict, score), ...]`` whose ``game_nickname``
+    contains ``query`` (case-insensitive). ``score`` is a 0..1
+    similarity ranking — exact match → 1.0, otherwise a simple
+    containment ratio.
+    """
     if not query:
         return []
     conn = get_conn()
@@ -1133,7 +1137,19 @@ def find_players_by_fuzzy_game_nickname(query: str) -> list[dict]:
         (f"%{query.strip()}%",),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    q = query.strip().lower()
+    out: list[tuple[dict, float]] = []
+    for r in rows:
+        p = dict(r)
+        nick = (p.get("game_nickname") or "").lower()
+        if nick == q:
+            score = 1.0
+        elif q in nick:
+            score = len(q) / max(len(nick), 1)
+        else:
+            score = 0.0
+        out.append((p, score))
+    return out
 
 
 def get_all_players_by_elo_field(field: str) -> list[dict]:

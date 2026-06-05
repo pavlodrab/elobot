@@ -124,10 +124,14 @@ def _draw_text_in_cell(
     *,
     align: str = "left",
     pad: int | None = None,
+    base_img: "Image.Image | None" = None,
 ) -> None:
     if pad is None:
         pad = _s(12)
-    from emoji_helper import measure_text_with_emoji
+    from emoji_helper import draw_text_with_emoji, measure_text_with_emoji
+    # Always measure with the emoji-aware helper so cells containing
+    # 📅 / ✅ don't overflow because a regular-font measurement
+    # under-counted the wider glyph.
     tw = measure_text_with_emoji(text, font)
     bbox = draw.textbbox((0, 0), "Hg", font=font)
     th = bbox[3] - bbox[1]
@@ -138,7 +142,12 @@ def _draw_text_in_cell(
     else:
         tx = x + pad
     ty = y + (h - th) // 2 - bbox[1]
-    draw.text((tx, ty), text, font=font, fill=color)
+    if base_img is not None and any(
+        ord(ch) > 0x2000 for ch in text  # cheap prefilter for emoji
+    ):
+        draw_text_with_emoji(base_img, (tx, ty), text, font, fill=color)
+    else:
+        draw.text((tx, ty), text, font=font, fill=color)
 
 
 def _status_icon(status: str) -> str:
@@ -201,7 +210,13 @@ def render_tour_png(tid: int, tour_numbers: Iterable[int]) -> bytes:
     t_type = (t.get("tournament_type") or "").upper()
     rt = ("лига" if int(t.get("groups_only") or 0) else "группы")
     sub = "  ·  ".join(filter(None, [t_type, rt, "Туры"]))
-    draw.text((PAD, PAD), name, font=title_font, fill=TEXT)
+    from emoji_helper import draw_text_with_emoji
+    # Title (name) — draw with emoji support in case the admin put
+    # an emoji in the tournament name.
+    if any(ord(c) > 0x2000 for c in name):
+        draw_text_with_emoji(img, (PAD, PAD), name, title_font, fill=TEXT)
+    else:
+        draw.text((PAD, PAD), name, font=title_font, fill=TEXT)
     draw.text((PAD, PAD + _s(50)), sub, font=sub_font, fill=MUTED)
 
     y = TITLE_BLK
@@ -211,9 +226,11 @@ def render_tour_png(tid: int, tour_numbers: Iterable[int]) -> bytes:
         xw = _COL_TOTAL
 
         # Tour title bar
-        title = f"📅 Тур {tn}" if len(blocks) == 1 else f"📅 Тур {tn}"
+        title = f"📅 Тур {tn}"
         _draw_rect_alpha(img, [x0, y, x0 + xw, y + TOUR_H], CARD_BG, _row_alpha)
-        draw.text((x0 + _s(16), y + _s(14)), title, font=tour_font, fill=TEXT)
+        # Tour title contains a calendar emoji — render through
+        # draw_text_with_emoji so it doesn't fall back to tofu.
+        draw_text_with_emoji(img, (x0 + _s(16), y + _s(14)), title, tour_font, fill=TEXT)
         if matches:
             hint = f"{len(matches)} матчей"
             bbox = draw.textbbox((0, 0), hint, font=sub_font)
@@ -225,7 +242,10 @@ def render_tour_png(tid: int, tour_numbers: Iterable[int]) -> bytes:
         _draw_rect_alpha(img, [x0, y, x0 + xw, y + HEADER_H], HEADER_BG, _row_alpha)
         cx = x0
         for label, col_w, align in _COLS_RAW:
-            _draw_text_in_cell(draw, label, cx, y, col_w, HEADER_H, head_font, HEADER_TXT, align=align)
+            _draw_text_in_cell(
+                draw, label, cx, y, col_w, HEADER_H, head_font, HEADER_TXT,
+                align=align, base_img=img,
+            )
             cx += col_w
         y += HEADER_H
 
@@ -266,6 +286,7 @@ def render_tour_png(tid: int, tour_numbers: Iterable[int]) -> bytes:
                 _draw_text_in_cell(
                     draw, val, cx, y, col_w, ROW_H,
                     col_font, col_color, align=align,
+                    base_img=img,
                 )
                 cx += col_w
             y += ROW_H
