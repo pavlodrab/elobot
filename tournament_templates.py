@@ -64,6 +64,11 @@ class TournamentTemplate:
     # Playoff stage config (JSON string)
     playoff_stage_config: str = "{}"
 
+    # Tours (rounds)
+    tours_enabled: int = 0
+    total_tours: int = 0
+    auto_next_tour: int = 0
+
     def to_tournament_kwargs(self) -> dict:
         """Convert template to kwargs for create_tournament + update_tournament."""
         return {
@@ -84,6 +89,9 @@ class TournamentTemplate:
             "reminder_dm_hours": self.reminder_dm_hours,
             "reminder_chat_enabled": self.reminder_chat_enabled,
             "playoff_stage_config": self.playoff_stage_config,
+            "tours_enabled": self.tours_enabled,
+            "total_tours": self.total_tours,
+            "auto_next_tour": self.auto_next_tour,
         }
 
     def to_json(self) -> str:

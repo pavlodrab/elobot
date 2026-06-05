@@ -1,33 +1,34 @@
 """
-Render tournament tour (тур/gameweek) fixtures as a PNG image.
+Render tournament tour (round) matches as a PNG image so /tours can reply
+with a picture showing one or several rounds at a glance.
 
-Public entry points:
-  render_tour_png(tid, tour_nums) -> bytes
+Public entry point:
+
+* ``render_tour_png(tid, tour_numbers) -> bytes``
 """
+
 from __future__ import annotations
 
 from io import BytesIO
+from typing import Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
 from bg_helper import make_canvas
-from database import get_tournament, get_matches_by_tour, get_all_tour_nums
+from database import get_player_by_id, get_tournament, get_tour_matches
 
 
-# ── Palette (matches standings_image.py dark theme) ───────────────────────
-BG         = (28, 30, 38)
-CARD_BG    = (40, 44, 54)
-HEADER_BG  = (54, 88, 144)
-HEADER_TXT = (255, 255, 255)
-ROW        = (44, 48, 60)
-ROW_ALT    = (50, 54, 66)
-TEXT       = (235, 238, 245)
-MUTED      = (170, 180, 195)
-BORDER     = (60, 65, 78)
-ACCENT     = (90, 200, 130)
-SCORE_CLR  = (255, 255, 255)
-PENDING    = (150, 158, 175)
-TOUR_HDR   = (38, 60, 110)
+# ── palette (matches standings_image.py) ──────────────────────────────────────
+BG          = (28, 30, 38)
+CARD_BG     = (40, 44, 54)
+HEADER_BG   = (54, 88, 144)
+HEADER_TXT  = (255, 255, 255)
+ROW         = (44, 48, 60)
+ROW_ALT     = (50, 54, 66)
+TEXT        = (235, 238, 245)
+MUTED       = (170, 180, 195)
+BORDER      = (60, 65, 78)
+ACCENT      = (90, 200, 130)
 
 SCALE = 2
 
@@ -36,7 +37,25 @@ def _s(v: int) -> int:
     return int(v * SCALE)
 
 
-# ── Font helpers ─────────────────────────────────────────────────────────
+_COLS_RAW: list[tuple[str, int, str]] = [
+    ("№",     _s(50),  "center"),
+    ("Хозяин", _s(280), "left"),
+    ("Счёт",   _s(90),  "center"),
+    ("Гость",  _s(280), "left"),
+    ("Статус", _s(100), "center"),
+]
+
+PAD       = _s(24)
+ROW_H     = _s(44)
+HEADER_H  = _s(50)
+TOUR_H    = _s(56)
+GAP       = _s(18)
+TITLE_BLK = _s(110)
+
+_COL_TOTAL = sum(w for _, w, _ in _COLS_RAW)
+
+
+# ── font cache ────────────────────────────────────────────────────────────────
 _FONT_CACHE: dict[tuple[int, bool], ImageFont.ImageFont] = {}
 
 _BOLD_PATHS = (
@@ -70,119 +89,9 @@ def _font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     return f
 
 
-# ── Layout constants ──────────────────────────────────────────────────────
-PAD        = _s(20)
-ROW_H      = _s(42)
-HEADER_H   = _s(56)
-TOUR_HDR_H = _s(38)
-GAP        = _s(12)
-
-# Column layout: (label, width_px, align)
-_COLS_RAW = [
-    ("home",  240, "left"),
-    ("score",  80, "center"),
-    ("away",  240, "right"),
-]
-COLS = [(lbl, _s(w), al) for lbl, w, al in _COLS_RAW]
-TABLE_W = sum(w for _, w, _ in COLS)
-
-
-def _player_name(match: dict, side: str) -> str:
-    """Return a display name for player1 (side='1') or player2 (side='2')."""
-    nick = (match.get(f"p{side}_nickname") or "").strip()
-    user = (match.get(f"p{side}_username") or "").strip()
-    import re
-    is_synthetic = bool(user) and bool(re.match(r"^id_\d+$", user.lower()))
-    if is_synthetic:
-        return nick or user.lower().replace("id_", "id ", 1)
-    if nick and user:
-        if nick.lower() == user.lower():
-            return f"@{user}"
-        return nick
-    return f"@{user}" if user else nick or "?"
-
-
-def _score_str(match: dict) -> str:
-    """Return '3:1', 'пен 3:1 (4:3)', or '—:—' for pending."""
-    if match.get("status") != "confirmed":
-        return "—:—"
-    s1 = match.get("score1")
-    s2 = match.get("score2")
-    if s1 is None or s2 is None:
-        return "—:—"
-    base = f"{s1}:{s2}"
-    pen1 = match.get("pen1")
-    pen2 = match.get("pen2")
-    if pen1 is not None and pen2 is not None:
-        return f"{base} ({pen1}:{pen2})"
-    return base
-
-
-def _draw_text_centered(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    x: int, y: int, w: int, h: int,
-    font: ImageFont.ImageFont,
-    color: tuple,
-) -> None:
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    tx = x + (w - tw) // 2
-    ty = y + (h - th) // 2 - bbox[1]
-    draw.text((tx, ty), text, font=font, fill=color)
-
-
-def _draw_text_left(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    x: int, y: int, h: int,
-    font: ImageFont.ImageFont,
-    color: tuple,
-    max_w: int,
-) -> None:
-    # Truncate if needed
-    while text:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        tw = bbox[2] - bbox[0]
-        if tw <= max_w:
-            break
-        text = text[:-2] + "…"
-    bbox = draw.textbbox((0, 0), text, font=font)
-    th = bbox[3] - bbox[1]
-    ty = y + (h - th) // 2 - bbox[1]
-    draw.text((x + _s(8), ty), text, font=font, fill=color)
-
-
-def _draw_text_right(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    x: int, y: int, w: int, h: int,
-    font: ImageFont.ImageFont,
-    color: tuple,
-    max_w: int,
-) -> None:
-    # Truncate if needed
-    while text:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        tw = bbox[2] - bbox[0]
-        if tw <= max_w:
-            break
-        text = text[2:]
-        if not text:
-            break
-        text = "…" + text.lstrip("…")
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    tx = x + w - tw - _s(8)
-    ty = y + (h - th) // 2 - bbox[1]
-    draw.text((tx, ty), text, font=font, fill=color)
-
-
 def _draw_rect_alpha(
     img: Image.Image,
-    box: tuple,
+    box: list | tuple,
     fill: tuple[int, int, int],
     alpha: int = 255,
 ) -> None:
@@ -192,7 +101,8 @@ def _draw_rect_alpha(
     if alpha <= 0:
         return
     x0, y0, x1, y1 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
-    w, h = x1 - x0, y1 - y0
+    w = x1 - x0
+    h = y1 - y0
     if w <= 0 or h <= 0:
         return
     overlay = Image.new("RGBA", (w, h), fill + (alpha,))
@@ -205,112 +115,160 @@ def _draw_rect_alpha(
     )
 
 
-def _render(
-    t: dict,
-    tours_data: list[tuple[int, list[dict]]],
-    title: str,
-) -> bytes:
-    """
-    Core renderer. ``tours_data`` is a list of (tour_num, matches) pairs.
-    """
-    font_title  = _font(22, bold=True)
-    font_header = _font(16, bold=True)
-    font_tour   = _font(15, bold=True)
-    font_row    = _font(14)
-    font_score  = _font(15, bold=True)
+def _draw_text_in_cell(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    x: int, y: int, w: int, h: int,
+    font: ImageFont.ImageFont,
+    color: tuple,
+    *,
+    align: str = "left",
+    pad: int | None = None,
+) -> None:
+    if pad is None:
+        pad = _s(12)
+    from emoji_helper import measure_text_with_emoji
+    tw = measure_text_with_emoji(text, font)
+    bbox = draw.textbbox((0, 0), "Hg", font=font)
+    th = bbox[3] - bbox[1]
+    if align == "right":
+        tx = x + w - pad - tw
+    elif align == "center":
+        tx = x + (w - tw) // 2
+    else:
+        tx = x + pad
+    ty = y + (h - th) // 2 - bbox[1]
+    draw.text((tx, ty), text, font=font, fill=color)
 
-    # Calculate total height
-    height = PAD + HEADER_H + GAP
-    for _tn, matches in tours_data:
-        height += TOUR_HDR_H
-        height += ROW_H * max(len(matches), 1)
+
+def _status_icon(status: str) -> str:
+    return {
+        "pending": "⏳",
+        "reported": "🟡",
+        "awaiting_admin": "🟡",
+        "confirmed": "✅",
+    }.get(status, "⏳")
+
+
+# ── public API ────────────────────────────────────────────────────────────────
+def render_tour_png(tid: int, tour_numbers: Iterable[int]) -> bytes:
+    """Render one or more tours as a PNG image.
+
+    Each tour becomes a separate block with a title bar, column headers,
+    and match rows. Status is shown with icons: ⏳ pending, 🟡 reported,
+    ✅ confirmed.
+    """
+    t = get_tournament(tid) or {}
+    name = (t.get("name") or "Турнир").strip()
+
+    title_font = _font(_s(34), bold=True)
+    sub_font   = _font(_s(20), bold=False)
+    tour_font  = _font(_s(26), bold=True)
+    head_font  = _font(_s(20), bold=True)
+    row_font   = _font(_s(22), bold=False)
+    name_font  = _font(_s(18), bold=False)
+
+    w = PAD * 2 + _COL_TOTAL
+
+    # First pass: collect match data and compute height
+    blocks: list[tuple[int, list[dict]]] = []
+    for tn in tour_numbers:
+        matches = get_tour_matches(tid, tn)
+        if matches:
+            blocks.append((tn, matches))
+
+    if not blocks:
+        # Single block with "no matches"
+        blocks.append((next(iter(tour_numbers), 0), []))
+
+    height = TITLE_BLK
+    for tn, matches in blocks:
+        height += TOUR_H + HEADER_H
+        height += ROW_H * max(1, len(matches))
         height += GAP
-    height += PAD
 
-    width = TABLE_W + PAD * 2
-
-    overlay_alpha = int(t.get("bg_overlay_alpha") or 165)
     img = make_canvas(
-        width, height,
+        w, height,
         bg_color=BG,
         bg_image_path=t.get("bg_image_path"),
         bg_image_data=t.get("bg_image_data"),
-        overlay_alpha=overlay_alpha,
+        overlay_alpha=int(t.get("bg_overlay_alpha") or 165),
     )
     draw = ImageDraw.Draw(img)
+    _row_alpha = int(t.get("row_bg_alpha") or 255)
 
-    y = PAD
+    # Title
+    t_type = (t.get("tournament_type") or "").upper()
+    rt = ("лига" if int(t.get("groups_only") or 0) else "группы")
+    sub = "  ·  ".join(filter(None, [t_type, rt, "Туры"]))
+    draw.text((PAD, PAD), name, font=title_font, fill=TEXT)
+    draw.text((PAD, PAD + _s(50)), sub, font=sub_font, fill=MUTED)
 
-    # ── Main header ──────────────────────────────────────────────────────
-    _draw_rect_alpha(img, (PAD, y, PAD + TABLE_W, y + HEADER_H), HEADER_BG)
-    t_name = t.get("name") or "Лига"
-    # Tournament name (smaller, top)
-    _draw_text_centered(
-        draw, t_name,
-        PAD, y, TABLE_W, HEADER_H // 2,
-        _font(14), MUTED,
-    )
-    # Title (bigger, bottom half)
-    _draw_text_centered(
-        draw, title,
-        PAD, y + HEADER_H // 2, TABLE_W, HEADER_H // 2,
-        font_title, HEADER_TXT,
-    )
-    y += HEADER_H + GAP
+    y = TITLE_BLK
 
-    # ── Rows per tour ───────────────────────────────────────────────────
-    for tour_num, matches in tours_data:
-        # Tour sub-header
-        _draw_rect_alpha(img, (PAD, y, PAD + TABLE_W, y + TOUR_HDR_H), TOUR_HDR)
-        _draw_text_centered(
-            draw, f"🗓 ТУР {tour_num}",
-            PAD, y, TABLE_W, TOUR_HDR_H,
-            font_tour, HEADER_TXT,
-        )
-        y += TOUR_HDR_H
+    for tn, matches in blocks:
+        x0 = PAD
+        xw = _COL_TOTAL
+
+        # Tour title bar
+        title = f"📅 Тур {tn}" if len(blocks) == 1 else f"📅 Тур {tn}"
+        _draw_rect_alpha(img, [x0, y, x0 + xw, y + TOUR_H], CARD_BG, _row_alpha)
+        draw.text((x0 + _s(16), y + _s(14)), title, font=tour_font, fill=TEXT)
+        if matches:
+            hint = f"{len(matches)} матчей"
+            bbox = draw.textbbox((0, 0), hint, font=sub_font)
+            hx = x0 + xw - _s(16) - (bbox[2] - bbox[0])
+            draw.text((hx, y + _s(18)), hint, font=sub_font, fill=MUTED)
+        y += TOUR_H
+
+        # Column headers
+        _draw_rect_alpha(img, [x0, y, x0 + xw, y + HEADER_H], HEADER_BG, _row_alpha)
+        cx = x0
+        for label, col_w, align in _COLS_RAW:
+            _draw_text_in_cell(draw, label, cx, y, col_w, HEADER_H, head_font, HEADER_TXT, align=align)
+            cx += col_w
+        y += HEADER_H
 
         if not matches:
-            _draw_rect_alpha(img, (PAD, y, PAD + TABLE_W, y + ROW_H), ROW)
-            _draw_text_centered(
-                draw, "— нет матчей —",
-                PAD, y, TABLE_W, ROW_H,
-                font_row, MUTED,
-            )
+            _draw_rect_alpha(img, [x0, y, x0 + xw, y + ROW_H], ROW_ALT, _row_alpha)
+            draw.text((x0 + _s(16), y + _s(12)), "Нет матчей в этом туре", font=row_font, fill=MUTED)
             y += ROW_H
-        else:
-            col_home_w, col_score_w, col_away_w = [w for _, w, _ in COLS]
-            col_home_x  = PAD
-            col_score_x = col_home_x + col_home_w
-            col_away_x  = col_score_x + col_score_w
+            y += GAP
+            continue
 
-            for idx, m in enumerate(matches):
-                row_bg = ROW if idx % 2 == 0 else ROW_ALT
-                _draw_rect_alpha(img, (PAD, y, PAD + TABLE_W, y + ROW_H), row_bg)
+        for pos, m in enumerate(matches, 1):
+            row_bg = ROW_ALT if pos % 2 == 0 else ROW
+            _draw_rect_alpha(img, [x0, y, x0 + xw, y + ROW_H], row_bg, _row_alpha)
+            draw.line(
+                [x0, y + ROW_H - 1, x0 + xw, y + ROW_H - 1],
+                fill=BORDER,
+            )
 
-                home_name = _player_name(m, "1")
-                away_name = _player_name(m, "2")
-                score     = _score_str(m)
-                score_clr = SCORE_CLR if m.get("status") == "confirmed" else PENDING
+            p1 = get_player_by_id(m["player1_id"])
+            p2 = get_player_by_id(m["player2_id"])
+            n1 = (p1 or {}).get("username", "?")
+            n2 = (p2 or {}).get("username", "?")
 
-                _draw_text_left(
-                    draw, home_name,
-                    col_home_x, y, ROW_H, font_row, TEXT, col_home_w - _s(8),
-                )
-                _draw_text_centered(
-                    draw, score,
-                    col_score_x, y, col_score_w, ROW_H, font_score, score_clr,
-                )
-                _draw_text_right(
-                    draw, away_name,
-                    col_away_x, y, col_away_w, ROW_H, font_row, TEXT, col_away_w - _s(8),
-                )
+            s1 = m.get("score1")
+            s2 = m.get("score2")
+            is_confirmed = m.get("status") == "confirmed"
+            score = f"{s1}:{s2}" if (is_confirmed and s1 is not None and s2 is not None) else "–:–"
 
-                # Thin border between rows
-                draw.line(
-                    [(PAD, y + ROW_H - 1), (PAD + TABLE_W, y + ROW_H - 1)],
-                    fill=BORDER, width=1,
+            icon = _status_icon(m.get("status", ""))
+
+            vals = [str(pos), n1, score, n2, icon]
+            cx = x0
+            for (label, col_w, align), val in zip(_COLS_RAW, vals):
+                col_font = name_font if label in ("Хозяин", "Гость") else row_font
+                col_color = TEXT
+                if label == "Счёт" and is_confirmed:
+                    col_color = ACCENT
+                _draw_text_in_cell(
+                    draw, val, cx, y, col_w, ROW_H,
+                    col_font, col_color, align=align,
                 )
-                y += ROW_H
+                cx += col_w
+            y += ROW_H
 
         y += GAP
 
@@ -319,30 +277,4 @@ def _render(
     return buf.getvalue()
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
-
-def render_tour_png(tid: int, tour_nums: list[int]) -> bytes:
-    """Render one or more tours as a single PNG.
-
-    Args:
-        tid:       Tournament ID.
-        tour_nums: Sorted list of tour numbers to render (e.g. [1] or [1,2,3]).
-
-    Returns:
-        PNG bytes.
-    """
-    t = get_tournament(tid) or {}
-
-    if len(tour_nums) == 1:
-        title = f"ТУР {tour_nums[0]}"
-    elif len(tour_nums) == 2 and tour_nums[1] == tour_nums[0] + 1:
-        title = f"ТУРЫ {tour_nums[0]}–{tour_nums[-1]}"
-    else:
-        title = f"ТУРЫ {tour_nums[0]}–{tour_nums[-1]}"
-
-    tours_data: list[tuple[int, list[dict]]] = []
-    for tn in tour_nums:
-        matches = get_matches_by_tour(tid, tn)
-        tours_data.append((tn, matches))
-
-    return _render(t, tours_data, title)
+__all__ = ["render_tour_png"]
