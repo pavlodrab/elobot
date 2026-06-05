@@ -865,6 +865,51 @@ async def _finalize_match_after_admin(
         if announce_stage:
             await _announce_stage_advance(ctx, int(tid), announce_stage)
 
+        # ── Tours (rounds): check if current tour is complete ──────────
+        try:
+            t_obj = get_tournament(int(tid))
+            if t_obj and int(t_obj.get("tours_enabled") or 0):
+                cur_tour = int(t_obj.get("current_tour") or 0)
+                if cur_tour > 0 and db.is_tour_complete(int(tid), cur_tour):
+                    db.set_tour_status(int(tid), cur_tour, "completed")
+                    if int(t_obj.get("auto_next_tour") or 0):
+                        # Auto-advance
+                        try:
+                            from tournament import generate_next_tour
+                            mids = generate_next_tour(int(tid))
+                            if mids:
+                                t_after = get_tournament(int(tid))
+                                new_tour = int(t_after.get("current_tour") or 0)
+                                bound = t_after.get("chat_id")
+                                if bound:
+                                    try:
+                                        await ctx.bot.send_message(
+                                            int(bound),
+                                            f"⚡ <b>Тур {cur_tour} завершён! "
+                                            f"Тур {new_tour} начался.</b>\n"
+                                            f"Создано {len(mids)} матчей.",
+                                            parse_mode="HTML",
+                                        )
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            log.exception("auto_next_tour failed")
+                    else:
+                        # Notify bound chat
+                        bound = t_obj.get("chat_id")
+                        if bound:
+                            try:
+                                await ctx.bot.send_message(
+                                    int(bound),
+                                    f"✅ <b>Все матчи тура {cur_tour} сыграны!</b>\n"
+                                    f"Используй /next_tour {tid} чтобы начать следующий тур.",
+                                    parse_mode="HTML",
+                                )
+                            except Exception:
+                                pass
+        except Exception:
+            log.exception("tour completion check failed")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phantom-aware "open matches" listing

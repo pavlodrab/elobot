@@ -56,7 +56,9 @@ from database import (
     get_tournament_players,
     is_player_banned,
     log_tournament_action,
+    set_current_tour,
     set_tournament_chat,
+    set_tour_status,
     unset_tournament_chat,
     update_match,
     update_tournament,
@@ -179,6 +181,7 @@ async def cmd_create_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bracket_only = False
     groups_only = False
     league_mode = False
+    tours_enabled = False
 
     def _is_tech_marker(tok: str) -> bool:
         return tok.lower() in (
@@ -213,6 +216,9 @@ async def cmd_create_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "чемп", "champ", "круговой", "круговая",
         )
 
+    def _is_tours_marker(tok: str) -> bool:
+        return tok.lower() in ("туры", "tours", "тур", "tour")
+
     def _is_score_token(tok: str) -> bool:
         if ":" not in tok:
             return False
@@ -220,7 +226,9 @@ async def cmd_create_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return a.isdigit() and b.isdigit() and 0 <= int(a) <= 99 and 0 <= int(b) <= 99
 
     leftover: list[str] = []
-    for a in args:
+    tours_count = 0
+    it = iter(args)
+    for a in it:
         if _is_tech_marker(a):
             auto_tech_loss = True
             continue
@@ -233,6 +241,17 @@ async def cmd_create_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if _is_league_marker(a):
             league_mode = True
             groups_only = True
+            continue
+        if _is_tours_marker(a):
+            tours_enabled = True
+            try:
+                nxt = next(it)
+                if nxt.isdigit():
+                    tours_count = int(nxt)
+                else:
+                    leftover.append(nxt)
+            except StopIteration:
+                pass
             continue
         if _is_score_token(a):
             auto_tech_score = a
@@ -327,6 +346,8 @@ async def cmd_create_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if league_mode:
         # League = single group, everyone plays everyone
         update_tournament(tid, groups_count=1)
+    if tours_enabled:
+        update_tournament(tid, tours_enabled=1, total_tours=tours_count)
     scope_line = (
         "🌐 Тип лидерборда: <b>общий</b> — матчи влияют на общий ELO "
         f"и ELO {t_type_label(t_type)}."
@@ -356,6 +377,12 @@ async def cmd_create_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "\n🏁 Формат: <b>сразу плей-офф</b> (без групп). "
             "Все добавленные игроки попадут в сидованный бракет с байями "
             "по глобальному ELO."
+        )
+    if tours_enabled:
+        total_str = str(tours_count) if tours_count else "авто"
+        explicit_summary += (
+            f"\n📅 <b>Туры</b> — матчи разбиты на {total_str} туров. "
+            "Каждый тур запускается вручную или авто."
         )
     if groups_only:
         if league_mode:
@@ -968,7 +995,11 @@ async def cmd_start_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         groups_count = len(manual_groups)
         update_tournament(t["id"], groups_count=groups_count)
         groups = manual_groups
-        mids = generate_group_fixtures(t["id"], groups)
+        if int(t.get("tours_enabled") or 0):
+            from tournament import generate_next_tour
+            mids = generate_next_tour(t["id"])
+        else:
+            mids = generate_group_fixtures(t["id"], groups)
 
         lines = [
             f"🎯 <b>Ручная раздача принята!</b>\n"
@@ -1017,7 +1048,11 @@ async def cmd_start_tournament(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     pids = [p["player_id"] for p in players]
     groups = draw_groups(t["id"], pids, groups_count)
-    mids = generate_group_fixtures(t["id"], groups)
+    if int(t.get("tours_enabled") or 0):
+        from tournament import generate_next_tour
+        mids = generate_next_tour(t["id"])
+    else:
+        mids = generate_group_fixtures(t["id"], groups)
 
     lines = [
         f"🎲 <b>Жеребьёвка завершена!</b>\n"
@@ -5441,6 +5476,160 @@ async def _handle_tournament_settings_cb(
         )
         return
 
+    # ── Tours (rounds) ────────────────────────────────────────────────────
+    if action == "cat_tours":
+        from bot import _submenu_ts_tours
+        await query.edit_message_text(
+            f"📅 <b>Туры</b> — {html.escape(t['name'])} (ID {tid})",
+            parse_mode="HTML",
+            reply_markup=_submenu_ts_tours(t),
+        )
+        return
+
+    if action == "tours_toggle":
+        new_val = 0 if int(t.get("tours_enabled") or 0) else 1
+        if new_val == 1:
+            gc = int(t.get("groups_count") or 1)
+            if gc != 1:
+                await query.answer(
+                    "❌ Туры работают только в режиме лиги (1 группа).",
+                    show_alert=True,
+                )
+                return
+            # Also ensure groups_only=1 for league mode
+            update_tournament(tid, tours_enabled=1, groups_only=1, groups_count=1)
+        else:
+            update_tournament(tid, tours_enabled=0)
+        t = get_tournament(tid)
+        from bot import _submenu_ts_tours
+        await query.edit_message_text(
+            f"📅 <b>Туры</b> — {html.escape(t['name'])} (ID {tid})",
+            parse_mode="HTML",
+            reply_markup=_submenu_ts_tours(t),
+        )
+        return
+
+    if action == "tours_total":
+        cur = int(t.get("total_tours") or 0)
+        cur_lbl = str(cur) if cur else "авто"
+        opts = [
+            ("авто", f"ts:tours_total_set:{tid}:0"),
+            *[(str(n), f"ts:tours_total_set:{tid}:{n}") for n in (4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 26, 30)],
+        ]
+        await query.edit_message_text(
+            f"🔢 Сколько всего туров в турнире?\n"
+            f"• <b>авто</b> — N-1 (по числу игроков)\n"
+            f"• Можно указать точное число\n"
+            f"Текущее: <b>{cur_lbl}</b>",
+            parse_mode="HTML",
+            reply_markup=_picker("tours_total", opts),
+        )
+        return
+
+    if action == "tours_total_set":
+        try:
+            n = max(0, min(99, int(parts[3])))
+        except (ValueError, IndexError):
+            n = 0
+        update_tournament(tid, total_tours=n)
+        t = get_tournament(tid)
+        from bot import _submenu_ts_tours
+        await query.edit_message_text(
+            f"📅 <b>Туры</b> — {html.escape(t['name'])} (ID {tid})",
+            parse_mode="HTML",
+            reply_markup=_submenu_ts_tours(t),
+        )
+        return
+
+    if action == "tours_setcur":
+        total = int(t.get("total_tours") or 0)
+        if total == 0:
+            await query.answer(
+                "❌ Сначала укажи количество туров.",
+                show_alert=True,
+            )
+            return
+        cur = int(t.get("current_tour") or 0)
+        opts = [(str(n), f"ts:tours_setcur_set:{tid}:{n}") for n in range(1, total + 1)]
+        await query.edit_message_text(
+            f"▶️ Установи текущий тур (1–{total}).\n"
+            f"Текущий: <b>{cur}</b>",
+            parse_mode="HTML",
+            reply_markup=_picker("tours_setcur", opts),
+        )
+        return
+
+    if action == "tours_setcur_set":
+        try:
+            n = max(1, int(parts[3]))
+        except (ValueError, IndexError):
+            n = 1
+        set_current_tour(tid, n)
+        t = get_tournament(tid)
+        from bot import _submenu_ts_tours
+        await query.edit_message_text(
+            f"📅 <b>Туры</b> — {html.escape(t['name'])} (ID {tid})",
+            parse_mode="HTML",
+            reply_markup=_submenu_ts_tours(t),
+        )
+        return
+
+    if action == "tours_auto":
+        new_val = 0 if int(t.get("auto_next_tour") or 0) else 1
+        update_tournament(tid, auto_next_tour=new_val)
+        t = get_tournament(tid)
+        from bot import _submenu_ts_tours
+        await query.edit_message_text(
+            f"📅 <b>Туры</b> — {html.escape(t['name'])} (ID {tid})",
+            parse_mode="HTML",
+            reply_markup=_submenu_ts_tours(t),
+        )
+        return
+
+    if action == "tours_next":
+        if not _can_manage_tournament(user_id, t):
+            await query.answer("❌ Только админ может запускать туры.", show_alert=True)
+            return
+        if not int(t.get("tours_enabled") or 0):
+            await query.answer("❌ Режим туров выключен.", show_alert=True)
+            return
+        await query.answer("⏳ Генерирую матчи…")
+        try:
+            from tournament import generate_next_tour
+            mids = generate_next_tour(tid)
+        except Exception as e:
+            log.exception("tours_next failed")
+            await query.message.reply_text(f"❌ Ошибка: {e}")
+            return
+        if not mids:
+            await query.message.reply_text("❌ Все туры уже сыграны.")
+            return
+        msg = f"✅ Создан тур {int(t.get('current_tour') or 0) + 1} (матчей: {len(mids)})."
+        # Try to announce in bound chat
+        bound_chat = t.get("chat_id")
+        if bound_chat:
+            try:
+                await ctx.bot.send_message(
+                    int(bound_chat),
+                    f"⚡ <b>Тур {int(t.get('current_tour') or 0) + 1} начался!</b>\n"
+                    f"Все матчи созданы, ждём результаты.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        t = get_tournament(tid)
+        from bot import _submenu_ts_tours
+        await query.edit_message_text(
+            f"📅 <b>Туры</b> — {html.escape(t['name'])} (ID {tid})",
+            parse_mode="HTML",
+            reply_markup=_submenu_ts_tours(t),
+        )
+        try:
+            await query.message.reply_text(msg, parse_mode="HTML")
+        except Exception:
+            pass
+        return
+
     # ── Footer text (custom signature appended to bot messages) ───────────
     if action == "footer":
         from handlers.common import format_footer_preview, _get_footer_places, FOOTER_PLACES_ALL
@@ -7451,3 +7640,159 @@ async def on_db_import_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         reply_markup=kb,
     )
+
+
+# ── Tours (rounds) commands ───────────────────────────────────────────────────
+
+
+async def cmd_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/tours [ID] [range]`` — show tour matches as PNG image.
+
+    Range examples: ``1``, ``1-4``, ``1,3,5``. Default: current tour.
+    """
+    args = list(ctx.args or [])
+    t, err = _resolve_tournament_from_args(update, ctx, args=args)
+    if t is None:
+        await send(update, err or "❌ Не нашёл турнир.")
+        return
+    if not int(t.get("tours_enabled") or 0):
+        await send(update, "❌ В этом турнире не включены туры.")
+        return
+
+    # Parse range from remaining args after tournament ID
+    # Find a token that looks like a range
+    range_arg = None
+    for a in args:
+        if a.replace("-", "").replace(",", "").isdigit():
+            range_arg = a
+            break
+
+    try:
+        from tour_image import render_tour_png
+        tour_numbers = _parse_tour_range(range_arg, t) if range_arg else _current_tour_range(t)
+        png = render_tour_png(t["id"], tour_numbers)
+        bio = io.BytesIO(png)
+        bio.name = f"tours_{t['id']}.png"
+        await update.effective_message.reply_photo(
+            photo=bio,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.exception("cmd_tours failed")
+        await send(update, f"❌ Ошибка рендера: {e}")
+
+
+async def cmd_tourstext(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/tourstext [ID] [range]`` — show tour matches as text."""
+    args = list(ctx.args or [])
+    t, err = _resolve_tournament_from_args(update, ctx, args=args)
+    if t is None:
+        await send(update, err or "❌ Не нашёл турнир.")
+        return
+    if not int(t.get("tours_enabled") or 0):
+        await send(update, "❌ В этом турнире не включены туры.")
+        return
+
+    range_arg = None
+    for a in args:
+        if a.replace("-", "").replace(",", "").isdigit():
+            range_arg = a
+            break
+
+    tour_numbers = _parse_tour_range(range_arg, t) if range_arg else _current_tour_range(t)
+    lines = [f"📅 <b>Турнир: {html.escape(t['name'])}</b>\n"]
+    for tn in tour_numbers:
+        matches = db.get_tour_matches(t["id"], tn)
+        if not matches:
+            lines.append(f"<b>Тур {tn}</b> — нет матчей\n")
+            continue
+        lines.append(f"<b>─── Тур {tn} ───</b>")
+        for m in matches:
+            p1 = get_player_by_id(m["player1_id"])
+            p2 = get_player_by_id(m["player2_id"])
+            n1 = html.escape(p1["username"]) if p1 else "?"
+            n2 = html.escape(p2["username"]) if p2 else "?"
+            status_icons = {"pending": "⏳", "reported": "🟡", "confirmed": "✅", "awaiting_admin": "🟡"}
+            icon = status_icons.get(m.get("status", ""), "⏳")
+            sc = f"{m.get('score1') or '?'}:{m.get('score2') or '?'}" if m.get("status") == "confirmed" else "–:–"
+            lines.append(f"{icon} {n1} <b>{sc}</b> {n2}")
+        lines.append("")
+    await send(update, "\n".join(lines))
+
+
+async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/next_tour [ID]`` — create matches for the next tour (admin only)."""
+    args = list(ctx.args or [])
+    t, err = _resolve_tournament_from_args(update, ctx, args=args)
+    if t is None:
+        await send(update, err or "❌ Не нашёл турнир.")
+        return
+    if not _can_manage_tournament(update.effective_user.id, t):
+        await send(update, "❌ Только админ может запускать новые туры.")
+        return
+    if not int(t.get("tours_enabled") or 0):
+        await send(update, "❌ В этом турнире не включены туры.")
+        return
+
+    try:
+        from tournament import generate_next_tour
+        mids = generate_next_tour(t["id"])
+    except Exception as e:
+        log.exception("cmd_next_tour failed")
+        await send(update, f"❌ Ошибка: {e}")
+        return
+
+    if not mids:
+        await send(update, "❌ Все туры уже сыграны.")
+        return
+
+    cur = int(t.get("current_tour") or 0)
+    await send(
+        update,
+        f"✅ Создан тур {cur + 1} ({len(mids)} матчей).\n"
+        f"Используй /tours {t['id']} чтобы увидеть.",
+    )
+    bound_chat = t.get("chat_id")
+    if bound_chat:
+        try:
+            await ctx.bot.send_message(
+                int(bound_chat),
+                f"⚡ <b>Тур {cur + 1} начался!</b>\n"
+                f"Создано {len(mids)} матчей. Удачи!",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
+def _parse_tour_range(range_str: str | None, t: dict) -> list[int]:
+    """Parse a range string like '1', '1-4', '1,3,5' into tour numbers."""
+    total = int(t.get("total_tours") or 0)
+    if not range_str:
+        return _current_tour_range(t)
+    # Comma-separated
+    if "," in range_str:
+        nums = []
+        for part in range_str.split(","):
+            part = part.strip()
+            if "-" in part:
+                a, _, b = part.partition("-")
+                nums.extend(range(int(a), int(b) + 1))
+            elif part.isdigit():
+                nums.append(int(part))
+        return sorted(set(n for n in nums if 1 <= n <= total or total == 0))
+    # Range with dash
+    if "-" in range_str:
+        a, _, b = range_str.partition("-")
+        return list(range(int(a), int(b) + 1))
+    # Single number
+    if range_str.isdigit():
+        n = int(range_str)
+        return [n] if (total == 0 or 1 <= n <= total) else []
+    return []
+
+
+def _current_tour_range(t: dict) -> list[int]:
+    """Return the current tour as a single-element list."""
+    cur = int(t.get("current_tour") or 0)
+    return [cur] if cur > 0 else []

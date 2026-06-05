@@ -363,45 +363,23 @@ async def cb_template_create(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("❌ Шаблон не найден.")
         return
 
-    creator = _player_from_user(user)
-    if not creator:
-        await query.message.edit_text("❌ Сначала зарегистрируйся: /register")
-        return
-
-    # Determine draw mode (user may have selected one via buttons)
+    # Draw mode (user may have selected one)
     draw_mode = ctx.user_data.pop("tpl_draw_mode", tpl.draw_mode)
 
-    # Create tournament
-    name = f"{tpl.name} #{__import__('datetime').datetime.utcnow().strftime('%d%m%y')}"
-
-    chat = update.effective_chat
-    auto_bind = None
-    if chat and chat.type in ("group", "supergroup", "channel"):
-        auto_bind = chat.id
-
-    tid = create_tournament(
-        name,
-        tournament_type=t_type,
-        created_by=creator["id"],
-        is_official=True,
-        chat_id=auto_bind,
-    )
-
-    # Apply template settings
-    kwargs = tpl.to_tournament_kwargs()
-    kwargs["draw_mode"] = draw_mode
-    # Filter out None values
-    kwargs = {k: v for k, v in kwargs.items() if v is not None}
-    update_tournament(tid, **kwargs)
-
+    # Ask for name first
+    ctx.user_data["pending_tpl_create"] = {
+        "source": "builtin",
+        "key": key,
+        "t_type": t_type,
+        "draw_mode": draw_mode,
+    }
     await query.message.edit_text(
-        f"🏆 Турнир <b>{html.escape(name)}</b> создан!\n"
-        f"📋 Шаблон: <b>{html.escape(tpl.name)}</b>\n"
-        f"⚽ Тип: <b>{t_type_label(t_type)}</b>\n"
-        f"🎲 Жребий: <b>{_draw_mode_label(draw_mode)}</b>\n"
-        f"ID: {tid}\n\n"
-        f"Добавляй игроков: <code>/add_player @user1, @user2</code>\n"
-        f"Запуск: <code>/start_tournament</code>",
+        f"📝 Отправь <b>название турнира</b> одним сообщением.\n"
+        f"Шаблон: <b>{html.escape(tpl.name)}</b>\n"
+        f"Тип: <b>{t_type_label(t_type)}</b>\n\n"
+        f"Можешь добавить правила после названия через символ <b>|</b>\n"
+        f"Пример: <code>ЧМ-2026 | только ВСА, бо-3</code>\n\n"
+        f"Или отправь <code>/skip</code> для автогенерации.",
         parse_mode="HTML",
     )
 
@@ -490,12 +468,10 @@ async def cb_custom_base(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         rows = [
             [
-                InlineKeyboardButton(
-                    "1 круг", callback_data="tpl_cfg:rounds:1"
-                ),
-                InlineKeyboardButton(
-                    "2 круга", callback_data="tpl_cfg:rounds:2"
-                ),
+                InlineKeyboardButton("1 круг", callback_data="tpl_cfg:rounds:1"),
+                InlineKeyboardButton("2 круга", callback_data="tpl_cfg:rounds:2"),
+                InlineKeyboardButton("3 круга", callback_data="tpl_cfg:rounds:3"),
+                InlineKeyboardButton("4 круга", callback_data="tpl_cfg:rounds:4"),
             ],
             [
                 InlineKeyboardButton("⬅️ Назад", callback_data="tpl_cat:custom")
@@ -581,6 +557,32 @@ async def cb_config_param(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if base == "league" and param == "groups":
+        # Ask about tours
+        text = "📅 Разбить матчи на туры?"
+        rows = [
+            [
+                InlineKeyboardButton("❌ Нет", callback_data="tpl_cfg:tours:0"),
+            ],
+            [
+                InlineKeyboardButton("авто", callback_data="tpl_cfg:tours:1"),
+                InlineKeyboardButton("4 тура", callback_data="tpl_cfg:tours:4"),
+                InlineKeyboardButton("6 туров", callback_data="tpl_cfg:tours:6"),
+                InlineKeyboardButton("8 туров", callback_data="tpl_cfg:tours:8"),
+            ],
+            [
+                InlineKeyboardButton("10 т.", callback_data="tpl_cfg:tours:10"),
+                InlineKeyboardButton("14 т.", callback_data="tpl_cfg:tours:14"),
+                InlineKeyboardButton("20 т.", callback_data="tpl_cfg:tours:20"),
+                InlineKeyboardButton("30 т.", callback_data="tpl_cfg:tours:30"),
+            ],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="tpl_cat:custom")],
+        ]
+        await query.message.edit_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows)
+        )
+        return
+
     if base == "cup" and param == "legs":
         # Ask about draw mode
         text = "🎲 Способ жеребьёвки:"
@@ -638,6 +640,8 @@ async def cb_config_param(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             [
                 InlineKeyboardButton("1 круг", callback_data="tpl_cfg:rounds:1"),
                 InlineKeyboardButton("2 круга", callback_data="tpl_cfg:rounds:2"),
+                InlineKeyboardButton("3 круга", callback_data="tpl_cfg:rounds:3"),
+                InlineKeyboardButton("4 круга", callback_data="tpl_cfg:rounds:4"),
             ],
             [InlineKeyboardButton("⬅️ Назад", callback_data="tpl_cat:custom")],
         ]
@@ -692,8 +696,11 @@ def _build_custom_template(base: str, cfg: dict) -> TournamentTemplate:
     draw = cfg.get("draw", "auto")
     third = int(cfg.get("third", 1))
     slots = int(cfg.get("slots", 2))
+    tours = int(cfg.get("tours", 0))
 
     if base == "league":
+        tours_enabled = 1 if tours > 0 else 0
+        total_tours = tours
         return TournamentTemplate(
             name="Свой шаблон (лига)",
             template_type="league",
@@ -702,6 +709,8 @@ def _build_custom_template(base: str, cfg: dict) -> TournamentTemplate:
             group_matches_per_pair=rounds,
             playoff_third_place=0,
             draw_mode="random",
+            tours_enabled=tours_enabled,
+            total_tours=total_tours,
         )
     elif base == "cup":
         mode = "wins" if legs >= 3 else "goals"
@@ -746,42 +755,17 @@ async def cb_custom_final_create(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     if not is_admin(user.id):
         await query.message.edit_text("❌ Только админы.")
         return
-    creator = _player_from_user(user)
-    if not creator:
-        await query.message.edit_text("❌ Сначала /register")
-        return
 
-    base = ctx.user_data.get("tpl_custom_base", "league")
-    cfg = ctx.user_data.get("tpl_custom_cfg", {})
-    tpl = _build_custom_template(base, cfg)
-
-    from datetime import datetime
-    name = f"Турнир #{datetime.utcnow().strftime('%d%m%y')}"
-
-    chat = update.effective_chat
-    auto_bind = None
-    if chat and chat.type in ("group", "supergroup", "channel"):
-        auto_bind = chat.id
-
-    tid = create_tournament(
-        name,
-        tournament_type=t_type,
-        created_by=creator["id"],
-        is_official=True,
-        chat_id=auto_bind,
-    )
-    kwargs = tpl.to_tournament_kwargs()
-    kwargs["draw_mode"] = tpl.draw_mode
-    kwargs = {k: v for k, v in kwargs.items() if v is not None}
-    update_tournament(tid, **kwargs)
-
+    # Save creation config, ask for name
+    ctx.user_data["pending_tpl_create"] = {
+        "source": "custom",
+        "t_type": t_type,
+    }
     await query.message.edit_text(
-        f"🏆 Турнир <b>{html.escape(name)}</b> создан!\n"
-        f"⚽ Тип: <b>{t_type_label(t_type)}</b>\n"
-        f"🎲 Жребий: <b>{_draw_mode_label(tpl.draw_mode)}</b>\n"
-        f"ID: {tid}\n\n"
-        f"Добавляй игроков: <code>/add_player @user1, @user2</code>\n"
-        f"Запуск: <code>/start_tournament</code>",
+        "📝 Отправь <b>название турнира</b> одним сообщением.\n\n"
+        "Можешь добавить правила после названия через символ <b>|</b>\n"
+        "Пример: <code>ЧМ-2026 | только ВСА, бо-3</code>\n\n"
+        "Или отправь <code>/skip</code> для автогенерации.",
         parse_mode="HTML",
     )
 
@@ -1460,7 +1444,12 @@ def _format_template_info(tpl: TournamentTemplate) -> str:
 
     # Matches
     if not tpl.bracket_only:
-        rr = "двойной" if tpl.group_matches_per_pair == 2 else "одинарный"
+        rr = {
+            1: "одинарный",
+            2: "двойной",
+            3: "тройной",
+            4: "4 круга",
+        }.get(tpl.group_matches_per_pair, f"{tpl.group_matches_per_pair} кругов")
         lines.append(f"🔄 Круг в группе: {rr} ({tpl.group_matches_per_pair}×)")
 
     if tpl.bracket_only or not tpl.groups_only:
@@ -1489,6 +1478,12 @@ def _format_template_info(tpl: TournamentTemplate) -> str:
     if tpl.auto_tech_loss_enabled:
         lines.append(f"⏰ Авто-техпоражение: {tpl.auto_tech_loss_score}")
 
+    # Tours
+    if tpl.tours_enabled:
+        total = str(tpl.total_tours) if tpl.total_tours else "авто"
+        auto = "вкл" if tpl.auto_next_tour else "выкл"
+        lines.append(f"📅 Туры: {total}, авто-переход: {auto}")
+
     return "\n".join(lines)
 
 
@@ -1508,3 +1503,97 @@ def _detect_template_type(t: dict) -> str:
     if int(t.get("groups_only") or 0):
         return "league"
     return "groups_playoff"
+
+
+async def handle_pending_tpl_create_text(update, ctx, text: str) -> bool:
+    """Handle text input for pending tournament name/desc from wizard.
+
+    Returns True if consumed, False otherwise.
+    """
+    pending = ctx.user_data.pop("pending_tpl_create", None)
+    if not pending:
+        return False
+
+    user = update.effective_user
+    creator = _player_from_user(user)
+    if not creator:
+        await send(update, "❌ Сначала зарегистрируйся: /register")
+        return True
+
+    # Parse name and description
+    name = text.strip()
+    description = ""
+    if "|" in name:
+        parts = name.split("|", 1)
+        name = parts[0].strip()
+        description = parts[1].strip()
+
+    if not name:
+        from datetime import datetime
+        name = f"Турнир #{datetime.utcnow().strftime('%d%m%y')}"
+
+    t_type = pending.get("t_type", "vsa")
+
+    chat = update.effective_chat
+    auto_bind = None
+    if chat and chat.type in ("group", "supergroup", "channel"):
+        auto_bind = chat.id
+
+    tid = create_tournament(
+        name,
+        tournament_type=t_type,
+        created_by=creator["id"],
+        is_official=True,
+        chat_id=auto_bind,
+    )
+
+    if pending["source"] == "builtin":
+        key = pending["key"]
+        tpl = get_builtin_template(key)
+        if tpl:
+            kwargs = tpl.to_tournament_kwargs()
+            kwargs["draw_mode"] = pending.get("draw_mode", tpl.draw_mode)
+            if description:
+                kwargs["description"] = description
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            update_tournament(tid, **kwargs)
+            await send(
+                update,
+                f"🏆 Турнир <b>{html.escape(name)}</b> создан!\n"
+                f"📋 Шаблон: <b>{html.escape(tpl.name)}</b>\n"
+                f"⚽ Тип: <b>{t_type_label(t_type)}</b>\n"
+                f"{'📝 Правила: ' + html.escape(description) if description else ''}\n"
+                f"ID: {tid}\n\n"
+                f"Добавляй игроков: <code>/add_player @user1, @user2</code>\n"
+                f"Запуск: <code>/start_tournament</code>",
+            )
+            return True
+    elif pending["source"] == "custom":
+        base = ctx.user_data.pop("tpl_custom_base", "league")
+        cfg = ctx.user_data.pop("tpl_custom_cfg", {})
+        tpl = _build_custom_template(base, cfg)
+        kwargs = tpl.to_tournament_kwargs()
+        kwargs["draw_mode"] = tpl.draw_mode
+        if description:
+            kwargs["description"] = description
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        update_tournament(tid, **kwargs)
+        await send(
+            update,
+            f"🏆 Турнир <b>{html.escape(name)}</b> создан!\n"
+            f"⚽ Тип: <b>{t_type_label(t_type)}</b>\n"
+            f"{'📝 Правила: ' + html.escape(description) if description else ''}\n"
+            f"ID: {tid}\n\n"
+            f"Добавляй игроков: <code>/add_player @user1, @user2</code>\n"
+            f"Запуск: <code>/start_tournament</code>",
+        )
+        return True
+
+    # Fallback: just create with name only
+    await send(
+        update,
+        f"🏆 Турнир <b>{html.escape(name)}</b> создан!\n"
+        f"ID: {tid}\n\n"
+        f"Добавляй игроков: <code>/add_player @user1, @user2</code>",
+    )
+    return True
