@@ -65,7 +65,7 @@ _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 # Additional keys (4+): set env vars OPENROUTER_API_KEY_4, _5, ..., up to
 # _MAX_OPENROUTER_KEYS — no code changes required to plug in more keys.
 _OPENROUTER_DEFAULT_KEY = "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"
-_OPENROUTER_API_KEY_2 = os.getenv("OPENROUTER_API_KEY_2", "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").strip()
+_OPENROUTER_API_KEY_2 = os.getenv("OPENROUTER_API_KEY_2", "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").strip()
 _OPENROUTER_API_KEY_3 = os.getenv("OPENROUTER_API_KEY_3", "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").strip()
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Upper bound for how many additional env-var-only keys we scan for.
