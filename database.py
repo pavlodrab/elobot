@@ -1199,7 +1199,17 @@ def get_next_tour_number(tid: int) -> int:
         (tid,),
     ).fetchone()
     conn.close()
-    return row[0] if row else 1
+    if row is None:
+        return 1
+    # Postgres returns RealDictCursor (dict-like), SQLite returns tuple.
+    # Normalise to a plain int without depending on either shape.
+    try:
+        return int(row[0])
+    except (KeyError, TypeError):
+        try:
+            return int(list(row.values())[0])
+        except Exception:
+            return 1
 
 
 def set_current_tour(tid: int, n: int) -> None:
@@ -1230,7 +1240,16 @@ def is_tour_complete(tid: int, tour_number: int) -> bool:
         (tid, tour_number),
     ).fetchone()
     conn.close()
-    return (row[0] if row else 0) == 0
+    if row is None:
+        return True
+    try:
+        cnt = int(row[0])
+    except (KeyError, TypeError):
+        try:
+            cnt = int(list(row.values())[0])
+        except Exception:
+            return True
+    return cnt == 0
 
 
 
