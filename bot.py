@@ -354,6 +354,11 @@ from handlers.tournament import (  # noqa: E402
     cmd_set_footer,
     cmd_clear_footer,
 )
+from handlers.tours import (  # noqa: E402
+    cmd_turs,
+    cmd_turstext,
+    cmd_tours_list,
+)
 from handlers.match import (  # noqa: E402
     SCORE_RE,
     _after_opponent_confirm,
@@ -7167,6 +7172,16 @@ def main():
     app.add_handler(CommandHandler("table", cmd_table))
     # /standings is a more conventional alias for the same handler.
     app.add_handler(CommandHandler("standings", cmd_table))
+    # Tour / gameweek commands
+    app.add_handler(CommandHandler("turs", cmd_turs))
+    app.add_handler(CommandHandler("tour", cmd_turs))
+    app.add_handler(CommandHandler("tursimage", cmd_turs))
+    app.add_handler(CommandHandler("turstext", cmd_turstext))
+    app.add_handler(CommandHandler("tour_text", cmd_turstext))
+    app.add_handler(CommandHandler("tourtext", cmd_turstext))
+    app.add_handler(CommandHandler("tours", cmd_tours_list))
+    app.add_handler(CommandHandler("turs_list", cmd_tours_list))
+    app.add_handler(CommandHandler("tourslist", cmd_tours_list))
     # Text-only flavours: same data, no PNG rendering.
     app.add_handler(CommandHandler("table_text", cmd_table_text))
     app.add_handler(CommandHandler("tabletext", cmd_table_text))

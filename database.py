@@ -118,6 +118,11 @@ __all__ = [
     "set_chat_quote_quiet_hours",
     "mark_chat_quote_sent",
     "list_chats_with_quote_interval",
+    # Tour (тур) helpers
+    "get_matches_by_tour",
+    "get_all_tour_nums",
+    "set_match_tour",
+    "bulk_set_match_tours",
 ]
 
 
@@ -214,6 +219,7 @@ def init_db():
             stats_extra     TEXT,
             stage           TEXT DEFAULT 'group',
             round_num       INTEGER DEFAULT 1,
+            tour_num        INTEGER DEFAULT 0,
             status          TEXT DEFAULT 'pending',
             reported_by     INTEGER,
             deadline        DATETIME,
@@ -683,6 +689,12 @@ def init_db():
         c.execute("ALTER TABLE matches ADD COLUMN pen1 INTEGER")
     if not _column_exists(conn, "matches", "pen2"):
         c.execute("ALTER TABLE matches ADD COLUMN pen2 INTEGER")
+
+    # Tour number (тур) for league fixtures. 0 = not assigned.
+    # Matches in the same gameweek/round share the same tour_num.
+    # Added 2026-06.
+    if not _column_exists(conn, "matches", "tour_num"):
+        c.execute("ALTER TABLE matches ADD COLUMN tour_num INTEGER DEFAULT 0")
 
     # Background overlay transparency (0–255). 0 = fully transparent overlay
     # (background fully visible), 255 = fully opaque overlay (background
@@ -2180,12 +2192,12 @@ def late_join_tournament_group(
 
 # ── Match helpers ─────────────────────────────────────────────────────────────
 
-def create_match(tid, p1_id, p2_id, stage="group", round_num=1, deadline=None, leg=1):
+def create_match(tid, p1_id, p2_id, stage="group", round_num=1, deadline=None, leg=1, tour_num=0):
     conn = get_conn()
     mid = conn.insert_returning_id(
-        """INSERT INTO matches (tournament_id, player1_id, player2_id, stage, round_num, deadline, leg)
-           VALUES (?,?,?,?,?,?,?)""",
-        (tid, p1_id, p2_id, stage, round_num, deadline, leg),
+        """INSERT INTO matches (tournament_id, player1_id, player2_id, stage, round_num, deadline, leg, tour_num)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (tid, p1_id, p2_id, stage, round_num, deadline, leg, tour_num),
     )
     conn.commit()
     conn.close()
@@ -3268,3 +3280,61 @@ def list_chats_with_quote_interval() -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── Tour (тур) helpers ────────────────────────────────────────────────────────
+
+def get_matches_by_tour(tid: int, tour_num: int) -> list[dict]:
+    """Return all matches for a specific tour number in a tournament,
+    joined with player usernames and game_nicknames for display."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT m.*,
+               p1.username     AS p1_username,
+               p1.game_nickname AS p1_nickname,
+               p2.username     AS p2_username,
+               p2.game_nickname AS p2_nickname
+           FROM matches m
+           LEFT JOIN players p1 ON p1.id = m.player1_id
+           LEFT JOIN players p2 ON p2.id = m.player2_id
+           WHERE m.tournament_id = ? AND m.tour_num = ?
+           ORDER BY m.id""",
+        (tid, tour_num),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_all_tour_nums(tid: int) -> list[int]:
+    """Return sorted list of distinct non-zero tour numbers for a tournament."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT tour_num FROM matches "
+        "WHERE tournament_id = ? AND tour_num > 0 ORDER BY tour_num",
+        (tid,),
+    ).fetchall()
+    conn.close()
+    return [int(r[0]) for r in rows]
+
+
+def set_match_tour(mid: int, tour_num: int) -> None:
+    """Assign a tour number to a single match."""
+    conn = get_conn()
+    conn.execute("UPDATE matches SET tour_num = ? WHERE id = ?", (tour_num, mid))
+    conn.commit()
+    conn.close()
+
+
+def bulk_set_match_tours(pairs: list[tuple[int, int]]) -> None:
+    """Efficiently assign tour_num to many matches at once.
+    ``pairs`` is a list of (match_id, tour_num) tuples.
+    """
+    if not pairs:
+        return
+    conn = get_conn()
+    conn.executemany(
+        "UPDATE matches SET tour_num = ? WHERE id = ?",
+        [(tour_num, mid) for mid, tour_num in pairs],
+    )
+    conn.commit()
+    conn.close()

@@ -15,6 +15,7 @@ from database import (
     create_match,
     get_player_by_id,
     update_match,
+    bulk_set_match_tours,
 )
 
 GROUP_LETTERS = "ABCDEFGH"
@@ -130,35 +131,114 @@ def draw_groups(tid: int, player_ids: list[int], groups_count: int) -> dict[str,
     return groups
 
 
+def round_robin_schedule(player_ids: list) -> list[list[tuple]]:
+    """Standard circle method for round-robin scheduling.
+
+    Returns a list of rounds; each round is a list of (p1_id, p2_id)
+    pairs. The result never contains ``None`` entries — BYE slots are
+    silently dropped so callers always get real match pairs.
+
+    For N players (N even)  → N-1 rounds of N/2 matches each.
+    For N players (N odd)   → N rounds of (N-1)/2 matches each (one BYE
+    per round is discarded).
+    """
+    ids: list = list(player_ids)
+    n = len(ids)
+    if n < 2:
+        return []
+    if n % 2 == 1:
+        ids.append(None)  # BYE placeholder
+        n += 1
+
+    rounds: list[list[tuple]] = []
+    for _ in range(n - 1):
+        round_pairs: list[tuple] = []
+        half = n // 2
+        for i in range(half):
+            p1 = ids[i]
+            p2 = ids[n - 1 - i]
+            if p1 is not None and p2 is not None:
+                round_pairs.append((p1, p2))
+        rounds.append(round_pairs)
+        # Rotate: fix ids[0], rotate ids[1:] one step to the right
+        # (last element moves to position 1).
+        ids = [ids[0]] + [ids[-1]] + ids[1:-1]
+
+    return rounds
+
+
 def generate_group_fixtures(tid: int, groups: dict[str, list[int]]):
     """
     Create all round-robin matches for each group. Honours the
     tournament's `group_matches_per_pair` setting: 1 = single round-robin,
     2 = double round-robin (each pair plays twice, second leg with
     swapped sides).
+
+    Assigns ``tour_num`` to each match using the Berger circle-method
+    schedule so matches in the same gameweek share the same tour number
+    across all groups.
     """
     deadline = datetime.utcnow() + timedelta(hours=MATCH_DEADLINE_HOURS)
     t = get_tournament(tid) or {}
     mpp = max(1, int(t.get("group_matches_per_pair") or 1))
-    mids = []
+
+    # Build per-group round-robin schedules and merge them by round index.
+    # All groups' round-r matches → same tour_num (= r + 1 for first leg,
+    # offset by (n-1) rounds for the second leg when mpp=2).
+    group_schedules: dict[str, list[list[tuple]]] = {}
     for group, pids in groups.items():
-        for i in range(len(pids)):
-            for j in range(i + 1, len(pids)):
-                for leg in range(1, mpp + 1):
-                    # Alternate the home/away order so 2nd leg is the
-                    # "return" fixture — feels natural in standings.
-                    if leg % 2 == 1:
-                        a, b = pids[i], pids[j]
-                    else:
-                        a, b = pids[j], pids[i]
+        group_schedules[group] = round_robin_schedule(pids)
+
+    # Maximum rounds in any group (usually equal across all groups)
+    max_rounds = max((len(s) for s in group_schedules.values()), default=0)
+
+    # We collect (mid, tour_num) pairs and bulk-update at the end for
+    # efficiency — avoids one extra DB round-trip per match.
+    tour_assignments: list[tuple[int, int]] = []
+
+    deadline_str = deadline.strftime("%Y-%m-%d %H:%M:%S")
+    mids: list[int] = []
+
+    # First leg: tours 1 .. max_rounds
+    for round_idx in range(max_rounds):
+        tour = round_idx + 1  # 1-based
+        for group, schedule in group_schedules.items():
+            if round_idx >= len(schedule):
+                continue
+            for (a, b) in schedule[round_idx]:
+                mid = create_match(
+                    tid, a, b,
+                    stage="group",
+                    round_num=1,
+                    deadline=deadline_str,
+                    leg=1,
+                    tour_num=tour,
+                )
+                mids.append(mid)
+
+    if mpp >= 2:
+        # Second leg: tours max_rounds+1 .. 2*max_rounds
+        # Reverse the schedule so return fixtures feel natural.
+        for round_idx in range(max_rounds):
+            tour = max_rounds + round_idx + 1
+            for group, schedule in group_schedules.items():
+                # Second leg reverses home/away and plays rounds in
+                # reverse order (last-round first leg → first-round
+                # return leg gives variety).
+                rev_idx = max_rounds - 1 - round_idx
+                if rev_idx >= len(schedule):
+                    continue
+                for (a, b) in schedule[rev_idx]:
                     mid = create_match(
-                        tid, a, b,
+                        tid, b, a,  # swapped sides for return leg
                         stage="group",
-                        round_num=leg,
-                        deadline=deadline.strftime("%Y-%m-%d %H:%M:%S"),
-                        leg=leg,
+                        round_num=2,
+                        deadline=deadline_str,
+                        leg=2,
+                        tour_num=tour,
                     )
                     mids.append(mid)
+
     return mids
 
 
