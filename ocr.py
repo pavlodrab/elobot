@@ -72,15 +72,8 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Bump this if you ever need more than 20 keys (very unlikely).
 _MAX_OPENROUTER_KEYS = 20
 
-# Groq (fast inference, free tier — llama-4-scout has vision)
-_GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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").strip()
-_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-# Groq fallback models (vision-capable, free tier)
-_GROQ_FALLBACK_MODELS = [
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "meta-llama/llama-4-maverick-17b-128e-instruct",
-]
+# Groq support removed (2026-06): their free tier was discontinued and
+# the keys stopped working. Fallback chain is now Gemini → OpenRouter.
 
 AI_DEFAULT_MODEL = os.getenv(
     "OPENROUTER_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free"
@@ -93,43 +86,40 @@ AI_DEFAULT_MODEL = os.getenv(
 #
 # Live-tested order (2026-05-07, run #2 — after Baidu was caught
 # putting the small-font league line into team1/team2):
-#   - google/gemma-4-31b-it:free           — primary (~8s), follows
-#                                            instructions, distinguishes
-#                                            nickname vs league reliably.
-#   - google/gemma-4-26b-a4b-it:free       — sibling (~8s), almost as good,
-#                                            sometimes 429.
-#   - baidu/qianfan-ocr-fast:free          — fastest (~4s) but pure-OCR,
-#                                            doesn't understand context;
-#                                            can dump league into team
-#                                            fields. Kept as 3rd retry.
-#   - nvidia/nemotron-nano-12b-v2-vl:free  — slow (8-45s), reasoning model,
-#                                            sometimes emits prose.
+#   - nvidia/nemotron-nano-12b-v2-vl:free  — primary (~8s), strong OCR
+#                                            accuracy on FC Mobile screens.
+#   - nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+#                                          — hybrid MoE+Mamba reasoning
+#                                            model, ~2× throughput, can
+#                                            sometimes emit prose (handled
+#                                            by _ai_extract_json_block).
+#   - moonshotai/kimi-k2.6:free            — large 1T MoE with vision,
+#                                            262K context, useful as
+#                                            fresh fallback when NVIDIA
+#                                            is rate-limited.
 #
-# Models removed from the free tier (HTTP 404) over time:
-#   google/gemma-3-*-it:free (early 2026), google/gemini-2.0-flash-exp:free,
-#   qwen/qwen-2.5-vl-72b-instruct:free,
-#   meta-llama/llama-3.2-90b-vision-instruct:free (May 2026).
-# nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free — re-added as last
-#   fallback (May 2026). Sometimes emits prose, but _ai_extract_json_block
-#   can usually salvage the JSON from the reasoning trace.
-# moonshotai/kimi-k2.6:free — added May 2026, large 1T MoE with vision,
-#   262K context. Useful as a fresh fallback when NVIDIA/Gemma chains
-#   are saturated.
-# Removed (404 / discontinued):
-#   baidu/qianfan-ocr-fast:free (May 2026).
+# Removed (404 / discontinued / auth-failing):
+#   - google/gemma-4-31b-it:free            — started returning 401
+#                                             "User not found" in mid-2026
+#   - google/gemma-4-26b-a4b-it:free       — same 401
+#   - google/gemma-3-*-it:free              — 404 (early 2026)
+#   - google/gemini-2.0-flash-exp:free      — 404
+#   - qwen/qwen-2.5-vl-72b-instruct:free    — 404
+#   - meta-llama/llama-3.2-90b-vision-instruct:free
+#                                          — 404 (May 2026)
+#   - baidu/qianfan-ocr-fast:free          — 404 (May 2026)
+#   - groq/* models (scout, maverick)      — free tier discontinued
+#                                             (June 2026); entire provider
+#                                             removed from fallback chain.
 # Note: non-VL models (text-only) are NOT suitable for screenshot OCR —
 #   they can't accept images. Only include models with vision capability.
 AI_FALLBACK_MODELS = (
     "nvidia/nemotron-nano-12b-v2-vl:free",
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "moonshotai/kimi-k2.6:free",
 )
 AI_COMPARE_MODELS = (
     "nvidia/nemotron-nano-12b-v2-vl:free",
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "moonshotai/kimi-k2.6:free",
 )
@@ -276,7 +266,7 @@ def _openrouter_keys() -> list[str]:
 
 
 def ai_is_available() -> bool:
-    return bool(_GEMINI_API_KEY or _GROQ_API_KEY or _ai_key())
+    return bool(_GEMINI_API_KEY or _ai_key())
 
 
 def _ai_strip_fences(text: str) -> str:
@@ -610,49 +600,6 @@ def _gemini_call_one(image_b64: str, timeout: float = 30.0):
     return parsed, text, dt
 
 
-def _groq_call_one(image_b64: str, timeout: float = 30.0, model: str | None = None):
-    """Call Groq Vision API (llama-4-scout). Returns (parsed, raw, elapsed)."""
-    if not _GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY not configured")
-    use_model = model or _GROQ_MODEL
-    body = json.dumps({
-        "model": use_model,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": _AI_PROMPT},
-                {"type": "image_url",
-                 "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
-            ],
-        }],
-        "max_tokens": 2000,
-        "temperature": 0.1,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        _GROQ_URL,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {_GROQ_API_KEY}",
-            "Content-Type": "application/json",
-        },
-    )
-    t0 = time.time()
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        resp_b = r.read()
-    dt = time.time() - t0
-    data = json.loads(resp_b)
-    if data.get("error"):
-        raise ValueError(f"Groq API error: {str(data['error'])[:200]!r}")
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise ValueError(f"Groq returned no choices: {str(data)[:200]!r}")
-    msg = choices[0].get("message", {}).get("content") or ""
-    if not isinstance(msg, str):
-        msg = str(msg)
-    parsed = _ai_parse_response(msg)
-    return parsed, msg, dt
-
-
 def ai_read_screenshot(image_bytes: bytes, model: str | None = None,
                        timeout: float = 30.0,
                        models_override: tuple[str, ...] | list[str] | None = None):
@@ -685,27 +632,8 @@ def ai_read_screenshot(image_bytes: bytes, model: str | None = None,
                 if attempt == 0 and "429" in str(e):
                     time.sleep(2)
                     continue
-                # 502/503 — don't retry, fall through to Groq/OpenRouter
+                # 502/503 — don't retry, fall through to OpenRouter
                 break
-
-    # ── Try Groq (llama-4-scout/maverick vision, fast, free tier) ──
-    if _GROQ_API_KEY and not models_override:
-        for groq_model in _GROQ_FALLBACK_MODELS:
-            for attempt in range(2):
-                try:
-                    parsed, raw, dt = _groq_call_one(image_b64, timeout=timeout, model=groq_model)
-                    parsed["model"] = f"groq/{groq_model}"
-                    parsed["raw"] = raw
-                    parsed["elapsed_s"] = dt
-                    _ai_post_process(parsed)
-                    log.info("Groq OCR ok via %s in %.1fs", groq_model, dt)
-                    return parsed
-                except Exception as e:
-                    log.warning("groq %s -> %r", groq_model, e)
-                    if attempt == 0 and "429" in str(e):
-                        time.sleep(2)
-                        continue
-                    break  # 403/502/other → try next groq model
 
     # ── OpenRouter fallback chain ──
     seen: set[str] = set()

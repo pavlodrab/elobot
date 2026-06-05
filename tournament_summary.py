@@ -1327,15 +1327,6 @@ _DEFAULT_AI_MODELS: tuple[str, ...] = (
 )
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Groq free tier — fast text-only inference. Mirrors the keys that
-# ocr.py already ships with so the AI summary works out-of-the-box.
-_GROQ_TEXT_MODELS: tuple[str, ...] = (
-    "llama-3.3-70b-versatile",
-    "llama-3.1-70b-versatile",
-    "llama-3.1-8b-instant",
-)
-_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-
 # Google Gemini — generous free tier (1500 req/day), text-only call
 # of the same model used by the OCR pipeline.
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -1367,18 +1358,6 @@ def _openrouter_keys() -> list[str]:
     except Exception:
         pass
     return keys
-
-
-def _groq_key() -> str:
-    """Reuse ocr.py's hardcoded Groq key (or the GROQ_API_KEY env var)."""
-    k = os.getenv("GROQ_API_KEY", "").strip()
-    if k:
-        return k
-    try:
-        from ocr import _GROQ_API_KEY  # type: ignore
-        return _GROQ_API_KEY or ""
-    except Exception:
-        return ""
 
 
 def _gemini_config() -> tuple[str, str]:
@@ -1523,67 +1502,6 @@ def _try_openrouter(summary_text: str, timeout: float, attempts: list[str]) -> O
     return None
 
 
-def _try_groq(summary_text: str, timeout: float, attempts: list[str]) -> Optional[str]:
-    """Groq text fallback — uses the GROQ_API_KEY ocr.py already ships."""
-    key = _groq_key()
-    if not key:
-        attempts.append("groq: нет ключа")
-        return None
-    body_template = {
-        "messages": [
-            {"role": "system", "content": _AI_PROMPT_RICH_RU},
-            {"role": "user", "content": summary_text},
-        ],
-        "max_tokens": 5000,
-        "temperature": 0.7,
-    }
-    for model in _GROQ_TEXT_MODELS:
-        body = {**body_template, "model": model}
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            _GROQ_URL,
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-            },
-        )
-        t0 = time.time()
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                raw = r.read()
-        except urllib.error.HTTPError as e:
-            err_body = ""
-            try:
-                err_body = e.read().decode("utf-8", errors="replace")[:200]
-            except Exception:
-                pass
-            attempts.append(f"groq {model}: HTTP {e.code} {err_body[:80]}")
-            continue
-        except Exception as e:
-            attempts.append(f"groq {model}: {type(e).__name__} {e}")
-            continue
-        dt = time.time() - t0
-        try:
-            data = json.loads(raw)
-        except Exception:
-            attempts.append(f"groq {model}: non-JSON {raw[:80]!r}")
-            continue
-        choices = (data.get("choices") or []) if isinstance(data, dict) else []
-        if not choices:
-            attempts.append(f"groq {model}: empty choices")
-            continue
-        msg = choices[0].get("message") if isinstance(choices[0], dict) else None
-        content = (msg.get("content") if isinstance(msg, dict) else None) or ""
-        content = content.strip() if isinstance(content, str) else ""
-        if content:
-            log.info("Groq %s OK in %.1fs (%d chars)", model, dt, len(content))
-            attempts.append(f"groq {model}: OK ({len(content)} chars, {dt:.1f}s)")
-            return content
-        attempts.append(f"groq {model}: empty content")
-    return None
-
-
 def _try_gemini(summary_text: str, timeout: float, attempts: list[str]) -> Optional[str]:
     """Google Gemini text fallback — 1500 req/day free, very stable."""
     key, model = _gemini_config()
@@ -1651,16 +1569,17 @@ def analyze_with_ai(
     """Best-effort AI analysis with multi-provider fallback.
 
     Tries OpenRouter (cheapest, multiple free models) → Gemini
-    (1500/day, very stable) → Groq (fast, generous free tier). Returns
-    ``(analysis_text, attempts_log)`` so the caller can show the user
-    exactly what failed when nothing came back.
+    (1500/day, very stable). Groq support was removed 2026-06 after
+    their free tier was discontinued. Returns ``(analysis_text,
+    attempts_log)`` so the caller can show the user exactly what
+    failed when nothing came back.
 
     Default timeout bumped to 90s so reasoning models that emit a
     chain-of-thought before the actual answer can complete without
     the request being cut off mid-paragraph.
     """
     attempts: list[str] = []
-    for fn in (_try_openrouter, _try_gemini, _try_groq):
+    for fn in (_try_openrouter, _try_gemini):
         try:
             result = fn(summary_text, timeout, attempts)
         except Exception as e:
