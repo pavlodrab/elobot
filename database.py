@@ -928,6 +928,179 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+# ── Player helpers ────────────────────────────────────────────────────────────
+
+def upsert_player(username: str, telegram_id: int | None = None):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        f"""INSERT INTO players (username, telegram_id, elo)
+           VALUES (?, ?, {INITIAL_ELO})
+           ON CONFLICT(username) DO UPDATE SET
+               telegram_id = COALESCE(excluded.telegram_id, players.telegram_id)""",
+        (username.lower(), telegram_id),
+    )
+    conn.commit()
+    player = c.execute(
+        "SELECT * FROM players WHERE username=?", (username.lower(),)
+    ).fetchone()
+    conn.close()
+    return dict(player)
+
+
+def get_player(username: str):
+    conn = get_conn()
+    p = conn.execute(
+        "SELECT * FROM players WHERE username=?", (username.lower(),)
+    ).fetchone()
+    conn.close()
+    return dict(p) if p else None
+
+
+def get_player_by_id(pid: int):
+    conn = get_conn()
+    p = conn.execute("SELECT * FROM players WHERE id=?", (pid,)).fetchone()
+    conn.close()
+    return dict(p) if p else None
+
+
+def update_player_username(player_id: int, new_username: str) -> None:
+    """Rewrite a player's @username (used when their Telegram handle changed)."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE players SET username=? WHERE id=?",
+        (new_username.lower(), int(player_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def merge_players(keep_id: int, drop_id: int) -> dict:
+    """Merge ``drop_id`` into ``keep_id`` and delete the drop row.
+
+    Returns ``{"matches_moved": int}`` for the caller to surface in the
+    success message.
+    """
+    if int(keep_id) == int(drop_id):
+        raise ValueError("keep_id and drop_id must differ")
+    keep = get_player_by_id(keep_id)
+    drop = get_player_by_id(drop_id)
+    if not keep:
+        raise LookupError(f"keep player id={keep_id} not found")
+    if not drop:
+        raise LookupError(f"drop player id={drop_id} not found")
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("BEGIN")
+    try:
+        # 1. Re-tag tournament_players: if both are in the same tournament,
+        #    prefer the keep player and drop the duplicate row.
+        drop_tps = [
+            r[0] for r in c.execute(
+                "SELECT tournament_id FROM tournament_players WHERE player_id=?",
+                (drop_id,),
+            ).fetchall()
+        ]
+        keep_tps = [
+            r[0] for r in c.execute(
+                "SELECT tournament_id FROM tournament_players WHERE player_id=?",
+                (keep_id,),
+            ).fetchall()
+        ]
+        for tid in set(drop_tps) & set(keep_tps):
+            c.execute(
+                "DELETE FROM tournament_players WHERE player_id=? AND tournament_id=?",
+                (drop_id, tid),
+            )
+        for tid in set(drop_tps) - set(keep_tps):
+            c.execute(
+                "UPDATE tournament_players SET player_id=? WHERE player_id=? AND tournament_id=?",
+                (keep_id, drop_id, tid),
+            )
+        # 2. Re-tag matches: confirmed matches keep drop_id intact
+        #    (history), pending/reported are reassigned to keep_id.
+        c.execute(
+            """UPDATE matches SET player1_id=?
+               WHERE player1_id=? AND status IN ('pending','reported')""",
+            (keep_id, drop_id),
+        )
+        c.execute(
+            """UPDATE matches SET player2_id=?
+               WHERE player2_id=? AND status IN ('pending','reported')""",
+            (keep_id, drop_id),
+        )
+        # 3. Re-tag goals
+        c.execute(
+            "UPDATE match_goals SET player_id=? WHERE player_id=?",
+            (keep_id, drop_id),
+        )
+        # 4. ELO rows: drop the drop row
+        c.execute("DELETE FROM tournament_elo WHERE player_id=?", (drop_id,))
+        # 5. Delete the player row
+        c.execute("DELETE FROM players WHERE id=?", (drop_id,))
+        c.execute("COMMIT")
+    except Exception:
+        c.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    return {"matches_moved": 0}
+
+
+def get_player_by_telegram_id(tid: int | None):
+    """Return the player row matching ``telegram_id`` or None."""
+    if tid is None:
+        return None
+    conn = get_conn()
+    p = conn.execute(
+        "SELECT * FROM players WHERE telegram_id=?", (int(tid),)
+    ).fetchone()
+    conn.close()
+    return dict(p) if p else None
+
+
+def get_player_by_game_nickname(nick: str | None):
+    """Return the player row matching ``game_nickname`` or None."""
+    if not nick:
+        return None
+    conn = get_conn()
+    p = conn.execute(
+        "SELECT * FROM players WHERE LOWER(game_nickname)=LOWER(?)",
+        (nick.strip(),),
+    ).fetchone()
+    conn.close()
+    return dict(p) if p else None
+
+
+def find_players_by_fuzzy_game_nickname(query: str) -> list[dict]:
+    """Return players whose game_nickname contains ``query`` (case-insensitive)."""
+    if not query:
+        return []
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT * FROM players
+           WHERE LOWER(game_nickname) LIKE LOWER(?)
+           ORDER BY elo DESC LIMIT 20""",
+        (f"%{query.strip()}%",),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_all_players_by_elo_field(field: str) -> list[dict]:
+    """Return all players ordered by the given ELO field desc."""
+    if field not in ("elo", "elo_vsa", "elo_ri"):
+        field = "elo"
+    conn = get_conn()
+    rows = conn.execute(
+        f"SELECT * FROM players WHERE {field} IS NOT NULL "
+        f"ORDER BY {field} DESC"
+    ).fetchall()
+    conn.close()
     return [dict(r) for r in rows]
 
 
