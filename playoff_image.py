@@ -360,26 +360,33 @@ def _collect_pairs(tid: int) -> list[tuple[str, list[list[dict]]]]:
 
 
 def _collect_pairs_full(tid: int) -> list[tuple[str, list[list[dict]]]]:
-    """Like ``_collect_pairs`` but also pads the bracket with TBD pair
-    placeholders for every stage between the largest existing stage and
-    the final.
+    """Like ``_collect_pairs`` but normalises every stage to its full
+    bracket-slot order and pads missing slots with TBD placeholders.
 
-    Each TBD pair is represented as a one-element list with a single
-    sentinel match dict carrying ``{"_tbd": True}``. ``_render_card``
-    detects the flag and draws an empty placeholder card.
+    Two things this fixes over the raw ``_collect_pairs`` output:
 
-    Example: a 16-team tournament currently in SF returns four stages —
-    R16 with real cards, QF with real cards, SF with real cards, and
-    Final filled with one TBD card.
+    1. **Stable slot order.** Later stages are spawned incrementally as
+       pairs resolve, so their DB order reflects *finish order*, not the
+       bracket slot. We rebuild the canonical top → bottom order by
+       lineage (a pair fed by previous-stage slots 2k / 2k+1 lands in
+       slot k). Without this the mirrored renderer could put the
+       lower-half semifinal on the left and the upper-half one on the
+       right whenever the lower half happened to finish first.
 
-    Eager-advance projection: when the previous stage has *some* pairs
-    closed (winner resolvable) and others still pending, the TBD slot
-    for the next stage shows the known winner(s) on the side(s) that
-    are determined. So if the upper-half SF (phoenileo) is decided but
-    the lower-half SF (nscoder/oliverbax) is still being played, the
-    Final card renders as ``@phoenileo vs TBD`` instead of ``TBD vs
-    TBD``. The pairing follows standard bracket ordering: pair[2k] vs
-    pair[2k+1] of the previous stage feeds slot[k] of the next.
+    2. **Partial-stage padding.** A stage that's only *half* spawned
+       (e.g. one semifinal exists because only the top-half quarters are
+       done) is padded out to its full slot count with TBD placeholders,
+       so the not-yet-created second semifinal is still visible — in its
+       correct (right-hand) position — instead of appearing only once
+       the last quarterfinal is played. Fully-missing downstream stages
+       (incl. the Final) are padded the same way.
+
+    Each TBD pair is a one-element list holding a sentinel match dict
+    ``{"_tbd": True, "_slot": k, "_partial_winner_a/b": <pid|None>}``.
+    ``_render_card`` / ``_render_card_dyn`` detect the flag and draw an
+    empty placeholder card, showing any already-known feeder winner on
+    the relevant side (so the Final reads ``@phoenileo vs TBD`` as soon
+    as one semifinal closes).
     """
     real = _collect_pairs(tid)
     if not real:
@@ -396,8 +403,8 @@ def _collect_pairs_full(tid: int) -> list[tuple[str, list[list[dict]]]]:
     # declare a winner without every scheduled leg being confirmed.
     t = get_tournament(tid) or {}
 
-    def _pair_winner_or_none(ms: list[dict], stage: str) -> int | None:
-        if not ms:
+    def _pair_winner_or_none(ms: list[dict] | None, stage: str) -> int | None:
+        if not ms or ms[0].get("_tbd"):
             return None
         try:
             cfg = get_stage_config(t, stage)
@@ -412,50 +419,102 @@ def _collect_pairs_full(tid: int) -> list[tuple[str, list[list[dict]]]]:
         except Exception:
             return None
 
-    out: list[tuple[str, list[list[dict]]]] = []
-    prev_pair_count: int | None = None
-    prev_pairs: list[list[dict]] | None = None
-    prev_stage: str | None = None
-    for stage in PLAYOFF_STAGES[earliest_idx:]:
-        if stage in real_by_stage:
-            pairs = real_by_stage[stage]
-            out.append((stage, pairs))
-            prev_pair_count = len(pairs)
-            prev_pairs = pairs
-            prev_stage = stage
-        else:
-            # Stage hasn't started — half as many pairs as the previous
-            # stage, capped at 1 for the final.
-            if prev_pair_count is None:
-                # Defensive: shouldn't happen because real has at least
-                # one stage and we start from earliest_idx.
-                prev_pair_count = 2
-            n = max(1, prev_pair_count // 2)
-            tbd_pairs: list[list[dict]] = []
-            for i in range(n):
-                w_top = w_bot = None
-                if prev_pairs is not None and prev_stage is not None:
-                    # Pair i of the new stage is fed by previous-stage
-                    # pairs 2i (top) and 2i+1 (bot).
-                    if 2 * i < len(prev_pairs):
-                        w_top = _pair_winner_or_none(prev_pairs[2 * i], prev_stage)
-                    if 2 * i + 1 < len(prev_pairs):
-                        w_bot = _pair_winner_or_none(prev_pairs[2 * i + 1], prev_stage)
-                tbd_pairs.append([{
-                    "_tbd": True,
-                    "leg": 1,
-                    "_slot": i,
-                    "_partial_winner_a": w_top,
-                    "_partial_winner_b": w_bot,
-                }])
-            out.append((stage, tbd_pairs))
-            prev_pair_count = n
-            prev_stage = stage
-            # We can't project beyond the next stage — even if both
-            # feeders of a TBD card are decided, we don't know which of
-            # the two known winners advances further. Downstream TBD
-            # stages stay as plain TBD vs TBD.
-            prev_pairs = None
+    def _pair_player_ids(ms: list[dict] | None) -> set[int]:
+        """Player ids in a real pair (empty for TBD placeholders)."""
+        if not ms or ms[0].get("_tbd"):
+            return set()
+        out_ids: set[int] = set()
+        for key in ("player1_id", "player2_id"):
+            pid = ms[0].get(key)
+            if isinstance(pid, int):
+                out_ids.add(pid)
+        return out_ids
+
+    def _player_slot_map(slot_pairs: list[list[dict]]) -> dict[int, int]:
+        """Map every (real) player id to the bracket slot of its pair."""
+        m: dict[int, int] = {}
+        for slot, ms in enumerate(slot_pairs):
+            for pid in _pair_player_ids(ms):
+                m[pid] = slot
+        return m
+
+    # ── Canonical bracket ordering ──────────────────────────────────────
+    # The earliest populated stage is created by ``generate_playoff`` in
+    # standard bracket order (top → bottom) and ``get_tournament_matches``
+    # returns rows ``ORDER BY id``, so its pairs are already slot-ordered.
+    # Later stages, however, are spawned *incrementally* as pairs resolve
+    # — so their DB order reflects which match finished first, NOT the
+    # bracket slot. We rebuild the slot order by lineage: the pair whose
+    # players advanced from previous-stage slots 2k / 2k+1 belongs to
+    # slot k of the current stage. Missing slots are filled with TBD
+    # placeholders (projecting the known feeder winners) so a half-played
+    # stage shows ALL its slots in the right left/right position instead
+    # of collapsing to whatever subset has spawned.
+    base_stage = PLAYOFF_STAGES[earliest_idx]
+    base_pairs = real_by_stage[base_stage]
+
+    out: list[tuple[str, list[list[dict]]]] = [(base_stage, list(base_pairs))]
+    prev_slot_pairs: list[list[dict]] = list(base_pairs)
+    prev_player_slot = _player_slot_map(prev_slot_pairs)
+    prev_stage = base_stage
+    expected_count = len(base_pairs)
+
+    for stage in PLAYOFF_STAGES[earliest_idx + 1:]:
+        expected_count = max(1, expected_count // 2)
+        real_pairs = real_by_stage.get(stage, [])
+
+        slot_pairs: list[list[dict] | None] = [None] * expected_count
+        unplaced: list[list[dict]] = []
+        for ms in real_pairs:
+            # Slot = previous-stage slot of either participant, halved.
+            cand = [
+                prev_player_slot[pid] // 2
+                for pid in _pair_player_ids(ms)
+                if pid in prev_player_slot
+            ]
+            slot = min(cand) if cand else None
+            if (
+                slot is not None
+                and 0 <= slot < expected_count
+                and slot_pairs[slot] is None
+            ):
+                slot_pairs[slot] = ms
+            else:
+                unplaced.append(ms)
+
+        # Defensive: any pair we couldn't position by lineage (corrupt
+        # data, manual edits) drops into the first free slot so it's at
+        # least visible rather than silently lost.
+        for ms in unplaced:
+            for k in range(expected_count):
+                if slot_pairs[k] is None:
+                    slot_pairs[k] = ms
+                    break
+
+        # Fill the gaps with TBD placeholders, projecting the winners of
+        # the two previous-stage slots that feed each empty slot.
+        for k in range(expected_count):
+            if slot_pairs[k] is not None:
+                continue
+            w_top = w_bot = None
+            if 2 * k < len(prev_slot_pairs):
+                w_top = _pair_winner_or_none(prev_slot_pairs[2 * k], prev_stage)
+            if 2 * k + 1 < len(prev_slot_pairs):
+                w_bot = _pair_winner_or_none(prev_slot_pairs[2 * k + 1], prev_stage)
+            slot_pairs[k] = [{
+                "_tbd": True,
+                "leg": 1,
+                "_slot": k,
+                "_partial_winner_a": w_top,
+                "_partial_winner_b": w_bot,
+            }]
+
+        resolved: list[list[dict]] = [ms for ms in slot_pairs if ms is not None]
+        out.append((stage, resolved))
+        prev_slot_pairs = resolved
+        prev_player_slot = _player_slot_map(resolved)
+        prev_stage = stage
+
     return out
 
 
