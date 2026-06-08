@@ -1768,6 +1768,13 @@ def spawn_cl_followup_cups(
             f"tournament {league_tid} is not a league/groups-only "
             f"format — spawn_cl_followup_cups expects a single-group league"
         )
+    # Refuse if cups were already spawned, so the inline button +
+    # /cl_spawn_cups can't accidentally double-spawn.
+    if league.get("followup_cups_tids"):
+        raise ValueError(
+            f"follow-up cups already spawned for league {league_tid} "
+            f"(see {league.get('followup_cups_tids')})"
+        )
 
     standings = get_group_standings(league_tid)
     if not standings:
@@ -1847,9 +1854,52 @@ def spawn_cl_followup_cups(
         add_player_to_tournament(cons_tid, s["player_id"], "A")
     cons_matches = _create_seeded_bracket(cons_tid, cons_seeds, int(legs_per_pair))
 
+    # Mark the league row so we don't accidentally double-spawn from
+    # a stale "Создать кубки" button or a second /cl_spawn_cups call.
+    update_tournament(
+        league_tid,
+        followup_cups_tids=f"{int(main_tid)}:{int(cons_tid)}",
+    )
+
     return {
         "main_tid": main_tid,
         "consolation_tid": cons_tid,
         "main_matches": main_matches,
         "consolation_matches": cons_matches,
     }
+
+
+def parse_followup_cups_config(raw: str | None) -> dict | None:
+    """Decode the JSON-encoded ``followup_cups_config`` column.
+
+    Returns ``None`` if the column is empty/null or doesn't parse.
+    Otherwise returns a dict with ``main_size``, ``consolation_size``
+    and ``legs_per_pair`` (defaults: 24, 8, 2).
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "main_size": int(data.get("main_size", 24)),
+        "consolation_size": int(data.get("consolation_size", 8)),
+        "legs_per_pair": int(data.get("legs_per_pair", 2)),
+    }
+
+
+def parse_followup_cups_tids(raw: str | None) -> tuple[int, int] | None:
+    """Decode ``followup_cups_tids`` column (``"<main>:<cons>"``).
+
+    Returns ``None`` if not yet spawned.
+    """
+    if not raw:
+        return None
+    try:
+        main_s, cons_s = str(raw).split(":", 1)
+        return int(main_s), int(cons_s)
+    except (ValueError, TypeError):
+        return None

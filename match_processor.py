@@ -286,6 +286,7 @@ def apply_result(match_id: int) -> dict:
         if t and t["stage"] == "playoff":
             advanced_stage = advance_playoff(tid)
         elif t and t["stage"] in ("groups", "groups_done"):
+            was_already_done = t["stage"] == "groups_done"
             if check_groups_complete(tid):
                 # Groups-only tournaments stop here — no playoff bracket
                 # is generated even when there are multiple groups, so
@@ -293,6 +294,14 @@ def apply_result(match_id: int) -> dict:
                 if int(t.get("groups_only") or 0):
                     from database import update_tournament
                     update_tournament(tid, stage="groups_done")
+                    # Announce the league finishing exactly once: the
+                    # FIRST confirmation that closes the table flips
+                    # ``stage`` from ``groups`` to ``groups_done``.
+                    # Subsequent confirmations on already-confirmed
+                    # rounds (rare, but possible after edits) won't
+                    # re-announce because ``was_already_done`` is True.
+                    if not was_already_done:
+                        advanced_stage = "groups_done"
                 else:
                     # Auto-advance: build the playoff bracket immediately using
                     # the configured `playoff_slots` (default 2 per group). Only

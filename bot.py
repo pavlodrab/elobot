@@ -868,7 +868,42 @@ def submenu_tournament_settings(t: dict) -> InlineKeyboardMarkup:
         footer_lbl = f"{len(variants)} вар." if len(variants) > 1 else "задан"
     else:
         footer_lbl = "нет"
-    rows = [
+    rows = []
+
+    # Surface the follow-up-cups button at the very top when the
+    # tournament was created from the Champions League (32) template
+    # AND the league has finished (stage='groups_done' or 'finished').
+    # When cups are already spawned we show their IDs instead so admins
+    # can jump to the bracket without remembering which one is which.
+    from tournament import parse_followup_cups_config, parse_followup_cups_tids
+    cups_cfg = parse_followup_cups_config(t.get("followup_cups_config"))
+    cups_tids = parse_followup_cups_tids(t.get("followup_cups_tids"))
+    if cups_cfg:
+        stage = (t.get("stage") or "").lower()
+        if cups_tids:
+            main_tid, cons_tid = cups_tids
+            rows.append([InlineKeyboardButton(
+                f"🏆 Основной кубок: id {main_tid}",
+                callback_data=f"ts:open:{main_tid}",
+            )])
+            rows.append([InlineKeyboardButton(
+                f"🥉 Лига Конфети: id {cons_tid}",
+                callback_data=f"ts:open:{cons_tid}",
+            )])
+        elif stage in ("groups_done", "finished"):
+            ms = int(cups_cfg.get("main_size", 24))
+            cs = int(cups_cfg.get("consolation_size", 8))
+            rows.append([InlineKeyboardButton(
+                f"🏆 Создать кубки: топ-{ms} + утешение {cs}",
+                callback_data=f"ts:cl_spawn:{tid}",
+            )])
+        else:
+            rows.append([InlineKeyboardButton(
+                "🏆 Кубки появятся здесь после окончания лиги",
+                callback_data=f"ts:cl_spawn_info:{tid}",
+            )])
+
+    rows.extend([
         [InlineKeyboardButton(
             "⚽ Матчи и OCR",
             callback_data=f"ts:cat_match:{tid}",
@@ -902,7 +937,7 @@ def submenu_tournament_settings(t: dict) -> InlineKeyboardMarkup:
             callback_data=f"ts:review:{tid}",
         )],
         [InlineKeyboardButton("⬅️ Назад", callback_data="menu:home")],
-    ]
+    ])
     return InlineKeyboardMarkup(rows)
 
 

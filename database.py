@@ -718,6 +718,26 @@ def init_db():
             "ALTER TABLE tournaments ADD COLUMN template_id INTEGER"
         )
 
+    # JSON config that, when present, marks this league as a template
+    # that should automatically offer follow-up cups via the inline
+    # "🏆 Создать кубки" button in the settings panel and a one-time
+    # chat broadcast when the league reaches ``stage='groups_done'``.
+    # Format: ``{"main_size": 24, "consolation_size": 8, "legs_per_pair": 2}``.
+    # Empty/NULL = no follow-up suggestion. Set by the
+    # ``champions_league_32`` template.
+    if not _column_exists(conn, "tournaments", "followup_cups_config"):
+        c.execute(
+            "ALTER TABLE tournaments ADD COLUMN followup_cups_config TEXT"
+        )
+
+    # IDs of the cups spawned from this league (set by spawn_cl_followup_cups
+    # via /cl_spawn_cups or the inline button) so we don't accidentally
+    # spawn twice. Stored as ``"<main_tid>:<cons_tid>"``; NULL = not spawned yet.
+    if not _column_exists(conn, "tournaments", "followup_cups_tids"):
+        c.execute(
+            "ALTER TABLE tournaments ADD COLUMN followup_cups_tids TEXT"
+        )
+
     # ── Custom tournament templates table ────────────────────────────────
     c.execute(
         """
