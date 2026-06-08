@@ -295,32 +295,17 @@ async def _announce_stage_advance(
         )
         if cfg:
             ms = int(cfg.get("main_size", 24))
-            cs_raw = cfg.get("consolation_size")
-            # Consolation defaults to "all remaining past main_size".
-            from database import get_tournament_players
-            try:
-                roster = len(get_tournament_players(tournament_id))
-            except Exception:
-                roster = 0
-            cs = int(cs_raw) if cs_raw is not None else max(0, roster - ms)
-            if cs >= 2:
-                msg_chat += (
-                    f"\n\n🏆 По шаблону «Лига Чемпионов» нужно сделать ещё "
-                    f"два кубка:\n"
-                    f"  • Основной — места 1-{ms} (сетка с байем для топ-8)\n"
-                    f"  • Лига Конфети — места {ms + 1}-{ms + cs}"
-                )
-                btn_label = f"🏆 Создать кубки ({ms} + {cs})"
-            else:
-                msg_chat += (
-                    f"\n\n🏆 По шаблону «Лига Чемпионов» нужно сделать "
-                    f"основной кубок: места 1-{ms} (сетка с байем для топ-8)"
-                )
-                btn_label = f"🏆 Создать основной кубок (топ-{ms})"
+            cs = int(cfg.get("consolation_size", 8))
+            msg_chat += (
+                f"\n\n🏆 По шаблону «Лига Чемпионов» нужно сделать ещё "
+                f"два кубка:\n"
+                f"  • Основной — места 1-{ms} (сетка с байем для топ-8)\n"
+                f"  • Лига Конфети — места {ms + 1}-{ms + cs}"
+            )
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             kb = InlineKeyboardMarkup([[
                 InlineKeyboardButton(
-                    btn_label,
+                    f"🏆 Создать кубки ({ms} + {cs})",
                     callback_data=f"ts:cl_spawn:{tournament_id}",
                 ),
             ]])

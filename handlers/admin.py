@@ -2402,17 +2402,14 @@ async def cmd_cl_spawn_cups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             update,
             "Использование:\n"
             "<code>/cl_spawn_cups &lt;league_id&gt; [main_size] [consolation_size]</code>\n\n"
-            "По умолчанию main_size=24, consolation_size = всё, что осталось "
-            "после топ-24 (так что то же самое работает и на 32, и на 34, и "
-            "на 36 игроков).",
+            "По умолчанию main_size=24, consolation_size=8 (формат «лига 32 → "
+            "сетка 32 с байями + Лига Конфети 25-32»).",
         )
         return
 
     league_tid = int(args[0])
     main_size = int(args[1]) if len(args) >= 2 and args[1].isdigit() else 24
-    cons_size: int | None = (
-        int(args[2]) if len(args) >= 3 and args[2].isdigit() else None
-    )
+    cons_size = int(args[2]) if len(args) >= 3 and args[2].isdigit() else 8
 
     # Lazy import to avoid circular dependency at module import time.
     from tournament import spawn_cl_followup_cups
@@ -2421,7 +2418,7 @@ async def cmd_cl_spawn_cups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         result = spawn_cl_followup_cups(
             league_tid,
             main_size=main_size,
-            consolation_size=cons_size,  # None = "all remaining past main_size"
+            consolation_size=cons_size,
             legs_per_pair=2,
         )
     except ValueError as e:
@@ -2437,11 +2434,6 @@ async def cmd_cl_spawn_cups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cons_real = sum(1 for m in result["consolation_matches"] if not m.get("bye"))
     cons_byes = sum(1 for m in result["consolation_matches"] if m.get("bye"))
 
-    cons_size_actual = (
-        sum(1 for m in result["consolation_matches"] if not m.get("bye")) * 2
-        + cons_byes
-    )
-
     msg = [
         "✅ <b>Follow-up кубки созданы.</b>",
         "",
@@ -2450,23 +2442,13 @@ async def cmd_cl_spawn_cups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"   Первый раунд: <b>{main_real}</b> матч(а), баев: <b>{main_byes}</b>",
         f"   Пары играются в 2 матча, проход по сумме голов.",
         "",
+        f"🥉 <b>Лига Конфети</b> — id <code>{result['consolation_tid']}</code>",
+        f"   Игроков: <b>{cons_size}</b> ({main_size + 1}-{main_size + cons_size} место лиги)",
+        f"   Первый раунд: <b>{cons_real}</b> матч(а), баев: <b>{cons_byes}</b>",
+        f"   Пары играются в 2 матча, проход по сумме голов.",
+        "",
+        "Чтобы посмотреть сетку: <code>/bracket &lt;id&gt;</code>.",
     ]
-    if result.get("consolation_tid"):
-        msg.extend([
-            f"🥉 <b>Лига Конфети</b> — id <code>{result['consolation_tid']}</code>",
-            f"   Игроков: <b>{cons_size_actual}</b> "
-            f"({main_size + 1}-{main_size + cons_size_actual} место лиги)",
-            f"   Первый раунд: <b>{cons_real}</b> матч(а), баев: <b>{cons_byes}</b>",
-            f"   Пары играются в 2 матча, проход по сумме голов.",
-            "",
-        ])
-    else:
-        msg.extend([
-            "🥉 Утешительный кубок не создан — на местах 25+ не осталось "
-            "хотя бы 2 игроков.",
-            "",
-        ])
-    msg.append("Чтобы посмотреть сетку: <code>/bracket &lt;id&gt;</code>.")
     await send(update, "\n".join(msg))
 
 

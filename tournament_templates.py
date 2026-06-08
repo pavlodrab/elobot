@@ -243,34 +243,27 @@ BUILTIN_TEMPLATES: dict[str, TournamentTemplate] = {
         draw_mode="auto",
     ),
     "champions_league_32": TournamentTemplate(
-        name="Лига Чемпионов (большая лига + 2 кубка)",
+        name="Лига Чемпионов (32 — лига + 2 кубка)",
         description=(
-            "Лига в один круг — каждый играет с каждым один раз. "
+            "Лига на 32 игрока в один круг (496 матчей, N-1=31 туров). "
             "После лиги бот сам предложит кнопкой «🏆 Создать кубки» — "
-            "запускаются основной кубок (топ-24 по таблице, сетка с "
-            "байем для топ-8) и утешительный «Лига Конфети» (все "
-            "оставшиеся игроки, 25-е место и ниже). Все пары играются "
-            "в 2 матча, проход по сумме голов; матча за бронзу нет. "
-            "Размер ростера — сколько зарегистрируешь, столько и "
-            "поедет (24+ человек). Туры считаются автоматически "
-            "(N-1)."
+            "запускаются основной кубок (1-24 место, сетка на 32 с байем "
+            "для топ-8) и утешительный «Лига Конфети» (25-32 место, "
+            "сетка на 8). Все пары играются в 2 матча, проход по сумме "
+            "голов; матча за бронзу нет."
         ),
         template_type="league",
         groups_only=1,
         groups_count=1,
-        # No fixed target_group_size — works for 24, 26, 32, 34, 36 …
-        # any roster ≥ main_size+2.
+        target_group_size=32,
         group_matches_per_pair=1,
         playoff_third_place=0,
         draw_mode="random",
         tours_enabled=1,
-        total_tours=0,  # auto = N-1 from registered count
+        total_tours=0,  # auto = 31 (N-1)
         group_display_name="Лига Чемпионов",
         followup_cups_config=(
-            # consolation_size omitted on purpose: spawner defaults it
-            # to "all players past main_size" so the same template
-            # works for 32, 34, 36, … rosters out of the box.
-            '{"main_size": 24, "legs_per_pair": 2}'
+            '{"main_size": 24, "consolation_size": 8, "legs_per_pair": 2}'
         ),
     ),
 }

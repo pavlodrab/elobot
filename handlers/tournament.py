@@ -4647,7 +4647,7 @@ async def _handle_tournament_settings_cb(
             result = spawn_cl_followup_cups(
                 tid,
                 main_size=int(cfg.get("main_size", 24)),
-                consolation_size=cfg.get("consolation_size"),  # None = auto
+                consolation_size=int(cfg.get("consolation_size", 8)),
                 legs_per_pair=int(cfg.get("legs_per_pair", 2)),
             )
         except ValueError as e:
@@ -4681,22 +4681,12 @@ async def _handle_tournament_settings_cb(
             "",
             f"🏆 <b>Основной кубок</b> — id <code>{result['main_tid']}</code> "
             f"({main_real} матча в первом раунде, {main_byes} баев)",
-        ]
-        if result.get("consolation_tid"):
-            msg_lines.append(
-                f"🥉 <b>Лига Конфети</b> — id <code>{result['consolation_tid']}</code> "
-                f"({cons_real} матча в первом раунде)"
-            )
-        else:
-            msg_lines.append(
-                "🥉 Утешительный кубок не создан — на 25-е место и ниже не "
-                "осталось хотя бы 2 игроков."
-            )
-        msg_lines.extend([
+            f"🥉 <b>Лига Конфети</b> — id <code>{result['consolation_tid']}</code> "
+            f"({cons_real} матча в первом раунде)",
             "",
             "Все пары играются в 2 матча, проход по сумме голов.",
             "Сетку можно посмотреть командой <code>/bracket &lt;id&gt;</code>.",
-        ])
+        ]
         await query.message.reply_text(
             "\n".join(msg_lines), parse_mode="HTML",
         )

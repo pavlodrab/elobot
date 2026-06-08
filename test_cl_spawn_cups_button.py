@@ -85,14 +85,7 @@ def test_template_persists_followup_cups_config():
             "template kwargs must include followup_cups_config"
         )
         cfg = t.parse_followup_cups_config(kwargs["followup_cups_config"])
-        # consolation_size is intentionally omitted from the template
-        # JSON — spawner derives it from the actual roster, so the
-        # same template handles 32, 34, 36 … players out of the box.
-        assert cfg == {
-            "main_size": 24,
-            "consolation_size": None,
-            "legs_per_pair": 2,
-        }, f"unexpected parsed cfg: {cfg}"
+        assert cfg == {"main_size": 24, "consolation_size": 8, "legs_per_pair": 2}
     finally:
         os.unlink(path)
 
@@ -104,19 +97,9 @@ def test_parse_followup_cups_config_handles_garbage():
         assert t.parse_followup_cups_config("") is None
         assert t.parse_followup_cups_config("not-json") is None
         assert t.parse_followup_cups_config("[]") is None  # not a dict
-        # Partial config falls back to defaults; missing
-        # consolation_size stays as None (auto-derive).
+        # Partial config falls back to defaults.
         cfg = t.parse_followup_cups_config('{"main_size": 16}')
-        assert cfg == {
-            "main_size": 16,
-            "consolation_size": None,
-            "legs_per_pair": 2,
-        }, f"unexpected parsed cfg: {cfg}"
-        # Explicit consolation_size is honoured.
-        cfg = t.parse_followup_cups_config(
-            '{"main_size": 24, "consolation_size": 8}'
-        )
-        assert cfg["consolation_size"] == 8
+        assert cfg == {"main_size": 16, "consolation_size": 8, "legs_per_pair": 2}
     finally:
         os.unlink(path)
 

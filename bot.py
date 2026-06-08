@@ -606,7 +606,7 @@ ADMIN_ONLY_HELP_TEXT = """
   Алиасы: /adminsetnick, /setnick_for, /setnickfor
 /relink_player @oldhandle &lt;telegram_id&gt; — слить две записи
   Алиасы: /relinkplayer, /relink, /merge_player, /mergeplayer
-/cl_spawn_cups &lt;league_id&gt; [main_size] [cons_size] — после ЛЧ-лиги: создать основной кубок + Лигу Конфети
+/cl_spawn_cups &lt;league_id&gt; [main_size] [cons_size] — после ЛЧ-32: создать основной кубок + Лигу Конфети
   Алиасы: /clspawncups, /spawn_cups
 /grant_admin @user [коммент] — выдать админку
   Алиас: /grantadmin
@@ -886,32 +886,15 @@ def submenu_tournament_settings(t: dict) -> InlineKeyboardMarkup:
                 f"🏆 Основной кубок: id {main_tid}",
                 callback_data=f"ts:open:{main_tid}",
             )])
-            if cons_tid:
-                rows.append([InlineKeyboardButton(
-                    f"🥉 Лига Конфети: id {cons_tid}",
-                    callback_data=f"ts:open:{cons_tid}",
-                )])
+            rows.append([InlineKeyboardButton(
+                f"🥉 Лига Конфети: id {cons_tid}",
+                callback_data=f"ts:open:{cons_tid}",
+            )])
         elif stage in ("groups_done", "finished"):
             ms = int(cups_cfg.get("main_size", 24))
-            cs_raw = cups_cfg.get("consolation_size")
-            # Consolation defaults to "all remaining past main_size"
-            # so the same template handles 32 / 34 / 36 … rosters.
-            from database import get_tournament_players
-            try:
-                roster = len(get_tournament_players(tid))
-            except Exception:
-                roster = 0
-            if cs_raw is not None:
-                cs = int(cs_raw)
-            else:
-                cs = max(0, roster - ms) if roster else 0
-            label = (
-                f"🏆 Создать кубки: топ-{ms} + утешение {cs}"
-                if cs >= 2 else
-                f"🏆 Создать основной кубок (топ-{ms})"
-            )
+            cs = int(cups_cfg.get("consolation_size", 8))
             rows.append([InlineKeyboardButton(
-                label,
+                f"🏆 Создать кубки: топ-{ms} + утешение {cs}",
                 callback_data=f"ts:cl_spawn:{tid}",
             )])
         else:

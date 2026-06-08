@@ -1729,10 +1729,10 @@ def spawn_cl_followup_cups(
     league_tid: int,
     *,
     main_size: int = 24,
-    consolation_size: int | None = None,
+    consolation_size: int = 8,
     legs_per_pair: int = 2,
 ) -> dict:
-    """After a Champions-League-style league, spawn the two follow-up cups.
+    """After a 32-player CL-style league, spawn the two follow-up cups.
 
     Reads the final standings of the league (single group, sorted by
     points/GD/GF) and creates two sibling tournaments:
@@ -1745,27 +1745,20 @@ def spawn_cl_followup_cups(
       17-24). Two-leg ties (aggregate goals), no bronze.
 
     * **Лига Конфети** — places ``main_size+1``..``main_size+consolation_size``
-      of the league. When ``consolation_size`` is ``None`` (the
-      default), all remaining players past ``main_size`` are taken,
-      so the same call works for 32, 34, 36, … rosters out of the
-      box. Bracket size is ``next_pow2`` of that count, byes for the
-      top seeds. Two-leg ties, no bronze.
+      of the league (default 25..32). 8-bracket cup, two-leg ties,
+      no bronze. Highest league position = top seed.
 
     Both cups are seeded **by league finishing position**, not by
     global ELO, by manually building the first-round matches from
     the league standings. ``draw_mode`` on each spawned cup is set
     to ``"manual"`` so the bracket isn't re-rolled.
 
-    If the resulting consolation roster is < 2 players (e.g. league
-    of 25 with main_size=24), the consolation cup is skipped and
-    ``consolation_tid`` in the result is ``None``.
-
-    Returns ``{"main_tid": int, "consolation_tid": int | None,
+    Returns ``{"main_tid": int, "consolation_tid": int,
     "main_matches": [...], "consolation_matches": [...]}``.
 
-    Raises ``ValueError`` if the league doesn't have at least
-    ``main_size`` players, isn't finished, or already has follow-up
-    cups linked to it.
+    Raises ``ValueError`` if the league has fewer than
+    ``main_size + consolation_size`` players, isn't finished, or
+    already has follow-up cups linked to it.
     """
     league = get_tournament(league_tid)
     if not league:
@@ -1793,24 +1786,11 @@ def spawn_cl_followup_cups(
             f"spawn_cl_followup_cups expects one"
         )
     league_order = next(iter(standings.values()))
-    total = len(league_order)
-    if total < int(main_size):
+    needed = int(main_size) + int(consolation_size)
+    if len(league_order) < needed:
         raise ValueError(
-            f"league {league_tid} has only {total} players, need at "
-            f"least {main_size} for the main cup"
-        )
-    # Default consolation = "everybody after main_size", so the same
-    # template handles 32 (→ 8-cons), 34 (→ 10-cons), 36 (→ 12-cons) …
-    if consolation_size is None:
-        cons_n = total - int(main_size)
-    else:
-        cons_n = int(consolation_size)
-    if cons_n < 0:
-        cons_n = 0
-    if (int(main_size) + cons_n) > total:
-        raise ValueError(
-            f"main_size ({main_size}) + consolation_size ({cons_n}) "
-            f"exceeds league roster ({total})"
+            f"league {league_tid} has {len(league_order)} players, "
+            f"need {needed} (main={main_size} + consolation={consolation_size})"
         )
     if not check_groups_complete(league_tid):
         raise ValueError(
@@ -1849,40 +1829,36 @@ def spawn_cl_followup_cups(
         add_player_to_tournament(main_tid, s["player_id"], "A")
     main_matches = _create_seeded_bracket(main_tid, main_seeds, int(legs_per_pair))
 
-    # ── Consolation cup: places main_size+1..main_size+cons_n.
-    #     Skipped if cons_n < 2 (no opponents → no cup).
-    cons_tid = None
-    cons_matches: list[dict] = []
-    if cons_n >= 2:
-        cons_seeds = [
-            _seed_dict(p)
-            for p in league_order[int(main_size):int(main_size) + cons_n]
-        ]
-        cons_tid = create_tournament(
-            f"{base_name} — Лига Конфети",
-            tournament_type=t_type,
-            created_by=creator,
-        )
-        update_tournament(
-            cons_tid,
-            bracket_only=1,
-            groups_only=0,
-            groups_count=0,
-            draw_mode="manual",
-            playoff_matches_per_pair=int(legs_per_pair),
-            playoff_advance_mode="goals",
-            playoff_third_place=0,
-            open_signup=0,
-        )
-        for s in cons_seeds:
-            add_player_to_tournament(cons_tid, s["player_id"], "A")
-        cons_matches = _create_seeded_bracket(cons_tid, cons_seeds, int(legs_per_pair))
+    # ── Consolation cup: places main_size+1..main_size+consolation_size
+    cons_seeds = [
+        _seed_dict(p)
+        for p in league_order[main_size:main_size + consolation_size]
+    ]
+    cons_tid = create_tournament(
+        f"{base_name} — Лига Конфети",
+        tournament_type=t_type,
+        created_by=creator,
+    )
+    update_tournament(
+        cons_tid,
+        bracket_only=1,
+        groups_only=0,
+        groups_count=0,
+        draw_mode="manual",
+        playoff_matches_per_pair=int(legs_per_pair),
+        playoff_advance_mode="goals",
+        playoff_third_place=0,
+        open_signup=0,
+    )
+    for s in cons_seeds:
+        add_player_to_tournament(cons_tid, s["player_id"], "A")
+    cons_matches = _create_seeded_bracket(cons_tid, cons_seeds, int(legs_per_pair))
 
     # Mark the league row so we don't accidentally double-spawn from
     # a stale "Создать кубки" button or a second /cl_spawn_cups call.
     update_tournament(
         league_tid,
-        followup_cups_tids=f"{int(main_tid)}:{int(cons_tid) if cons_tid else 0}",
+        followup_cups_tids=f"{int(main_tid)}:{int(cons_tid)}",
     )
 
     return {
@@ -1898,11 +1874,7 @@ def parse_followup_cups_config(raw: str | None) -> dict | None:
 
     Returns ``None`` if the column is empty/null or doesn't parse.
     Otherwise returns a dict with ``main_size``, ``consolation_size``
-    and ``legs_per_pair``. ``consolation_size`` may be ``None`` —
-    that's the signal to ``spawn_cl_followup_cups`` to use "all
-    remaining players past main_size", which is what the
-    ``champions_league_32`` template does so it works for any
-    roster size.
+    and ``legs_per_pair`` (defaults: 24, 8, 2).
     """
     if not raw:
         return None
@@ -1912,26 +1884,22 @@ def parse_followup_cups_config(raw: str | None) -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
-    cs_raw = data.get("consolation_size")
     return {
         "main_size": int(data.get("main_size", 24)),
-        "consolation_size": int(cs_raw) if cs_raw is not None else None,
+        "consolation_size": int(data.get("consolation_size", 8)),
         "legs_per_pair": int(data.get("legs_per_pair", 2)),
     }
 
 
-def parse_followup_cups_tids(raw: str | None) -> tuple[int, int | None] | None:
+def parse_followup_cups_tids(raw: str | None) -> tuple[int, int] | None:
     """Decode ``followup_cups_tids`` column (``"<main>:<cons>"``).
 
-    Returns ``None`` if not yet spawned. ``cons`` is ``None`` when
-    there was no consolation cup (encoded as ``:0`` in the column).
+    Returns ``None`` if not yet spawned.
     """
     if not raw:
         return None
     try:
         main_s, cons_s = str(raw).split(":", 1)
-        main_tid = int(main_s)
-        cons_tid = int(cons_s)
-        return main_tid, (cons_tid if cons_tid > 0 else None)
+        return int(main_s), int(cons_s)
     except (ValueError, TypeError):
         return None
