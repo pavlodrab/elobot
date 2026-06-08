@@ -1025,8 +1025,15 @@ def update_player_username(player_id: int, new_username: str) -> None:
 def merge_players(keep_id: int, drop_id: int) -> dict:
     """Merge ``drop_id`` into ``keep_id`` and delete the drop row.
 
-    Returns ``{"matches_moved": int}`` for the caller to surface in the
-    success message.
+    Reassigns every reference (tournament_players, matches at any
+    status, match_goals, tournament_elo) from ``drop_id`` to
+    ``keep_id``. When both ids share a row in ``tournament_players``
+    or ``tournament_elo``, per-row counters are summed onto the kept
+    side before the duplicate is removed.
+
+    Returns ``{"matches_moved": int, "tp_overlap": int, "elo_overlap":
+    int, "goals_moved": int}`` so the caller can surface concrete
+    numbers to the admin.
     """
     if int(keep_id) == int(drop_id):
         raise ValueError("keep_id and drop_id must differ")
@@ -1039,61 +1046,211 @@ def merge_players(keep_id: int, drop_id: int) -> dict:
 
     conn = get_conn()
     c = conn.cursor()
-    c.execute("BEGIN")
     try:
-        # 1. Re-tag tournament_players: if both are in the same tournament,
-        #    prefer the keep player and drop the duplicate row.
+        # 1. tournament_players: sum stats on overlap, reassign on disjoint.
         drop_tps = [
-            r[0] for r in c.execute(
-                "SELECT tournament_id FROM tournament_players WHERE player_id=?",
+            dict(r) for r in c.execute(
+                "SELECT * FROM tournament_players WHERE player_id=?",
                 (drop_id,),
             ).fetchall()
         ]
-        keep_tps = [
-            r[0] for r in c.execute(
+        keep_tids = {
+            r["tournament_id"] if isinstance(r, dict) else r[0]
+            for r in c.execute(
                 "SELECT tournament_id FROM tournament_players WHERE player_id=?",
                 (keep_id,),
             ).fetchall()
-        ]
-        for tid in set(drop_tps) & set(keep_tps):
-            c.execute(
-                "DELETE FROM tournament_players WHERE player_id=? AND tournament_id=?",
-                (drop_id, tid),
-            )
-        for tid in set(drop_tps) - set(keep_tps):
-            c.execute(
-                "UPDATE tournament_players SET player_id=? WHERE player_id=? AND tournament_id=?",
-                (keep_id, drop_id, tid),
-            )
-        # 2. Re-tag matches: confirmed matches keep drop_id intact
-        #    (history), pending/reported are reassigned to keep_id.
-        c.execute(
-            """UPDATE matches SET player1_id=?
-               WHERE player1_id=? AND status IN ('pending','reported')""",
-            (keep_id, drop_id),
-        )
-        c.execute(
-            """UPDATE matches SET player2_id=?
-               WHERE player2_id=? AND status IN ('pending','reported')""",
-            (keep_id, drop_id),
-        )
-        # 3. Re-tag goals
-        c.execute(
-            "UPDATE match_goals SET player_id=? WHERE player_id=?",
-            (keep_id, drop_id),
-        )
-        # 4. ELO rows: drop the drop row
-        c.execute("DELETE FROM tournament_elo WHERE player_id=?", (drop_id,))
-        # 5. Delete the player row
-        c.execute("DELETE FROM players WHERE id=?", (drop_id,))
-        c.execute("COMMIT")
-    except Exception:
-        c.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
+        }
+        tp_overlap = 0
+        for row in drop_tps:
+            tid = row["tournament_id"]
+            if tid in keep_tids:
+                # Overlap: add drop's group counters onto keep's row,
+                # then remove the duplicate.
+                c.execute(
+                    """UPDATE tournament_players SET
+                            group_points = COALESCE(group_points,0) + ?,
+                            group_gf     = COALESCE(group_gf,0)     + ?,
+                            group_ga     = COALESCE(group_ga,0)     + ?,
+                            group_wins   = COALESCE(group_wins,0)   + ?,
+                            group_draws  = COALESCE(group_draws,0)  + ?,
+                            group_losses = COALESCE(group_losses,0) + ?
+                       WHERE tournament_id=? AND player_id=?""",
+                    (
+                        row.get("group_points") or 0,
+                        row.get("group_gf") or 0,
+                        row.get("group_ga") or 0,
+                        row.get("group_wins") or 0,
+                        row.get("group_draws") or 0,
+                        row.get("group_losses") or 0,
+                        tid, keep_id,
+                    ),
+                )
+                c.execute(
+                    "DELETE FROM tournament_players "
+                    "WHERE player_id=? AND tournament_id=?",
+                    (drop_id, tid),
+                )
+                tp_overlap += 1
+            else:
+                c.execute(
+                    "UPDATE tournament_players SET player_id=? "
+                    "WHERE player_id=? AND tournament_id=?",
+                    (keep_id, drop_id, tid),
+                )
 
-    return {"matches_moved": 0}
+        # 2. matches: re-tag ALL matches (any status) so historical
+        #    records don't end up orphaned when the drop row is
+        #    deleted. Self-matches between drop and keep would be
+        #    nonsensical post-merge, so wipe those.
+        c.execute(
+            "DELETE FROM matches WHERE "
+            "(player1_id=? AND player2_id=?) OR (player1_id=? AND player2_id=?)",
+            (keep_id, drop_id, drop_id, keep_id),
+        )
+        c.execute(
+            "UPDATE matches SET player1_id=? WHERE player1_id=?",
+            (keep_id, drop_id),
+        )
+        moved_p1 = c.rowcount or 0
+        c.execute(
+            "UPDATE matches SET player2_id=? WHERE player2_id=?",
+            (keep_id, drop_id),
+        )
+        moved_p2 = c.rowcount or 0
+        matches_moved = int(moved_p1) + int(moved_p2)
+
+        # 3. match_goals: re-tag goal rows (best effort — older installs
+        #    may not have the table).
+        goals_moved = 0
+        try:
+            c.execute(
+                "UPDATE match_goals SET player_id=? WHERE player_id=?",
+                (keep_id, drop_id),
+            )
+            goals_moved = int(c.rowcount or 0)
+        except Exception:
+            goals_moved = 0
+
+        # 4. tournament_elo: sum on overlap, reassign on disjoint.
+        elo_overlap = 0
+        try:
+            drop_elo = [
+                dict(r) for r in c.execute(
+                    "SELECT * FROM tournament_elo WHERE player_id=?",
+                    (drop_id,),
+                ).fetchall()
+            ]
+            keep_elo_tids = {
+                (r["tournament_id"] if isinstance(r, dict) else r[0])
+                for r in c.execute(
+                    "SELECT tournament_id FROM tournament_elo WHERE player_id=?",
+                    (keep_id,),
+                ).fetchall()
+            }
+            for row in drop_elo:
+                tid = row["tournament_id"]
+                if tid in keep_elo_tids:
+                    # Overlap: pick the higher ELO, sum game counters.
+                    c.execute(
+                        """UPDATE tournament_elo SET
+                                elo           = MAX(elo, ?),
+                                games         = COALESCE(games,0)         + ?,
+                                wins          = COALESCE(wins,0)          + ?,
+                                draws         = COALESCE(draws,0)         + ?,
+                                losses        = COALESCE(losses,0)        + ?,
+                                goals_for     = COALESCE(goals_for,0)     + ?,
+                                goals_against = COALESCE(goals_against,0) + ?
+                           WHERE tournament_id=? AND player_id=?""",
+                        (
+                            row.get("elo") or 0,
+                            row.get("games") or 0,
+                            row.get("wins") or 0,
+                            row.get("draws") or 0,
+                            row.get("losses") or 0,
+                            row.get("goals_for") or 0,
+                            row.get("goals_against") or 0,
+                            tid, keep_id,
+                        ),
+                    )
+                    c.execute(
+                        "DELETE FROM tournament_elo "
+                        "WHERE player_id=? AND tournament_id=?",
+                        (drop_id, tid),
+                    )
+                    elo_overlap += 1
+                else:
+                    c.execute(
+                        "UPDATE tournament_elo SET player_id=? "
+                        "WHERE player_id=? AND tournament_id=?",
+                        (keep_id, drop_id, tid),
+                    )
+        except Exception:
+            # tournament_elo table may not exist on very old installs.
+            pass
+
+        # 5. Promote drop's stronger global counters onto the kept row.
+        #    We keep keep's username/telegram_id/registered_at, but the
+        #    pre-existing tombstone often holds the user's true ELO
+        #    history and game counts — losing those silently surprises
+        #    admins.
+        try:
+            c.execute(
+                """UPDATE players SET
+                        elo            = MAX(elo,            ?),
+                        elo_vsa        = MAX(elo_vsa,        ?),
+                        elo_ri         = MAX(elo_ri,         ?),
+                        goals_scored   = COALESCE(goals_scored,0)   + ?,
+                        goals_conceded = COALESCE(goals_conceded,0) + ?,
+                        assists        = COALESCE(assists,0)        + ?,
+                        wins           = COALESCE(wins,0)           + ?,
+                        losses         = COALESCE(losses,0)         + ?,
+                        draws          = COALESCE(draws,0)          + ?,
+                        clean_sheets   = COALESCE(clean_sheets,0)   + ?,
+                        best_streak    = MAX(best_streak,    ?)
+                   WHERE id=?""",
+                (
+                    drop.get("elo") or 0,
+                    drop.get("elo_vsa") or 0,
+                    drop.get("elo_ri") or 0,
+                    drop.get("goals_scored") or 0,
+                    drop.get("goals_conceded") or 0,
+                    drop.get("assists") or 0,
+                    drop.get("wins") or 0,
+                    drop.get("losses") or 0,
+                    drop.get("draws") or 0,
+                    drop.get("clean_sheets") or 0,
+                    drop.get("best_streak") or 0,
+                    keep_id,
+                ),
+            )
+            # Promote game_nickname only if keep doesn't have one.
+            if not (keep.get("game_nickname") or "").strip() and (
+                drop.get("game_nickname") or ""
+            ).strip():
+                c.execute(
+                    "UPDATE players SET game_nickname=? WHERE id=?",
+                    (drop.get("game_nickname"), keep_id),
+                )
+        except Exception:
+            # Schema drift on very old installs — don't block the merge.
+            pass
+
+        # 6. Drop the duplicate row.
+        c.execute("DELETE FROM players WHERE id=?", (drop_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+    conn.close()
+
+    return {
+        "matches_moved": matches_moved,
+        "tp_overlap": tp_overlap,
+        "elo_overlap": elo_overlap,
+        "goals_moved": goals_moved,
+    }
 
 
 def get_player_by_telegram_id(tid: int | None):
