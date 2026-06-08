@@ -1270,9 +1270,28 @@ def merge_players(keep_id: int, drop_id: int) -> dict:
                     tid = row["tournament_id"]
                     if tid in keep_elo_tids:
                         # Overlap: pick the higher ELO, sum game counters.
+                        # Compute the new ELO in Python so we don't depend
+                        # on the SQLite scalar ``MAX(a, b)`` (which doesn't
+                        # exist on Postgres — it would silently abort the
+                        # savepoint and the per-tournament ELO would be
+                        # left at the kept row's old value).
+                        keep_row = next(
+                            (
+                                dict(r) for r in c.execute(
+                                    "SELECT * FROM tournament_elo "
+                                    "WHERE tournament_id=? AND player_id=?",
+                                    (tid, keep_id),
+                                ).fetchall()
+                            ),
+                            {},
+                        )
+                        new_elo = max(
+                            float(keep_row.get("elo") or 0),
+                            float(row.get("elo") or 0),
+                        )
                         c.execute(
                             """UPDATE tournament_elo SET
-                                    elo           = MAX(elo, ?),
+                                    elo           = ?,
                                     games         = COALESCE(games,0)         + ?,
                                     wins          = COALESCE(wins,0)          + ?,
                                     draws         = COALESCE(draws,0)         + ?,
@@ -1281,7 +1300,7 @@ def merge_players(keep_id: int, drop_id: int) -> dict:
                                     goals_against = COALESCE(goals_against,0) + ?
                                WHERE tournament_id=? AND player_id=?""",
                             (
-                                row.get("elo") or 0,
+                                new_elo,
                                 row.get("games") or 0,
                                 row.get("wins") or 0,
                                 row.get("draws") or 0,
@@ -1312,57 +1331,65 @@ def merge_players(keep_id: int, drop_id: int) -> dict:
             elo_overlap = 0
 
         # 5. Promote drop's stronger global counters onto the kept row.
-        #    Schema drift on the ``players`` table (e.g. ``elo_vsa``
-        #    column missing on a very old DB) used to abort the whole
-        #    transaction with the cryptic ``current transaction is
-        #    aborted`` message. SAVEPOINT keeps the merge atomic for
-        #    the parts that DO exist.
-        try:
-            c.execute("SAVEPOINT sp_promote_player")
-            try:
-                c.execute(
-                    """UPDATE players SET
-                            elo            = MAX(elo,            ?),
-                            elo_vsa        = MAX(elo_vsa,        ?),
-                            elo_ri         = MAX(elo_ri,         ?),
-                            goals_scored   = COALESCE(goals_scored,0)   + ?,
-                            goals_conceded = COALESCE(goals_conceded,0) + ?,
-                            assists        = COALESCE(assists,0)        + ?,
-                            wins           = COALESCE(wins,0)           + ?,
-                            losses         = COALESCE(losses,0)         + ?,
-                            draws          = COALESCE(draws,0)          + ?,
-                            clean_sheets   = COALESCE(clean_sheets,0)   + ?,
-                            best_streak    = MAX(best_streak,    ?)
-                       WHERE id=?""",
-                    (
-                        drop.get("elo") or 0,
-                        drop.get("elo_vsa") or 0,
-                        drop.get("elo_ri") or 0,
-                        drop.get("goals_scored") or 0,
-                        drop.get("goals_conceded") or 0,
-                        drop.get("assists") or 0,
-                        drop.get("wins") or 0,
-                        drop.get("losses") or 0,
-                        drop.get("draws") or 0,
-                        drop.get("clean_sheets") or 0,
-                        drop.get("best_streak") or 0,
-                        keep_id,
-                    ),
-                )
-                # Promote game_nickname only if keep doesn't have one.
-                if not (keep.get("game_nickname") or "").strip() and (
-                    drop.get("game_nickname") or ""
-                ).strip():
-                    c.execute(
-                        "UPDATE players SET game_nickname=? WHERE id=?",
-                        (drop.get("game_nickname"), keep_id),
-                    )
-                c.execute("RELEASE SAVEPOINT sp_promote_player")
-            except Exception:
-                c.execute("ROLLBACK TO SAVEPOINT sp_promote_player")
-                c.execute("RELEASE SAVEPOINT sp_promote_player")
-        except Exception:
-            pass
+        #
+        #    Two production lessons baked into this block:
+        #
+        #    * SQL portability: SQLite has a scalar ``MAX(a, b)``;
+        #      Postgres only has the aggregate, the scalar form is
+        #      ``GREATEST(a, b)``. The previous implementation ran a
+        #      single bulk ``UPDATE players SET elo = MAX(elo, ?)…``
+        #      which silently failed on every Postgres deploy with
+        #      ``function max(integer, integer) does not exist``,
+        #      taking the game_nickname update down with it (same
+        #      savepoint). Result: the kept row stayed at ELO 0 and
+        #      empty nick after a successful merge.
+        #
+        #    * Schema drift: each per-column UPDATE goes into its
+        #      OWN savepoint, so a missing column on one (e.g. older
+        #      DB without ``elo_vsa``) does not poison the rest.
+        #
+        #    Compute the new value in Python (max / sum) and let SQL
+        #    do the bare assignment — no DB-specific scalar math.
+        def _kd_max(field: str) -> float:
+            return max(
+                float(keep.get(field) or 0),
+                float(drop.get(field) or 0),
+            )
+
+        def _kd_sum(field: str) -> float:
+            return float(keep.get(field) or 0) + float(drop.get(field) or 0)
+
+        promote_specs: list[tuple[str, str, object]] = [
+            ("sp_elo",            "elo",            _kd_max("elo")),
+            ("sp_elo_vsa",        "elo_vsa",        _kd_max("elo_vsa")),
+            ("sp_elo_ri",         "elo_ri",         _kd_max("elo_ri")),
+            ("sp_goals_scored",   "goals_scored",   _kd_sum("goals_scored")),
+            ("sp_goals_conceded", "goals_conceded", _kd_sum("goals_conceded")),
+            ("sp_assists",        "assists",        _kd_sum("assists")),
+            ("sp_wins",           "wins",           _kd_sum("wins")),
+            ("sp_losses",         "losses",         _kd_sum("losses")),
+            ("sp_draws",          "draws",          _kd_sum("draws")),
+            ("sp_clean_sheets",   "clean_sheets",   _kd_sum("clean_sheets")),
+            ("sp_best_streak",    "best_streak",    _kd_max("best_streak")),
+        ]
+        for sp_name, col, val in promote_specs:
+            sql = f"UPDATE players SET {col}=? WHERE id=?"
+            params = (val, keep_id)
+            _safe_step(sp_name, lambda s=sql, p=params: c.execute(s, p))
+
+        # Promote game_nickname only if keep doesn't have one. Lives
+        # in its own savepoint so it survives even if every stat
+        # column above failed (e.g. very old DB schema).
+        if not (keep.get("game_nickname") or "").strip() and (
+            drop.get("game_nickname") or ""
+        ).strip():
+            _safe_step(
+                "sp_game_nickname",
+                lambda: c.execute(
+                    "UPDATE players SET game_nickname=? WHERE id=?",
+                    (drop.get("game_nickname"), keep_id),
+                ),
+            )
 
         # 6. Drop the duplicate row.
         c.execute("DELETE FROM players WHERE id=?", (drop_id,))
