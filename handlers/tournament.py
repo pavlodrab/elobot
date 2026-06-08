@@ -4618,6 +4618,90 @@ async def _handle_tournament_settings_cb(
         await _ts_show_panel(query, t)
         return
 
+    if action == "cl_spawn":
+        # One-tap "Создать кубки" from the settings panel for a finished
+        # Champions League (32) league. Mirrors /cl_spawn_cups but
+        # reads the saved followup_cups_config from the league row, so
+        # the admin doesn't have to remember sizes.
+        from tournament import (
+            spawn_cl_followup_cups, parse_followup_cups_config,
+        )
+        cfg = parse_followup_cups_config(t.get("followup_cups_config"))
+        if not cfg:
+            await query.message.reply_text(
+                "❌ У этого турнира не настроен авто-спаун кубков. "
+                "Используй <code>/cl_spawn_cups " + str(tid) + "</code> "
+                "вручную или создай новый турнир из шаблона "
+                "«Лига Чемпионов (32 — лига + 2 кубка)».",
+                parse_mode="HTML",
+            )
+            return
+        stage = (t.get("stage") or "").lower()
+        if stage not in ("groups_done", "finished"):
+            await query.message.reply_text(
+                "⏳ Лига ещё не закончена. Кнопка станет активной, когда все "
+                "групповые матчи будут подтверждены.",
+            )
+            return
+        try:
+            result = spawn_cl_followup_cups(
+                tid,
+                main_size=int(cfg.get("main_size", 24)),
+                consolation_size=int(cfg.get("consolation_size", 8)),
+                legs_per_pair=int(cfg.get("legs_per_pair", 2)),
+            )
+        except ValueError as e:
+            await query.message.reply_text(
+                f"❌ {html.escape(str(e))}.", parse_mode="HTML",
+            )
+            return
+        except Exception as e:
+            log.exception("cl_spawn callback failed: %s", e)
+            await query.message.reply_text(
+                f"❌ Внутренняя ошибка: {html.escape(str(e))}.",
+                parse_mode="HTML",
+            )
+            return
+        # Refresh the panel — the league row now has
+        # followup_cups_tids set, which swaps the "Создать кубки"
+        # button for direct links to the two new tournaments.
+        t = get_tournament(tid) or t
+        from bot import submenu_tournament_settings
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=submenu_tournament_settings(t),
+            )
+        except TelegramError:
+            pass
+        main_real = sum(1 for m in result["main_matches"] if not m.get("bye"))
+        main_byes = sum(1 for m in result["main_matches"] if m.get("bye"))
+        cons_real = sum(1 for m in result["consolation_matches"] if not m.get("bye"))
+        msg_lines = [
+            "✅ <b>Follow-up кубки созданы.</b>",
+            "",
+            f"🏆 <b>Основной кубок</b> — id <code>{result['main_tid']}</code> "
+            f"({main_real} матча в первом раунде, {main_byes} баев)",
+            f"🥉 <b>Лига Конфети</b> — id <code>{result['consolation_tid']}</code> "
+            f"({cons_real} матча в первом раунде)",
+            "",
+            "Все пары играются в 2 матча, проход по сумме голов.",
+            "Сетку можно посмотреть командой <code>/bracket &lt;id&gt;</code>.",
+        ]
+        await query.message.reply_text(
+            "\n".join(msg_lines), parse_mode="HTML",
+        )
+        return
+
+    if action == "cl_spawn_info":
+        # Stage-not-ready hint. Posted as a follow-up so it doesn't
+        # destroy the inline panel.
+        await query.message.reply_text(
+            "⏳ Лига ещё идёт. Когда все матчи группового этапа будут "
+            "подтверждены, в этом меню появится кнопка «🏆 Создать кубки» "
+            "— один клик и бот сделает оба кубка по сидам лиги.",
+        )
+        return
+
     if action == "auto":
         new_val = 0 if int(t.get("auto_confirm") or 0) else 1
         update_tournament(tid, auto_confirm=new_val)

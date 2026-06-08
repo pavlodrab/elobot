@@ -280,6 +280,61 @@ async def _announce_stage_advance(
     )
     chat_id = t.get("chat_id")
 
+    if new_stage == "groups_done":
+        # CL-32 (and any other groups_only league with
+        # ``followup_cups_config`` set) just closed its table.
+        # Broadcast a one-tap "🏆 Создать кубки" prompt so the admin
+        # doesn't have to hunt for the command — the inline button on
+        # the league row's settings panel is also live, this just
+        # surfaces it where the chat already is.
+        from tournament import parse_followup_cups_config
+        cfg = parse_followup_cups_config(t.get("followup_cups_config"))
+        msg_chat = (
+            f"🏁 Лига {t_label} завершена!\n\n"
+            f"📊 Финальная таблица: /standings"
+        )
+        if cfg:
+            ms = int(cfg.get("main_size", 24))
+            cs = int(cfg.get("consolation_size", 8))
+            msg_chat += (
+                f"\n\n🏆 По шаблону «Лига Чемпионов» нужно сделать ещё "
+                f"два кубка:\n"
+                f"  • Основной — места 1-{ms} (сетка с байем для топ-8)\n"
+                f"  • Лига Конфети — места {ms + 1}-{ms + cs}"
+            )
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    f"🏆 Создать кубки ({ms} + {cs})",
+                    callback_data=f"ts:cl_spawn:{tournament_id}",
+                ),
+            ]])
+            if chat_id:
+                try:
+                    await ctx.bot.send_message(
+                        chat_id, msg_chat, parse_mode="HTML",
+                        reply_markup=kb,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "announce(groups_done) chat %s failed: %s",
+                        chat_id, e,
+                    )
+            return
+        # No followup config — broadcast the plain "league finished"
+        # message so the chat still gets a closure ping.
+        if chat_id:
+            try:
+                await ctx.bot.send_message(
+                    chat_id, msg_chat, parse_mode="HTML",
+                )
+            except Exception as e:
+                log.warning(
+                    "announce(groups_done) chat %s failed: %s",
+                    chat_id, e,
+                )
+        return
+
     if new_stage == "finished":
         # Tournament is fully done — broadcast a full podium summary
         # (🥇/🥈/🥉) in the bound chat. The /finish_tournament command
