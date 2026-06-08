@@ -138,6 +138,54 @@ def test_merge_rejects_same_id():
         os.unlink(path)
 
 
+
+def test_merge_survives_schema_drift_in_optional_steps():
+    """Reproduce the production failure mode where a column missing
+    in ``players`` (e.g. ``elo_vsa``) would crash the whole merge
+    with ``current transaction is aborted, commands ignored…``.
+
+    We simulate it by patching ``conn.cursor().execute`` to raise on
+    the global-stats UPDATE — the savepoint should isolate the failure
+    and let the merge complete with correct counters for everything
+    else.
+    """
+    db, path = _setup()
+    try:
+        old = db.upsert_player("ghost")
+        new = db.upsert_player("phoenix", telegram_id=1)
+        rival = db.upsert_player("opp")
+        tid = db.create_tournament("Drift", tournament_type="vsa", created_by=old["id"])
+        db.add_player_to_tournament(tid, old["id"], "A")
+        db.add_player_to_tournament(tid, rival["id"], "A")
+        mid = db.create_match(tid, old["id"], rival["id"], stage="group")
+        db.update_match(mid, score1=1, score2=0, status="confirmed")
+
+        # Monkey-patch the cursor to fail on the global-stats UPDATE.
+        import db_backend as dbb
+        orig_execute = dbb._CursorWrapper.execute
+
+        def patched(self, sql, params=None):
+            if sql.lstrip().upper().startswith("UPDATE PLAYERS SET\n") or (
+                "elo_vsa" in (sql or "") and "UPDATE players" in (sql or "")
+            ):
+                raise RuntimeError("simulated column drift: elo_vsa missing")
+            return orig_execute(self, sql, params)
+
+        dbb._CursorWrapper.execute = patched
+        try:
+            counters = db.merge_players(keep_id=new["id"], drop_id=old["id"])
+        finally:
+            dbb._CursorWrapper.execute = orig_execute
+
+        # The simulated drift should NOT have killed the merge.
+        assert counters["matches_moved"] == 1
+        assert db.get_player_by_id(old["id"]) is None
+        assert db.get_player_by_id(new["id"]) is not None
+    finally:
+        os.unlink(path)
+
+
+
 def main() -> int:
     failures: list[str] = []
     for fn in [
@@ -145,6 +193,7 @@ def main() -> int:
         test_merge_overlap_sums_tp_stats,
         test_merge_self_match_is_pruned,
         test_merge_rejects_same_id,
+        test_merge_survives_schema_drift_in_optional_steps,
     ]:
         try:
             fn()

@@ -1066,58 +1066,138 @@ def merge_players(keep_id: int, drop_id: int) -> dict:
 
     conn = get_conn()
     c = conn.cursor()
+
+    def _safe_step(savepoint_name: str, body):
+        """Run ``body()`` inside a SAVEPOINT, recovering on Postgres
+        ``current transaction is aborted`` failures.
+
+        Returns ``True`` on success, ``False`` if the body raised. On
+        failure the transaction is rolled back to the savepoint so
+        subsequent steps can keep running on a clean transaction.
+        """
+        try:
+            c.execute(f"SAVEPOINT {savepoint_name}")
+        except Exception:
+            # Backend doesn't support savepoints — call directly and
+            # propagate any exception to the outer rollback.
+            return body() is not False
+        try:
+            body()
+            c.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            return True
+        except Exception:
+            try:
+                c.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                c.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            except Exception:
+                # Savepoint stack is corrupt — let the outer try/except
+                # rollback the whole transaction instead of pretending
+                # the merge can continue.
+                raise
+            return False
+
     try:
-        # 1. tournament_players: sum stats on overlap, reassign on disjoint.
-        drop_tps = [
-            dict(r) for r in c.execute(
-                "SELECT * FROM tournament_players WHERE player_id=?",
-                (drop_id,),
-            ).fetchall()
-        ]
-        keep_tids = {
-            r["tournament_id"] if isinstance(r, dict) else r[0]
-            for r in c.execute(
-                "SELECT tournament_id FROM tournament_players WHERE player_id=?",
-                (keep_id,),
-            ).fetchall()
-        }
+        # 1. tournament_players: sum stats on overlap, reassign on
+        #    disjoint. Wrapped in a SAVEPOINT in case the production
+        #    schema is missing any of the group_* counter columns —
+        #    on Postgres a missing column would otherwise abort the
+        #    whole transaction and surface as
+        #    ``current transaction is aborted, commands ignored…``.
         tp_overlap = 0
-        for row in drop_tps:
-            tid = row["tournament_id"]
-            if tid in keep_tids:
-                # Overlap: add drop's group counters onto keep's row,
-                # then remove the duplicate.
-                c.execute(
-                    """UPDATE tournament_players SET
-                            group_points = COALESCE(group_points,0) + ?,
-                            group_gf     = COALESCE(group_gf,0)     + ?,
-                            group_ga     = COALESCE(group_ga,0)     + ?,
-                            group_wins   = COALESCE(group_wins,0)   + ?,
-                            group_draws  = COALESCE(group_draws,0)  + ?,
-                            group_losses = COALESCE(group_losses,0) + ?
-                       WHERE tournament_id=? AND player_id=?""",
-                    (
-                        row.get("group_points") or 0,
-                        row.get("group_gf") or 0,
-                        row.get("group_ga") or 0,
-                        row.get("group_wins") or 0,
-                        row.get("group_draws") or 0,
-                        row.get("group_losses") or 0,
-                        tid, keep_id,
-                    ),
-                )
-                c.execute(
-                    "DELETE FROM tournament_players "
-                    "WHERE player_id=? AND tournament_id=?",
-                    (drop_id, tid),
-                )
-                tp_overlap += 1
-            else:
-                c.execute(
-                    "UPDATE tournament_players SET player_id=? "
-                    "WHERE player_id=? AND tournament_id=?",
-                    (keep_id, drop_id, tid),
-                )
+        drop_tps: list[dict] = []
+        keep_tids: set = set()
+
+        def _tp_step():
+            nonlocal tp_overlap, drop_tps, keep_tids
+            drop_tps = [
+                dict(r) for r in c.execute(
+                    "SELECT * FROM tournament_players WHERE player_id=?",
+                    (drop_id,),
+                ).fetchall()
+            ]
+            keep_tids = {
+                r["tournament_id"] if isinstance(r, dict) else r[0]
+                for r in c.execute(
+                    "SELECT tournament_id FROM tournament_players WHERE player_id=?",
+                    (keep_id,),
+                ).fetchall()
+            }
+            for row in drop_tps:
+                tid = row["tournament_id"]
+                if tid in keep_tids:
+                    # Overlap: add drop's group counters onto keep's row,
+                    # then remove the duplicate.
+                    c.execute(
+                        """UPDATE tournament_players SET
+                                group_points = COALESCE(group_points,0) + ?,
+                                group_gf     = COALESCE(group_gf,0)     + ?,
+                                group_ga     = COALESCE(group_ga,0)     + ?,
+                                group_wins   = COALESCE(group_wins,0)   + ?,
+                                group_draws  = COALESCE(group_draws,0)  + ?,
+                                group_losses = COALESCE(group_losses,0) + ?
+                           WHERE tournament_id=? AND player_id=?""",
+                        (
+                            row.get("group_points") or 0,
+                            row.get("group_gf") or 0,
+                            row.get("group_ga") or 0,
+                            row.get("group_wins") or 0,
+                            row.get("group_draws") or 0,
+                            row.get("group_losses") or 0,
+                            tid, keep_id,
+                        ),
+                    )
+                    c.execute(
+                        "DELETE FROM tournament_players "
+                        "WHERE player_id=? AND tournament_id=?",
+                        (drop_id, tid),
+                    )
+                    tp_overlap += 1
+                else:
+                    c.execute(
+                        "UPDATE tournament_players SET player_id=? "
+                        "WHERE player_id=? AND tournament_id=?",
+                        (keep_id, drop_id, tid),
+                    )
+
+        if not _safe_step("sp_tournament_players", _tp_step):
+            # Schema drift on tournament_players — none of the rows
+            # were re-tagged. Fall back to a minimal disjoint reassign
+            # using only player_id + tournament_id (the two columns
+            # that have always been on the table). This still lets the
+            # merge proceed; on overlap we simply delete the drop row.
+            def _tp_fallback():
+                nonlocal tp_overlap
+                drop_pairs = [
+                    (r["tournament_id"] if isinstance(r, dict) else r[0])
+                    for r in c.execute(
+                        "SELECT tournament_id FROM tournament_players "
+                        "WHERE player_id=?",
+                        (drop_id,),
+                    ).fetchall()
+                ]
+                keep_pairs = {
+                    (r["tournament_id"] if isinstance(r, dict) else r[0])
+                    for r in c.execute(
+                        "SELECT tournament_id FROM tournament_players "
+                        "WHERE player_id=?",
+                        (keep_id,),
+                    ).fetchall()
+                }
+                for tid in drop_pairs:
+                    if tid in keep_pairs:
+                        c.execute(
+                            "DELETE FROM tournament_players "
+                            "WHERE player_id=? AND tournament_id=?",
+                            (drop_id, tid),
+                        )
+                        tp_overlap += 1
+                    else:
+                        c.execute(
+                            "UPDATE tournament_players SET player_id=? "
+                            "WHERE player_id=? AND tournament_id=?",
+                            (keep_id, drop_id, tid),
+                        )
+            _safe_step("sp_tp_fallback", _tp_fallback)
 
         # 2. matches: re-tag ALL matches (any status) so historical
         #    records don't end up orphaned when the drop row is
@@ -1141,119 +1221,147 @@ def merge_players(keep_id: int, drop_id: int) -> dict:
         matches_moved = int(moved_p1) + int(moved_p2)
 
         # 3. match_goals: re-tag goal rows (best effort — older installs
-        #    may not have the table).
+        #    may not have the table). Wrapped in a SAVEPOINT so that if
+        #    the table is missing on Postgres, we can rollback ONLY this
+        #    sub-step instead of poisoning the whole transaction (which
+        #    would fail every subsequent statement with
+        #    ``current transaction is aborted, commands ignored until
+        #    end of transaction block``).
         goals_moved = 0
         try:
-            c.execute(
-                "UPDATE match_goals SET player_id=? WHERE player_id=?",
-                (keep_id, drop_id),
-            )
-            goals_moved = int(c.rowcount or 0)
+            c.execute("SAVEPOINT sp_match_goals")
+            try:
+                c.execute(
+                    "UPDATE match_goals SET player_id=? WHERE player_id=?",
+                    (keep_id, drop_id),
+                )
+                goals_moved = int(c.rowcount or 0)
+                c.execute("RELEASE SAVEPOINT sp_match_goals")
+            except Exception:
+                c.execute("ROLLBACK TO SAVEPOINT sp_match_goals")
+                c.execute("RELEASE SAVEPOINT sp_match_goals")
+                goals_moved = 0
         except Exception:
+            # Backend doesn't support savepoints (very rare). Treat as
+            # "no goals to move" and continue with the merge.
             goals_moved = 0
 
-        # 4. tournament_elo: sum on overlap, reassign on disjoint.
+        # 4. tournament_elo: sum on overlap, reassign on disjoint. Same
+        #    savepoint pattern — older DBs may lack the table or some
+        #    of its columns.
         elo_overlap = 0
         try:
-            drop_elo = [
-                dict(r) for r in c.execute(
-                    "SELECT * FROM tournament_elo WHERE player_id=?",
-                    (drop_id,),
-                ).fetchall()
-            ]
-            keep_elo_tids = {
-                (r["tournament_id"] if isinstance(r, dict) else r[0])
-                for r in c.execute(
-                    "SELECT tournament_id FROM tournament_elo WHERE player_id=?",
-                    (keep_id,),
-                ).fetchall()
-            }
-            for row in drop_elo:
-                tid = row["tournament_id"]
-                if tid in keep_elo_tids:
-                    # Overlap: pick the higher ELO, sum game counters.
-                    c.execute(
-                        """UPDATE tournament_elo SET
-                                elo           = MAX(elo, ?),
-                                games         = COALESCE(games,0)         + ?,
-                                wins          = COALESCE(wins,0)          + ?,
-                                draws         = COALESCE(draws,0)         + ?,
-                                losses        = COALESCE(losses,0)        + ?,
-                                goals_for     = COALESCE(goals_for,0)     + ?,
-                                goals_against = COALESCE(goals_against,0) + ?
-                           WHERE tournament_id=? AND player_id=?""",
-                        (
-                            row.get("elo") or 0,
-                            row.get("games") or 0,
-                            row.get("wins") or 0,
-                            row.get("draws") or 0,
-                            row.get("losses") or 0,
-                            row.get("goals_for") or 0,
-                            row.get("goals_against") or 0,
-                            tid, keep_id,
-                        ),
-                    )
-                    c.execute(
-                        "DELETE FROM tournament_elo "
-                        "WHERE player_id=? AND tournament_id=?",
-                        (drop_id, tid),
-                    )
-                    elo_overlap += 1
-                else:
-                    c.execute(
-                        "UPDATE tournament_elo SET player_id=? "
-                        "WHERE player_id=? AND tournament_id=?",
-                        (keep_id, drop_id, tid),
-                    )
+            c.execute("SAVEPOINT sp_tournament_elo")
+            try:
+                drop_elo = [
+                    dict(r) for r in c.execute(
+                        "SELECT * FROM tournament_elo WHERE player_id=?",
+                        (drop_id,),
+                    ).fetchall()
+                ]
+                keep_elo_tids = {
+                    (r["tournament_id"] if isinstance(r, dict) else r[0])
+                    for r in c.execute(
+                        "SELECT tournament_id FROM tournament_elo WHERE player_id=?",
+                        (keep_id,),
+                    ).fetchall()
+                }
+                for row in drop_elo:
+                    tid = row["tournament_id"]
+                    if tid in keep_elo_tids:
+                        # Overlap: pick the higher ELO, sum game counters.
+                        c.execute(
+                            """UPDATE tournament_elo SET
+                                    elo           = MAX(elo, ?),
+                                    games         = COALESCE(games,0)         + ?,
+                                    wins          = COALESCE(wins,0)          + ?,
+                                    draws         = COALESCE(draws,0)         + ?,
+                                    losses        = COALESCE(losses,0)        + ?,
+                                    goals_for     = COALESCE(goals_for,0)     + ?,
+                                    goals_against = COALESCE(goals_against,0) + ?
+                               WHERE tournament_id=? AND player_id=?""",
+                            (
+                                row.get("elo") or 0,
+                                row.get("games") or 0,
+                                row.get("wins") or 0,
+                                row.get("draws") or 0,
+                                row.get("losses") or 0,
+                                row.get("goals_for") or 0,
+                                row.get("goals_against") or 0,
+                                tid, keep_id,
+                            ),
+                        )
+                        c.execute(
+                            "DELETE FROM tournament_elo "
+                            "WHERE player_id=? AND tournament_id=?",
+                            (drop_id, tid),
+                        )
+                        elo_overlap += 1
+                    else:
+                        c.execute(
+                            "UPDATE tournament_elo SET player_id=? "
+                            "WHERE player_id=? AND tournament_id=?",
+                            (keep_id, drop_id, tid),
+                        )
+                c.execute("RELEASE SAVEPOINT sp_tournament_elo")
+            except Exception:
+                c.execute("ROLLBACK TO SAVEPOINT sp_tournament_elo")
+                c.execute("RELEASE SAVEPOINT sp_tournament_elo")
+                elo_overlap = 0
         except Exception:
-            # tournament_elo table may not exist on very old installs.
-            pass
+            elo_overlap = 0
 
         # 5. Promote drop's stronger global counters onto the kept row.
-        #    We keep keep's username/telegram_id/registered_at, but the
-        #    pre-existing tombstone often holds the user's true ELO
-        #    history and game counts — losing those silently surprises
-        #    admins.
+        #    Schema drift on the ``players`` table (e.g. ``elo_vsa``
+        #    column missing on a very old DB) used to abort the whole
+        #    transaction with the cryptic ``current transaction is
+        #    aborted`` message. SAVEPOINT keeps the merge atomic for
+        #    the parts that DO exist.
         try:
-            c.execute(
-                """UPDATE players SET
-                        elo            = MAX(elo,            ?),
-                        elo_vsa        = MAX(elo_vsa,        ?),
-                        elo_ri         = MAX(elo_ri,         ?),
-                        goals_scored   = COALESCE(goals_scored,0)   + ?,
-                        goals_conceded = COALESCE(goals_conceded,0) + ?,
-                        assists        = COALESCE(assists,0)        + ?,
-                        wins           = COALESCE(wins,0)           + ?,
-                        losses         = COALESCE(losses,0)         + ?,
-                        draws          = COALESCE(draws,0)          + ?,
-                        clean_sheets   = COALESCE(clean_sheets,0)   + ?,
-                        best_streak    = MAX(best_streak,    ?)
-                   WHERE id=?""",
-                (
-                    drop.get("elo") or 0,
-                    drop.get("elo_vsa") or 0,
-                    drop.get("elo_ri") or 0,
-                    drop.get("goals_scored") or 0,
-                    drop.get("goals_conceded") or 0,
-                    drop.get("assists") or 0,
-                    drop.get("wins") or 0,
-                    drop.get("losses") or 0,
-                    drop.get("draws") or 0,
-                    drop.get("clean_sheets") or 0,
-                    drop.get("best_streak") or 0,
-                    keep_id,
-                ),
-            )
-            # Promote game_nickname only if keep doesn't have one.
-            if not (keep.get("game_nickname") or "").strip() and (
-                drop.get("game_nickname") or ""
-            ).strip():
+            c.execute("SAVEPOINT sp_promote_player")
+            try:
                 c.execute(
-                    "UPDATE players SET game_nickname=? WHERE id=?",
-                    (drop.get("game_nickname"), keep_id),
+                    """UPDATE players SET
+                            elo            = MAX(elo,            ?),
+                            elo_vsa        = MAX(elo_vsa,        ?),
+                            elo_ri         = MAX(elo_ri,         ?),
+                            goals_scored   = COALESCE(goals_scored,0)   + ?,
+                            goals_conceded = COALESCE(goals_conceded,0) + ?,
+                            assists        = COALESCE(assists,0)        + ?,
+                            wins           = COALESCE(wins,0)           + ?,
+                            losses         = COALESCE(losses,0)         + ?,
+                            draws          = COALESCE(draws,0)          + ?,
+                            clean_sheets   = COALESCE(clean_sheets,0)   + ?,
+                            best_streak    = MAX(best_streak,    ?)
+                       WHERE id=?""",
+                    (
+                        drop.get("elo") or 0,
+                        drop.get("elo_vsa") or 0,
+                        drop.get("elo_ri") or 0,
+                        drop.get("goals_scored") or 0,
+                        drop.get("goals_conceded") or 0,
+                        drop.get("assists") or 0,
+                        drop.get("wins") or 0,
+                        drop.get("losses") or 0,
+                        drop.get("draws") or 0,
+                        drop.get("clean_sheets") or 0,
+                        drop.get("best_streak") or 0,
+                        keep_id,
+                    ),
                 )
+                # Promote game_nickname only if keep doesn't have one.
+                if not (keep.get("game_nickname") or "").strip() and (
+                    drop.get("game_nickname") or ""
+                ).strip():
+                    c.execute(
+                        "UPDATE players SET game_nickname=? WHERE id=?",
+                        (drop.get("game_nickname"), keep_id),
+                    )
+                c.execute("RELEASE SAVEPOINT sp_promote_player")
+            except Exception:
+                c.execute("ROLLBACK TO SAVEPOINT sp_promote_player")
+                c.execute("RELEASE SAVEPOINT sp_promote_player")
         except Exception:
-            # Schema drift on very old installs — don't block the merge.
             pass
 
         # 6. Drop the duplicate row.
