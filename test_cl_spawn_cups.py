@@ -237,6 +237,113 @@ def test_spawn_rejects_too_few_players():
         os.unlink(path)
 
 
+
+def test_spawn_handles_34_player_league_default_consolation():
+    """The CL template no longer hard-codes 32 — same template + spawn
+    must handle a 34-player league: top 24 → main cup, remaining 10 →
+    consolation cup with byes for the top 6 cons seeds.
+    """
+    db, t, path = _setup()
+    try:
+        # 34 players, single-leg league.
+        pids = []
+        for i in range(34):
+            p = db.upsert_player(f"r{i:02d}", telegram_id=70000 + i)
+            db.set_player_elo(p["id"], 2000 - i, by_user="test")
+            pids.append(p["id"])
+        creator = pids[0]
+        league_tid = db.create_tournament(
+            "CL-34", tournament_type="vsa", created_by=creator,
+        )
+        db.update_tournament(
+            league_tid,
+            groups_only=1,
+            groups_count=1,
+            group_matches_per_pair=1,
+            playoff_third_place=0,
+        )
+        for pid in pids:
+            db.add_player_to_tournament(league_tid, pid, "A")
+        t.generate_group_fixtures(league_tid, {"A": pids})
+        for m in db.get_tournament_matches(league_tid, stage="group"):
+            i1 = pids.index(m["player1_id"])
+            i2 = pids.index(m["player2_id"])
+            if i1 < i2:
+                db.update_match(m["id"], score1=3, score2=0, status="confirmed")
+            else:
+                db.update_match(m["id"], score1=0, score2=3, status="confirmed")
+
+        # Default call (no consolation_size): cons takes everyone past 24.
+        result = t.spawn_cl_followup_cups(league_tid)
+        main_tid = result["main_tid"]
+        cons_tid = result["consolation_tid"]
+        assert cons_tid is not None, "34 players must produce a consolation cup"
+
+        # Main cup unchanged: 24 players, 32-bracket, 8 byes.
+        main_players = db.get_tournament_players(main_tid)
+        assert {p["player_id"] for p in main_players} == set(pids[:24])
+
+        # Consolation: 10 players (places 25-34), 16-bracket, 6 byes.
+        cons_players = db.get_tournament_players(cons_tid)
+        assert {p["player_id"] for p in cons_players} == set(pids[24:34])
+        # 10 players → 16-bracket → first stage = r16 → 8 pairs total.
+        # 6 byes for top 6 cons seeds (= league places 25-30), 2 real
+        # pairs × 2 legs = 4 real legs.
+        r16 = db.get_tournament_matches(cons_tid, stage="r16")
+        cons_byes = [m for m in r16 if m["player1_id"] == m["player2_id"]]
+        cons_real = [m for m in r16 if m["player1_id"] != m["player2_id"]]
+        assert len(cons_byes) == 6, (
+            f"34-player league cons cup should have 6 byes, got {len(cons_byes)}"
+        )
+        assert len(cons_real) == 4, (
+            f"cons cup should have 2 pairs × 2 legs = 4 real rows, got {len(cons_real)}"
+        )
+        # Byes go to league places 25-30 (top 6 of cons), real pairs
+        # are between places 31-32 vs 33-34.
+        bye_pids = {m["player1_id"] for m in cons_byes}
+        assert bye_pids == set(pids[24:30])
+        real_pids = {pid for m in cons_real for pid in (m["player1_id"], m["player2_id"])}
+        assert real_pids == set(pids[30:34])
+    finally:
+        os.unlink(path)
+
+
+def test_spawn_skips_consolation_when_only_one_extra_player():
+    """League of 25: top 24 go to main cup, one player would be alone
+    in the cons cup → cons must be skipped, not built as a 1-player
+    bracket.
+    """
+    db, t, path = _setup()
+    try:
+        pids = []
+        for i in range(25):
+            p = db.upsert_player(f"s{i:02d}", telegram_id=60000 + i)
+            db.set_player_elo(p["id"], 2000 - i, by_user="test")
+            pids.append(p["id"])
+        creator = pids[0]
+        league_tid = db.create_tournament("CL-25", tournament_type="vsa", created_by=creator)
+        db.update_tournament(
+            league_tid, groups_only=1, groups_count=1, group_matches_per_pair=1,
+        )
+        for pid in pids:
+            db.add_player_to_tournament(league_tid, pid, "A")
+        t.generate_group_fixtures(league_tid, {"A": pids})
+        for m in db.get_tournament_matches(league_tid, stage="group"):
+            i1 = pids.index(m["player1_id"]); i2 = pids.index(m["player2_id"])
+            if i1 < i2:
+                db.update_match(m["id"], score1=3, score2=0, status="confirmed")
+            else:
+                db.update_match(m["id"], score1=0, score2=3, status="confirmed")
+
+        result = t.spawn_cl_followup_cups(league_tid)
+        assert result["main_tid"]
+        assert result["consolation_tid"] is None
+        assert result["consolation_matches"] == []
+    finally:
+        os.unlink(path)
+
+
+
 def main() -> int:
     failures: list[str] = []
     for fn in [
@@ -245,6 +352,8 @@ def main() -> int:
         test_consolation_cup_has_no_byes_and_4_qf_two_legs,
         test_spawn_rejects_unfinished_league,
         test_spawn_rejects_too_few_players,
+        test_spawn_handles_34_player_league_default_consolation,
+        test_spawn_skips_consolation_when_only_one_extra_player,
     ]:
         try:
             fn()
