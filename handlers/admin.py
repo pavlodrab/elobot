@@ -2365,3 +2365,91 @@ __all__.extend([
     "cmd_revoke_award",
     "cmd_awards",
 ])
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /cl_spawn_cups — spawn the two follow-up cups for a Champions League (32) league
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_cl_spawn_cups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage:
+        /cl_spawn_cups <league_tournament_id> [main_size] [consolation_size]
+
+    After a 32-player Champions-League-style league has finished,
+    spawn the two follow-up cups:
+
+      * **Основной кубок** — places 1..``main_size`` (default 24) of the
+        league enter a bracket-only cup. Bracket size is the next power
+        of two ≥ ``main_size`` (24 → 32-bracket); the top
+        ``2^k - main_size`` seeds receive byes in the first round.
+      * **Лига Конфети** — places ``main_size+1``..``main_size+consolation_size``
+        (default 25..32) enter an 8-player cup. Standard QF → SF → Final.
+
+    Both cups are seeded by **league finishing position** (not by global
+    ELO), all ties are played in **two legs** with aggregate-goal
+    advancement, and there's no third-place match.
+
+    Admin-only. Ask the league creator or a bot admin to run it.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ может запускать /cl_spawn_cups.")
+        return
+
+    args = list(ctx.args or [])
+    if not args or not args[0].lstrip("-").isdigit():
+        await send(
+            update,
+            "Использование:\n"
+            "<code>/cl_spawn_cups &lt;league_id&gt; [main_size] [consolation_size]</code>\n\n"
+            "По умолчанию main_size=24, consolation_size=8 (формат «лига 32 → "
+            "сетка 32 с байями + Лига Конфети 25-32»).",
+        )
+        return
+
+    league_tid = int(args[0])
+    main_size = int(args[1]) if len(args) >= 2 and args[1].isdigit() else 24
+    cons_size = int(args[2]) if len(args) >= 3 and args[2].isdigit() else 8
+
+    # Lazy import to avoid circular dependency at module import time.
+    from tournament import spawn_cl_followup_cups
+
+    try:
+        result = spawn_cl_followup_cups(
+            league_tid,
+            main_size=main_size,
+            consolation_size=cons_size,
+            legs_per_pair=2,
+        )
+    except ValueError as e:
+        await send(update, f"❌ {html.escape(str(e))}.")
+        return
+    except Exception as e:
+        log.exception("spawn_cl_followup_cups failed: %s", e)
+        await send(update, f"❌ Внутренняя ошибка: {html.escape(str(e))}.")
+        return
+
+    main_real = sum(1 for m in result["main_matches"] if not m.get("bye"))
+    main_byes = sum(1 for m in result["main_matches"] if m.get("bye"))
+    cons_real = sum(1 for m in result["consolation_matches"] if not m.get("bye"))
+    cons_byes = sum(1 for m in result["consolation_matches"] if m.get("bye"))
+
+    msg = [
+        "✅ <b>Follow-up кубки созданы.</b>",
+        "",
+        f"🏆 <b>Основной кубок</b> — id <code>{result['main_tid']}</code>",
+        f"   Игроков: <b>{main_size}</b> (1-{main_size} место лиги)",
+        f"   Первый раунд: <b>{main_real}</b> матч(а), баев: <b>{main_byes}</b>",
+        f"   Пары играются в 2 матча, проход по сумме голов.",
+        "",
+        f"🥉 <b>Лига Конфети</b> — id <code>{result['consolation_tid']}</code>",
+        f"   Игроков: <b>{cons_size}</b> ({main_size + 1}-{main_size + cons_size} место лиги)",
+        f"   Первый раунд: <b>{cons_real}</b> матч(а), баев: <b>{cons_byes}</b>",
+        f"   Пары играются в 2 матча, проход по сумме голов.",
+        "",
+        "Чтобы посмотреть сетку: <code>/bracket &lt;id&gt;</code>.",
+    ]
+    await send(update, "\n".join(msg))
+
+
+__all__.append("cmd_cl_spawn_cups")

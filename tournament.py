@@ -13,6 +13,7 @@ from database import (
     update_tournament_player,
     get_tournament_matches,
     create_match,
+    create_tournament,
     get_player_by_id,
     update_match,
     create_tournament_tour,
@@ -1657,3 +1658,198 @@ def generate_next_tour(tid: int) -> list[int]:
     set_current_tour(tid, next_tour)
 
     return mids
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Champions League (32) follow-up cup spawning
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _create_seeded_bracket(
+    tid: int,
+    seeded: list[dict],
+    legs: int,
+) -> list[dict]:
+    """Insert first-round matches for a bracket-only cup using an
+    explicit seeded order.
+
+    Mirrors the bracket-only branch of ``generate_playoff`` but uses
+    the caller-supplied seed list instead of sorting by global ELO.
+    Used by ``spawn_cl_followup_cups`` so the spawned cups respect
+    the league finishing order rather than per-player ELO.
+
+    ``seeded`` items must be dicts with at least ``player_id`` and
+    ``username`` (in seed order: index 0 = top seed). Bracket size is
+    the next power of two ≥ ``len(seeded)`` (capped at 512); empty
+    slots become byes for the top seeds, exactly like ``generate_playoff``.
+    """
+    n = len(seeded)
+    if n < 2:
+        return []
+    bracket_size = min(_next_pow2(n), 512)
+    if n > 512:
+        seeded = seeded[:512]
+        n = 512
+    stage = _bracket_first_stage(bracket_size)
+    raw_pairs = _build_bracket_pairs(seeded, bracket_size)
+
+    deadline = datetime.utcnow() + timedelta(hours=MATCH_DEADLINE_HOURS)
+    dl_str = deadline.strftime("%Y-%m-%d %H:%M:%S")
+
+    created: list[dict] = []
+    for pa, pb in raw_pairs:
+        if pa and pb:
+            for leg in range(1, max(1, int(legs)) + 1):
+                if leg % 2 == 1:
+                    a, b = pa, pb
+                else:
+                    a, b = pb, pa
+                mid = create_match(tid, a["player_id"], b["player_id"],
+                                   stage=stage, deadline=dl_str, leg=leg)
+                created.append({
+                    "stage": stage, "player1": a["username"],
+                    "player2": b["username"], "match_id": mid,
+                    "leg": leg, "bye": False,
+                })
+        elif pa or pb:
+            byed = pa or pb
+            mid = create_match(tid, byed["player_id"], byed["player_id"],
+                               stage=stage, deadline=dl_str, leg=1)
+            update_match(mid, score1=1, score2=0, status="confirmed",
+                         reported_by=None)
+            created.append({
+                "stage": stage, "player1": byed["username"], "player2": "BYE",
+                "match_id": mid, "leg": 1, "bye": True,
+            })
+    update_tournament(tid, playoff_started=1, stage="playoff")
+    return created
+
+
+def spawn_cl_followup_cups(
+    league_tid: int,
+    *,
+    main_size: int = 24,
+    consolation_size: int = 8,
+    legs_per_pair: int = 2,
+) -> dict:
+    """After a 32-player CL-style league, spawn the two follow-up cups.
+
+    Reads the final standings of the league (single group, sorted by
+    points/GD/GF) and creates two sibling tournaments:
+
+    * **Основной кубок** — places 1..``main_size`` of the league
+      (default 24). Bracket-only with ``main_size`` registered, sized
+      to the next power of two; the top ``2^k - main_size`` seeds
+      receive byes from the first round (e.g. 24 → 32-bracket, top 8
+      get byes; first round = ``r32`` where seeds 9-16 face seeds
+      17-24). Two-leg ties (aggregate goals), no bronze.
+
+    * **Лига Конфети** — places ``main_size+1``..``main_size+consolation_size``
+      of the league (default 25..32). 8-bracket cup, two-leg ties,
+      no bronze. Highest league position = top seed.
+
+    Both cups are seeded **by league finishing position**, not by
+    global ELO, by manually building the first-round matches from
+    the league standings. ``draw_mode`` on each spawned cup is set
+    to ``"manual"`` so the bracket isn't re-rolled.
+
+    Returns ``{"main_tid": int, "consolation_tid": int,
+    "main_matches": [...], "consolation_matches": [...]}``.
+
+    Raises ``ValueError`` if the league has fewer than
+    ``main_size + consolation_size`` players, isn't finished, or
+    already has follow-up cups linked to it.
+    """
+    league = get_tournament(league_tid)
+    if not league:
+        raise ValueError(f"tournament {league_tid} not found")
+    if league.get("groups_only") != 1:
+        raise ValueError(
+            f"tournament {league_tid} is not a league/groups-only "
+            f"format — spawn_cl_followup_cups expects a single-group league"
+        )
+
+    standings = get_group_standings(league_tid)
+    if not standings:
+        raise ValueError(f"league {league_tid} has no standings yet")
+    # Single-group league: take the only group's ordering as-is.
+    if len(standings) > 1:
+        raise ValueError(
+            f"league {league_tid} has {len(standings)} groups — "
+            f"spawn_cl_followup_cups expects one"
+        )
+    league_order = next(iter(standings.values()))
+    needed = int(main_size) + int(consolation_size)
+    if len(league_order) < needed:
+        raise ValueError(
+            f"league {league_tid} has {len(league_order)} players, "
+            f"need {needed} (main={main_size} + consolation={consolation_size})"
+        )
+    if not check_groups_complete(league_tid):
+        raise ValueError(
+            f"league {league_tid} hasn't finished — confirm all matches first"
+        )
+
+    t_type = league.get("tournament_type") or "vsa"
+    base_name = (league.get("name") or f"CL #{league_tid}").strip()
+    creator = league.get("created_by")
+
+    def _seed_dict(p: dict) -> dict:
+        return {
+            "player_id": p["player_id"],
+            "username":  p.get("username") or f"id{p['player_id']}",
+        }
+
+    # ── Main cup: places 1..main_size (default 24) ────────────────────
+    main_seeds = [_seed_dict(p) for p in league_order[:main_size]]
+    main_tid = create_tournament(
+        f"{base_name} — Кубок",
+        tournament_type=t_type,
+        created_by=creator,
+    )
+    update_tournament(
+        main_tid,
+        bracket_only=1,
+        groups_only=0,
+        groups_count=0,
+        draw_mode="manual",
+        playoff_matches_per_pair=int(legs_per_pair),
+        playoff_advance_mode="goals",
+        playoff_third_place=0,
+        open_signup=0,
+    )
+    for s in main_seeds:
+        add_player_to_tournament(main_tid, s["player_id"], "A")
+    main_matches = _create_seeded_bracket(main_tid, main_seeds, int(legs_per_pair))
+
+    # ── Consolation cup: places main_size+1..main_size+consolation_size
+    cons_seeds = [
+        _seed_dict(p)
+        for p in league_order[main_size:main_size + consolation_size]
+    ]
+    cons_tid = create_tournament(
+        f"{base_name} — Лига Конфети",
+        tournament_type=t_type,
+        created_by=creator,
+    )
+    update_tournament(
+        cons_tid,
+        bracket_only=1,
+        groups_only=0,
+        groups_count=0,
+        draw_mode="manual",
+        playoff_matches_per_pair=int(legs_per_pair),
+        playoff_advance_mode="goals",
+        playoff_third_place=0,
+        open_signup=0,
+    )
+    for s in cons_seeds:
+        add_player_to_tournament(cons_tid, s["player_id"], "A")
+    cons_matches = _create_seeded_bracket(cons_tid, cons_seeds, int(legs_per_pair))
+
+    return {
+        "main_tid": main_tid,
+        "consolation_tid": cons_tid,
+        "main_matches": main_matches,
+        "consolation_matches": cons_matches,
+    }

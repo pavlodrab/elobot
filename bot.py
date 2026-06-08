@@ -211,6 +211,7 @@ from handlers.admin import (  # noqa: E402
     cmd_admins,
     cmd_add_tadmin,
     cmd_relink_player,
+    cmd_cl_spawn_cups,
     cmd_ban,
     cmd_banned,
     cmd_broadcast,
@@ -605,6 +606,8 @@ ADMIN_ONLY_HELP_TEXT = """
   Алиасы: /adminsetnick, /setnick_for, /setnickfor
 /relink_player @oldhandle &lt;telegram_id&gt; — слить две записи
   Алиасы: /relinkplayer, /relink, /merge_player, /mergeplayer
+/cl_spawn_cups &lt;league_id&gt; [main_size] [cons_size] — после ЛЧ-32: создать основной кубок + Лигу Конфети
+  Алиасы: /clspawncups, /spawn_cups
 /grant_admin @user [коммент] — выдать админку
   Алиас: /grantadmin
 /revoke_admin @user — снять админку
@@ -7420,6 +7423,9 @@ def main():
     app.add_handler(CommandHandler("relink", cmd_relink_player))
     app.add_handler(CommandHandler("merge_player", cmd_relink_player))
     app.add_handler(CommandHandler("mergeplayer", cmd_relink_player))
+    app.add_handler(CommandHandler("cl_spawn_cups", cmd_cl_spawn_cups))
+    app.add_handler(CommandHandler("clspawncups", cmd_cl_spawn_cups))
+    app.add_handler(CommandHandler("spawn_cups", cmd_cl_spawn_cups))
     app.add_handler(CommandHandler("finish_tournament", cmd_finish_tournament))
     app.add_handler(CommandHandler("finishtournament", cmd_finish_tournament))
     app.add_handler(CommandHandler("end_tournament", cmd_finish_tournament))

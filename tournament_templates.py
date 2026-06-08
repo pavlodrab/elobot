@@ -235,6 +235,27 @@ BUILTIN_TEMPLATES: dict[str, TournamentTemplate] = {
         playoff_third_place=0,
         draw_mode="auto",
     ),
+    "champions_league_32": TournamentTemplate(
+        name="Лига Чемпионов (32 — лига + 2 кубка)",
+        description=(
+            "Лига на 32 игрока в один круг (496 матчей, N-1=31 туров). "
+            "После лиги админ запускает /cl_spawn_cups: создаются основной "
+            "кубок (1-24 место, сетка на 32 с байем для топ-8) и "
+            "утешительный «Лига Конфети» (25-32 место, сетка на 8). "
+            "Все пары играются в 2 матча, проход по сумме голов; "
+            "матча за бронзу нет."
+        ),
+        template_type="league",
+        groups_only=1,
+        groups_count=1,
+        target_group_size=32,
+        group_matches_per_pair=1,
+        playoff_third_place=0,
+        draw_mode="random",
+        tours_enabled=1,
+        total_tours=0,  # auto = 31 (N-1)
+        group_display_name="Лига Чемпионов",
+    ),
 }
 
 
