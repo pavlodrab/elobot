@@ -186,6 +186,69 @@ def test_merge_survives_schema_drift_in_optional_steps():
 
 
 
+
+def test_merge_promotes_elo_when_keep_is_zero():
+    """Reproduces the prod report: keep row had ELO 0 and empty nick,
+    drop had real ELO and a 'Loading...' placeholder nick. With the
+    SQL ``MAX(elo, ?)`` form (which is invalid on Postgres), the entire
+    promote block silently aborted and neither value was carried over.
+
+    After the fix, max() is computed in Python and each column UPDATE
+    sits in its own savepoint, so even if some optional column is
+    missing on the production schema, the elo / nick still land on the
+    kept row.
+    """
+    db, path = _setup()
+    try:
+        old = db.upsert_player("ghost_with_elo")
+        # Simulate the dropped player having real stats: ELO 1234, a
+        # game_nickname ('Loading...' is what the bot stores while it
+        # is fetching the in-game name from the API; if the fetch
+        # never finishes we still want the merge to carry whatever is
+        # on the row, even a placeholder).
+        db.set_player_elo(old["id"], 1234, by_user="test")
+        db.set_game_nickname(old["id"], "Loading...")
+
+        new = db.upsert_player("real_account", telegram_id=99001)
+        # Keep row left at default (ELO 0, no nick).
+
+        c = db.merge_players(keep_id=new["id"], drop_id=old["id"])
+        assert isinstance(c.get("matches_moved"), int)
+
+        kept = db.get_player_by_id(new["id"])
+        assert kept is not None, "kept row vanished after merge"
+        assert float(kept.get("elo") or 0) == 1234, (
+            f"expected ELO 1234 carried from drop, got {kept.get('elo')!r}"
+        )
+        assert (kept.get("game_nickname") or "") == "Loading...", (
+            f"expected nick 'Loading...' carried from drop, "
+            f"got {kept.get('game_nickname')!r}"
+        )
+    finally:
+        os.unlink(path)
+
+
+def test_merge_keeps_higher_elo_when_keep_is_already_strong():
+    """If the kept row already has a higher ELO than the drop, we
+    must NOT downgrade it.
+    """
+    db, path = _setup()
+    try:
+        old = db.upsert_player("weak")
+        new = db.upsert_player("strong", telegram_id=99002)
+        db.set_player_elo(old["id"], 800, by_user="test")
+        db.set_player_elo(new["id"], 1500, by_user="test")
+
+        db.merge_players(keep_id=new["id"], drop_id=old["id"])
+
+        kept = db.get_player_by_id(new["id"])
+        assert float(kept.get("elo") or 0) == 1500, (
+            f"merge must not downgrade keep's ELO 1500 to drop's 800, "
+            f"got {kept.get('elo')!r}"
+        )
+    finally:
+        os.unlink(path)
+
 def main() -> int:
     failures: list[str] = []
     for fn in [
@@ -194,6 +257,8 @@ def main() -> int:
         test_merge_self_match_is_pruned,
         test_merge_rejects_same_id,
         test_merge_survives_schema_drift_in_optional_steps,
+        test_merge_promotes_elo_when_keep_is_zero,
+        test_merge_keeps_higher_elo_when_keep_is_already_strong,
     ]:
         try:
             fn()
