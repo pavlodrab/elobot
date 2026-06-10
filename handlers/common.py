@@ -281,6 +281,12 @@ def t_full_label(t: dict) -> str:
 
 # ── Send helper ──────────────────────────────────────────────────────────────
 
+# Telegram's hard per-message text limit. Anything beyond this gets
+# rejected with ``BadRequest: Message is too long``, so ``send`` fans
+# out into several messages instead of failing.
+_TG_MAX_MESSAGE_CHARS = 4096
+
+
 async def send(update: Update, text: str, **kwargs):
     """Reply to the right place (callback message vs. ordinary message), HTML by default.
 
@@ -289,16 +295,46 @@ async def send(update: Update, text: str, **kwargs):
     ``update.effective_message``. If neither is available, the call is
     a no-op rather than a crash.
 
+    Long text is transparently split into multiple Telegram messages
+    using ``bot._split_for_telegram`` (which prefers blank-line, then
+    single-newline boundaries). When ``reply_markup`` is supplied it is
+    attached to the *last* chunk only, so any inline/reply keyboard
+    lands on the final visible message — matches the pattern already
+    used by ``cmd_help`` / admin help.
+
     Link previews are suppressed globally via Defaults(link_preview_options).
     """
     kwargs.setdefault("parse_mode", "HTML")
+
+    # Pick the target ``Message`` object once.
     if update.callback_query:
-        await update.callback_query.message.reply_text(text, **kwargs)
+        target = update.callback_query.message
+    else:
+        target = update.effective_message or update.message
+    if target is None:
         return
-    msg = update.effective_message or update.message
-    if msg is None:
+
+    # Common case: fits in one message.
+    if len(text) <= _TG_MAX_MESSAGE_CHARS:
+        await target.reply_text(text, **kwargs)
         return
-    await msg.reply_text(text, **kwargs)
+
+    # Long text → split. Lazy import: ``handlers.common`` is loaded
+    # before ``bot`` finishes initialising, so a top-level import would
+    # create a circular dependency. ``profile.py`` uses the same trick.
+    from bot import _split_for_telegram  # noqa: WPS433 (intentional cycle break)
+
+    chunks = _split_for_telegram(text, limit=_TG_MAX_MESSAGE_CHARS)
+
+    # Pull reply_markup out of the shared kwargs — we only attach it to
+    # the last chunk so the keyboard ends up on the final message.
+    reply_markup = kwargs.pop("reply_markup", None)
+    last_idx = len(chunks) - 1
+    for i, chunk in enumerate(chunks):
+        chunk_kwargs = dict(kwargs)
+        if reply_markup is not None and i == last_idx:
+            chunk_kwargs["reply_markup"] = reply_markup
+        await target.reply_text(chunk, **chunk_kwargs)
 
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
