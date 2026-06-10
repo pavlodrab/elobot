@@ -7813,6 +7813,14 @@ async def on_db_import_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """``/tours [ID] [range]`` — show tour matches as PNG image.
 
+    Argument shapes (mirror ``/tourstext``):
+      • ``/tours``           — current tour of the chat-bound / active tournament
+      • ``/tours 14``        — current tour of tournament 14
+      • ``/tours 14 1``      — tour 1 of tournament 14
+      • ``/tours 14 1-5``    — tours 1..5 of tournament 14
+      • ``/tours 1-5``       — tours 1..5 of the chat-bound / active tournament
+      • ``/tours 14 1,3,5``  — specific tours
+
     Range examples: ``1``, ``1-4``, ``1,3,5``. Default: current tour.
     """
     args = list(ctx.args or [])
@@ -7821,13 +7829,30 @@ async def cmd_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send(update, err or "❌ Не нашёл турнир.")
         return
     if not int(t.get("tours_enabled") or 0):
-        await send(update, "❌ В этом турнире не включены туры.")
+        await send(
+            update,
+            f"❌ В турнире «{html.escape(t['name'])}» (ID {t['id']}) "
+            f"не включены туры.",
+        )
         return
 
-    # Parse range from remaining args after tournament ID
-    # Find a token that looks like a range
+    # If args[0] was a plain integer it's already been consumed as the
+    # tournament ID by ``_resolve_tournament_from_args`` — exclude it
+    # from the range search so we don't re-read it as the tour number
+    # (e.g. ``/tours 14 1`` used to render tour 14 instead of tour 1).
+    # Tokens like "1-5" or "1,3,5" never parse as ``int(...)``, so they
+    # stay in the search and are correctly picked up as ranges.
+    range_search_args = args
+    if args:
+        try:
+            int(args[0])
+        except ValueError:
+            pass
+        else:
+            range_search_args = args[1:]
+
     range_arg = None
-    for a in args:
+    for a in range_search_args:
         if a.replace("-", "").replace(",", "").isdigit():
             range_arg = a
             break
@@ -7848,18 +7873,52 @@ async def cmd_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_tourstext(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """``/tourstext [ID] [range]`` — show tour matches as text."""
+    """``/tourstext [ID] [range]`` — show tour matches as text.
+
+    Argument shapes:
+      • ``/tourstext``           — current tour of the chat-bound / active tournament
+      • ``/tourstext 14``        — current tour of tournament 14
+      • ``/tourstext 14 1``      — tour 1 of tournament 14
+      • ``/tourstext 14 1-5``    — tours 1..5 of tournament 14
+      • ``/tourstext 1-5``       — tours 1..5 of the chat-bound / active tournament
+      • ``/tourstext 14 1,3,5``  — specific tours
+
+    The first arg, when it is a plain integer, is consumed as the
+    tournament ID; the *next* arg is the tour range. Earlier versions
+    accidentally read ``args[0]`` twice — first as the tournament ID and
+    then again as the range — so ``/tourstext 14 1`` showed tour 14
+    instead of tour 1.
+    """
     args = list(ctx.args or [])
     t, err = _resolve_tournament_from_args(update, ctx, args=args)
     if t is None:
         await send(update, err or "❌ Не нашёл турнир.")
         return
     if not int(t.get("tours_enabled") or 0):
-        await send(update, "❌ В этом турнире не включены туры.")
+        await send(
+            update,
+            f"❌ В турнире «{html.escape(t['name'])}» (ID {t['id']}) "
+            f"не включены туры.",
+        )
         return
 
+    # If args[0] was a plain integer it's already been consumed as the
+    # tournament ID by ``_resolve_tournament_from_args`` — exclude it
+    # from the range search so we don't re-read it as the tour number.
+    # Tokens like "1-5" or "1,3,5" never parse as ``int(...)``, so they
+    # stay in the search and are correctly picked up as ranges even
+    # when no explicit ID is supplied.
+    range_search_args = args
+    if args:
+        try:
+            int(args[0])
+        except ValueError:
+            pass
+        else:
+            range_search_args = args[1:]
+
     range_arg = None
-    for a in args:
+    for a in range_search_args:
         if a.replace("-", "").replace(",", "").isdigit():
             range_arg = a
             break
