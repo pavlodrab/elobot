@@ -4033,11 +4033,55 @@ async def cmd_tmatches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if filter_group:
         header += f"\n📂 Группа: {html.escape(filter_group)}"
 
-    messages: list[str] = [header]
+    # We build a *flat* list of small atomic pieces — one per group header,
+    # one per player's blockquote, one per playoff-stage block — and then
+    # pack those pieces into Telegram-sized chunks. Building atomic pieces
+    # at the per-player level (instead of per-group) is what guarantees no
+    # single chunk exceeds the limit even when a group has many players.
+    pieces: list[str] = [header]
+
+    # Budget per outgoing Telegram message. Telegram's hard limit is 4096
+    # chars; we keep a safety margin for counter drift on emoji/entities.
+    MAX_CHUNK_CHARS = 3800
+    # Per-player blockquote body budget. If a single player's match list
+    # exceeds this, we emit multiple blockquotes under the same @user
+    # header — each one self-contained, valid HTML.
+    MAX_BLOCKQUOTE_BODY = 3500
+
+    def _player_blocks(uname: str, lines: list[str]) -> list[str]:
+        """Format @uname's matches as one or more standalone
+        ``<b>@uname</b>\\n<blockquote expandable>...</blockquote>`` pieces,
+        splitting the body across multiple blockquotes if it would exceed
+        ``MAX_BLOCKQUOTE_BODY``. Each returned piece is valid HTML on its
+        own (no tags split across pieces)."""
+        out: list[str] = []
+        buf: list[str] = []
+        size = 0
+        for ln in lines:
+            # +1 accounts for the joining "\n"
+            if size + len(ln) + 1 > MAX_BLOCKQUOTE_BODY and buf:
+                body = "\n".join(buf)
+                out.append(
+                    f"\n<b>@{uname}</b>\n"
+                    f"<blockquote expandable>{body}</blockquote>"
+                )
+                buf = []
+                size = 0
+            buf.append(ln)
+            size += len(ln) + 1
+        if buf:
+            body = "\n".join(buf)
+            out.append(
+                f"\n<b>@{uname}</b>\n"
+                f"<blockquote expandable>{body}</blockquote>"
+            )
+        return out
 
     for g in sorted(by_group_player.keys()):
         players_in_group = by_group_player[g]
-        group_lines: list[str] = [f"\n<b>Группа {html.escape(g)}</b>"]
+        # Group header — its own atomic piece so the packer can keep it with
+        # the next player block when there's room, or push it to a new chunk.
+        pieces.append(f"\n<b>Группа {html.escape(g)}</b>")
 
         # Sort players by username
         sorted_pids = sorted(
@@ -4046,16 +4090,8 @@ async def cmd_tmatches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
         for pid in sorted_pids:
-            player_matches = players_in_group[pid]
             uname = pid_to_username.get(pid) or str(pid)
-            # Each player's block in an expandable blockquote
-            block_lines = "\n".join(player_matches)
-            group_lines.append(
-                f"\n<b>@{uname}</b>\n"
-                f"<blockquote expandable>{block_lines}</blockquote>"
-            )
-
-        messages.append("\n".join(group_lines))
+            pieces.extend(_player_blocks(uname, players_in_group[pid]))
 
     # ── Playoff section ─────────────────────────────────────────────────
     if playoff_matches and not filter_group:
@@ -4071,14 +4107,19 @@ async def cmd_tmatches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             by_stage.setdefault(stage, []).append(m)
 
         if by_stage:
-            po_lines: list[str] = ["\n<b>ПЛЕЙ-ОФФ</b>"]
             sorted_stages = sorted(
                 by_stage.keys(),
                 key=lambda s: stage_order.index(s) if s in stage_order else 99,
             )
+            # Playoff section header — its own piece.
+            pieces.append("\n<b>ПЛЕЙ-ОФФ</b>")
             for stage in sorted_stages:
                 stage_label = _STAGE_RU.get(stage, stage.upper())
-                po_lines.append(f"\n<b>{stage_label}</b>")
+                # Build one piece per stage; if the stage has so many
+                # matches it would itself exceed the budget, split it
+                # mid-stage repeating the stage header on continuation
+                # pieces so each piece reads clearly.
+                stage_lines: list[str] = []
                 for m in by_stage[stage]:
                     p1 = get_player_by_id(m["player1_id"])
                     p2 = get_player_by_id(m["player2_id"])
@@ -4088,30 +4129,50 @@ async def cmd_tmatches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     score = ""
                     if m.get("score1") is not None and m.get("score2") is not None:
                         score = f" {m['score1']}:{m['score2']}"
-                    po_lines.append(
+                    stage_lines.append(
                         f"  <code>#{m['id']}</code> {u1} vs {u2}{score} {_status_icon(status)}"
                     )
-            messages.append("\n".join(po_lines))
 
-    # ── Send ────────────────────────────────────────────────────────────
-    full_text = "\n".join(messages)
-    if len(full_text) <= 4000:
-        await send(update, full_text)
-    else:
-        # Send in chunks, splitting at message boundaries
-        chunks: list[str] = []
-        current = ""
-        for msg_block in messages:
-            candidate = current + ("\n" if current else "") + msg_block
-            if len(candidate) > 3900 and current:
+                buf: list[str] = [f"\n<b>{stage_label}</b>"]
+                size = len(buf[0])
+                for ln in stage_lines:
+                    if size + len(ln) + 1 > MAX_BLOCKQUOTE_BODY and len(buf) > 1:
+                        pieces.append("\n".join(buf))
+                        buf = [f"\n<b>{stage_label}</b> <i>(продолжение)</i>"]
+                        size = len(buf[0])
+                    buf.append(ln)
+                    size += len(ln) + 1
+                if len(buf) > 1:
+                    pieces.append("\n".join(buf))
+
+    # ── Pack atomic pieces into Telegram-sized chunks ───────────────────
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces:
+        if not piece:
+            continue
+        # If a single piece is already over budget (defensive — our piece
+        # builders cap themselves below MAX_BLOCKQUOTE_BODY), flush the
+        # accumulator and emit it as its own chunk so we never silently
+        # skip data. Telegram will reject it, but at least the rest is
+        # delivered. This branch should not be reachable in practice.
+        if len(piece) > MAX_CHUNK_CHARS:
+            if current:
                 chunks.append(current)
-                current = msg_block
-            else:
-                current = candidate
-        if current:
+                current = ""
+            chunks.append(piece)
+            continue
+        candidate = current + ("\n" if current else "") + piece
+        if len(candidate) > MAX_CHUNK_CHARS and current:
             chunks.append(current)
-        for chunk in chunks:
-            await send(update, chunk)
+            current = piece
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        await send(update, chunk)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
