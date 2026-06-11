@@ -139,6 +139,8 @@ __all__ = [
     "get_titles_for_player",
     "get_finals_for_player",
     "count_tournament_winner_records",
+    "get_tournament_winner_by_id",
+    "delete_tournament_winner",
 ]
 
 
@@ -4081,3 +4083,40 @@ def count_tournament_winner_records(tournament_type: str | None = None) -> int:
     if row is None:
         return 0
     return int(row["n"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
+
+
+
+def get_tournament_winner_by_id(record_id: int) -> dict | None:
+    """Single ``tournament_winners`` row by primary-key id, or ``None``.
+
+    Used by the admin ``/remove_trophy`` flow to render a confirmation
+    snippet before deletion (so the admin can sanity-check what they're
+    about to drop).
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM tournament_winners WHERE id=?",
+        (int(record_id),),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def delete_tournament_winner(record_id: int) -> bool:
+    """Hard-delete one ``tournament_winners`` row by id.
+
+    Returns True if a row was actually removed, False if the id didn't
+    exist. Used by the admin ``/remove_trophy`` command — manual trophy
+    additions and import mistakes are corrected this way. The row is
+    just deleted (no soft-delete column) so the leaderboard recomputes
+    immediately on the next ``/champions`` open.
+    """
+    conn = get_conn()
+    cur = conn.execute(
+        "DELETE FROM tournament_winners WHERE id=?",
+        (int(record_id),),
+    )
+    affected = cur.rowcount or 0
+    conn.commit()
+    conn.close()
+    return affected > 0

@@ -650,6 +650,20 @@ ADMIN_ONLY_HELP_TEXT = """
   если в нём заполнены <code>suggested_username</code>.
   Идемпотентно — повторный запуск обновляет существующие записи.
   Алиас: /importchampions
+/rename_champion &lt;игрок&gt; &lt;Новый ник&gt; — переименовать игрока в зале славы
+  Меняет game_nickname; видно в /champions сразу после смены.
+  Игрок: @user, Telegram ID, текущий ник или <code>id=&lt;players.id&gt;</code>.
+  Алиасы: /renamechampion, /champ_setnick, /champion_setnick
+/add_trophy &lt;игрок&gt; [main|fantasy|vsa|supercup] [YYYY-MM-DD|today] [#N] [X:Y] [заметки]
+  Добавить трофей вручную. По умолчанию <b>main</b> и сегодняшняя дата.
+  Аргументы [type]/[date]/[#N]/[X:Y] можно в любом порядке.
+  Алиасы: /addtrophy, /trophy_add
+/list_trophies &lt;игрок&gt; — все трофеи игрока с их внутренними ID
+  Нужно перед /remove_trophy, чтобы знать какой ID удалять.
+  Алиасы: /listtrophies, /trophies
+/remove_trophy &lt;id&gt; — удалить запись о трофее по ID
+  ID берётся из /list_trophies или из ответа /add_trophy.
+  Алиасы: /removetrophy, /del_trophy, /trophy_remove
 """
 # ADMIN_HELP_TEXT). Kept as the concatenation, BUT note that we never send
 # this as a single Telegram message — Telegram's hard limit is 4096 chars
@@ -7683,6 +7697,10 @@ def main():
         cmd_champion as _cmd_champion,
         cmd_alias as _cmd_alias,
         cmd_import_champions as _cmd_import_champions,
+        cmd_rename_champion as _cmd_rename_champion,
+        cmd_add_trophy as _cmd_add_trophy,
+        cmd_list_trophies as _cmd_list_trophies,
+        cmd_remove_trophy as _cmd_remove_trophy,
     )
     app.add_handler(CommandHandler("champions",        _cmd_champions))
     app.add_handler(CommandHandler("champs",           _cmd_champions))
@@ -7695,6 +7713,22 @@ def main():
     app.add_handler(CommandHandler("aliases",          _cmd_alias))
     app.add_handler(CommandHandler("import_champions", _cmd_import_champions))
     app.add_handler(CommandHandler("importchampions",  _cmd_import_champions))
+    # Manual Hall-of-Fame curation (admin-only). See handlers/champions.py
+    # for the rationale on why these live next to the importer.
+    app.add_handler(CommandHandler("rename_champion",  _cmd_rename_champion))
+    app.add_handler(CommandHandler("renamechampion",   _cmd_rename_champion))
+    app.add_handler(CommandHandler("champ_setnick",    _cmd_rename_champion))
+    app.add_handler(CommandHandler("champion_setnick", _cmd_rename_champion))
+    app.add_handler(CommandHandler("add_trophy",       _cmd_add_trophy))
+    app.add_handler(CommandHandler("addtrophy",        _cmd_add_trophy))
+    app.add_handler(CommandHandler("trophy_add",       _cmd_add_trophy))
+    app.add_handler(CommandHandler("list_trophies",    _cmd_list_trophies))
+    app.add_handler(CommandHandler("listtrophies",     _cmd_list_trophies))
+    app.add_handler(CommandHandler("trophies",         _cmd_list_trophies))
+    app.add_handler(CommandHandler("remove_trophy",    _cmd_remove_trophy))
+    app.add_handler(CommandHandler("removetrophy",     _cmd_remove_trophy))
+    app.add_handler(CommandHandler("del_trophy",       _cmd_remove_trophy))
+    app.add_handler(CommandHandler("trophy_remove",    _cmd_remove_trophy))
 
     # Photo handler — auto OCR match screenshot (also handles photo feedback)
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
