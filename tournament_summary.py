@@ -1505,7 +1505,9 @@ def _try_openrouter(summary_text: str, timeout: float, attempts: list[str]) -> O
                     "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://github.com/fc-league-bot",
-                    "X-Title": "FC League Bot — Tournament Summary",
+                    # NB: HTTP headers are latin-1 in stdlib http.client —
+                    # keep ASCII-only here, em-dash crashes the request.
+                    "X-Title": "FC League Bot - Tournament Summary",
                 },
             )
             t0 = time.time()

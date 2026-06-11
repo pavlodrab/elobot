@@ -382,7 +382,10 @@ def _call_openrouter_sync(
                     "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://github.com/fc-league-bot",
-                    "X-Title": "FC League Bot — Auto-jokes",
+                    # NB: HTTP headers are latin-1 in stdlib http.client.
+                    # Keep this ASCII-only — em-dash here used to crash
+                    # every OpenRouter call with UnicodeEncodeError.
+                    "X-Title": "FC League Bot - Auto-jokes",
                 },
             )
             t0 = time.time()
