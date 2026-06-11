@@ -7859,7 +7859,7 @@ async def on_db_import_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """``/tours [ID] [range]`` — show tour matches as PNG image.
+    """``/tours [ID] [range]`` — show tour matches as PNG image(s).
 
     Argument shapes (mirror ``/tourstext``):
       • ``/tours``           — current tour of the chat-bound / active tournament
@@ -7870,6 +7870,14 @@ async def cmd_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
       • ``/tours 14 1,3,5``  — specific tours
 
     Range examples: ``1``, ``1-4``, ``1,3,5``. Default: current tour.
+
+    For a single tour the command replies with one photo. For a range
+    of two or more tours the command sends a Telegram album (media
+    group) — **one photo per tour** — so the chat can flip through
+    them without scrolling a single tall image. Telegram caps a media
+    group at 10 items, so longer ranges are split into multiple albums
+    sent back-to-back. Maximum is hard-capped at 30 tours per command
+    to avoid spamming the chat.
     """
     args = list(ctx.args or [])
     t, err = _resolve_tournament_from_args(update, ctx, args=args)
@@ -7907,14 +7915,112 @@ async def cmd_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     try:
         from tour_image import render_tour_png
-        tour_numbers = _parse_tour_range(range_arg, t) if range_arg else _current_tour_range(t)
-        png = render_tour_png(t["id"], tour_numbers)
-        bio = io.BytesIO(png)
-        bio.name = f"tours_{t['id']}.png"
-        await update.effective_message.reply_photo(
-            photo=bio,
-            parse_mode="HTML",
+
+        tour_numbers = (
+            _parse_tour_range(range_arg, t) if range_arg
+            else _current_tour_range(t)
         )
+
+        # Belt-and-braces: ``_parse_tour_range`` only validates the
+        # comma-style input against ``total_tours``; for dash ranges
+        # like ``1-100`` it would happily return 100 numbers and we'd
+        # try to render that. Clamp here once instead.
+        total_tours = int(t.get("total_tours") or 0)
+        if total_tours > 0:
+            tour_numbers = [n for n in tour_numbers if 1 <= n <= total_tours]
+        # Dedup while preserving order; ``_parse_tour_range`` already
+        # sorts the comma branch, but a dash range may overlap with
+        # explicit numbers in mixed input that future versions might
+        # accept.
+        seen: set[int] = set()
+        tour_numbers = [n for n in tour_numbers if not (n in seen or seen.add(n))]
+
+        if not tour_numbers:
+            await send(update, "❌ Туры не найдены.")
+            return
+
+        # Hard cap on album size to keep the chat sane. 30 = 3 full
+        # 10-photo albums. Anything beyond that is almost certainly
+        # a typo.
+        MAX_TOURS = 30
+        truncated = False
+        if len(tour_numbers) > MAX_TOURS:
+            tour_numbers = tour_numbers[:MAX_TOURS]
+            truncated = True
+
+        # ── Single-tour fast path: keep the legacy single-photo reply.
+        if len(tour_numbers) == 1:
+            png = render_tour_png(t["id"], tour_numbers)
+            bio = io.BytesIO(png)
+            bio.name = f"tours_{t['id']}_{tour_numbers[0]}.png"
+            await update.effective_message.reply_photo(
+                photo=bio,
+                parse_mode="HTML",
+            )
+            if truncated:
+                await send(
+                    update,
+                    f"ℹ️ Запрошено больше {MAX_TOURS} туров — обрезал "
+                    f"до первого тура.",
+                )
+            return
+
+        # ── Multi-tour path: one PNG per tour, packed into Telegram
+        # media groups (max 10 items per group, so we chunk).
+        from telegram import InputMediaPhoto
+
+        chat = update.effective_chat
+        if chat is None:
+            # Should not happen for command updates but fall back to
+            # the original single-image rendering rather than crash.
+            png = render_tour_png(t["id"], tour_numbers)
+            bio = io.BytesIO(png)
+            bio.name = f"tours_{t['id']}.png"
+            await update.effective_message.reply_photo(
+                photo=bio, parse_mode="HTML",
+            )
+            return
+
+        # Caption goes only on the first photo of the first album —
+        # Telegram pins it as the album caption.
+        is_contiguous = (
+            tour_numbers
+            == list(range(tour_numbers[0], tour_numbers[-1] + 1))
+        )
+        if is_contiguous and len(tour_numbers) > 1:
+            range_label = f"{tour_numbers[0]}–{tour_numbers[-1]}"
+        else:
+            range_label = ", ".join(str(n) for n in tour_numbers)
+        first_caption = (
+            f"📅 <b>{html.escape(t['name'])}</b> — туры {range_label}"
+        )
+
+        CHUNK = 10  # Telegram's max media-group size.
+        for chunk_start in range(0, len(tour_numbers), CHUNK):
+            chunk = tour_numbers[chunk_start:chunk_start + CHUNK]
+            media = []
+            for i, tn in enumerate(chunk):
+                png = render_tour_png(t["id"], [tn])
+                bio = io.BytesIO(png)
+                bio.name = f"tours_{t['id']}_{tn}.png"
+                if chunk_start == 0 and i == 0:
+                    media.append(InputMediaPhoto(
+                        media=bio,
+                        caption=first_caption,
+                        parse_mode="HTML",
+                    ))
+                else:
+                    media.append(InputMediaPhoto(media=bio))
+            await ctx.bot.send_media_group(
+                chat.id, media=media, write_timeout=180,
+            )
+
+        if truncated:
+            await send(
+                update,
+                f"ℹ️ Запрошено больше {MAX_TOURS} туров — обрезал "
+                f"до первых {MAX_TOURS}.",
+            )
     except Exception as e:
         log.exception("cmd_tours failed")
         await send(update, f"❌ Ошибка рендера: {e}")
