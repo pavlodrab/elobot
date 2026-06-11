@@ -95,6 +95,13 @@ def _stage_label(stage: str) -> str:
 # every helper.
 _TAG_BY_PID: dict[int, str] = {}
 
+# Per-render display-mode cache — populated by ``compute_tournament_summary``
+# from ``tournaments.name_display_mode`` (``"full"`` / ``"tag"`` /
+# ``"nick"``) and consumed by ``_player_label`` so the produced ``.txt``
+# / Telegra.ph blocks honour the same per-tournament setting as the
+# rendered standings / bracket / tablebomb images.
+_NAME_MODE: str = "full"
+
 
 def _load_tag_map(tid: int) -> None:
     """Refresh ``_TAG_BY_PID`` with the per-tournament team tags."""
@@ -110,12 +117,26 @@ def _load_tag_map(tid: int) -> None:
             _TAG_BY_PID[pid] = tag
 
 
+def _load_name_mode(t: dict | None) -> None:
+    """Refresh module-level ``_NAME_MODE`` from the tournament row."""
+    global _NAME_MODE
+    raw = ((t or {}).get("name_display_mode") or "full")
+    mode = str(raw).strip().lower()
+    if mode not in ("full", "tag", "nick"):
+        mode = "full"
+    _NAME_MODE = mode
+
+
 def _player_label(p: dict | None) -> str:
     """Human-readable name. Prefers ``"<nick> - <Team> (@user)"`` when a
     per-tournament team tag is registered for the player (via the
     ``_TAG_BY_PID`` cache populated at the top of
     ``compute_tournament_summary``); falls back through ``@username``,
     nickname and synthetic-id-aware shortenings.
+
+    Honours the per-tournament ``_NAME_MODE`` override (``"full"`` /
+    ``"tag"`` / ``"nick"``) so the text summary stays in sync with the
+    rendered images when admins flip "🎨 Оформление" → "🪪 Имена".
 
     Never returns an empty string — always something the user can map
     to a real participant.
@@ -128,10 +149,41 @@ def _player_label(p: dict | None) -> str:
         tag = _TAG_BY_PID.get(pid, "") or ""
     nick = (p.get("game_nickname") or "").strip()
     user = (p.get("username") or "").strip()
+    is_synthetic = bool(user) and user.lower().startswith("id_") and user[3:].isdigit()
+    pretty_user = "" if is_synthetic else user
+    synth_label = (
+        user.lower().replace("id_", "id ", 1) if is_synthetic else ""
+    )
+
+    mode = _NAME_MODE
+    if mode == "tag":
+        if pretty_user:
+            return f"@{pretty_user}"
+        if nick:
+            return nick
+        if tag:
+            return tag
+        if synth_label:
+            return synth_label
+        return f"id{pid}" if pid else "—"
+    if mode == "nick":
+        if nick and tag:
+            return f"{nick} - {tag}"
+        if nick:
+            return nick
+        if tag:
+            return tag
+        if pretty_user:
+            return f"@{pretty_user}"
+        if synth_label:
+            return synth_label
+        return f"id{pid}" if pid else "—"
+
+    # mode == "full" — original behaviour, preserved verbatim.
     # Hide synthetic ``id_<digits>`` placeholder usernames the same way
     # the standings / bracket renderers do.
-    if user and user.lower().startswith("id_") and user[3:].isdigit():
-        synth = nick or user.lower().replace("id_", "id ", 1)
+    if is_synthetic:
+        synth = nick or synth_label
         return f"{synth} - {tag}" if tag else synth
     if user and nick:
         # When no tag is set, drop the nickname if it duplicates the
@@ -748,6 +800,7 @@ def compute_tournament_summary(tid: int) -> dict | None:
     # Load per-tournament team tags before any ``_player_label`` call —
     # the cache is consumed implicitly by the label helper.
     _load_tag_map(tid)
+    _load_name_mode(t)
 
     players = db.get_tournament_players(tid)
     confirmed = _confirmed_matches(tid)

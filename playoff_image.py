@@ -47,6 +47,13 @@ from tournament import (
 # Single-threaded asyncio worker → no race conditions in practice.
 _TAG_BY_PID: dict[int, str] = {}
 
+# Per-render display-mode cache. Mirrors ``_TAG_BY_PID``: populated at
+# the top of every public ``render_playoff_png(s)`` call from
+# ``tournaments.name_display_mode`` and consumed by ``_display_name``
+# without us having to thread it through the ``_render_card`` chain.
+# Single-threaded asyncio worker → no race conditions in practice.
+_NAME_MODE: str = "full"
+
 
 def _load_tag_map(tid: int) -> None:
     """Refresh ``_TAG_BY_PID`` with the per-tournament team tags."""
@@ -60,6 +67,16 @@ def _load_tag_map(tid: int) -> None:
         tag = (r.get("team_tag") or "").strip()
         if isinstance(pid, int) and tag:
             _TAG_BY_PID[pid] = tag
+
+
+def _load_name_mode(t: dict | None) -> None:
+    """Refresh module-level ``_NAME_MODE`` from the tournament row."""
+    global _NAME_MODE
+    raw = ((t or {}).get("name_display_mode") or "full")
+    mode = str(raw).strip().lower()
+    if mode not in ("full", "tag", "nick"):
+        mode = "full"
+    _NAME_MODE = mode
 
 
 # ── palette (matches standings_image.py) ────────────────────────────────────
@@ -262,6 +279,11 @@ def _display_name(p: dict | None, *, fallback: str = "?", team_tag: str = "") ->
     ``render_playoff_png(s)``) has an entry for this player, that
     cached value is used — saves plumbing the tag map through every
     intermediate ``_render_card`` call.
+
+    Honours the per-tournament ``_NAME_MODE`` override (``"full"`` /
+    ``"tag"`` / ``"nick"``) so admins can ditch Telegram handles for
+    pure-nickname or pure-team-name bracket cards via "🎨 Оформление"
+    → "🪪 Имена".
     """
     tag = (team_tag or "").strip()
     if not tag and p is not None:
@@ -275,8 +297,38 @@ def _display_name(p: dict | None, *, fallback: str = "?", team_tag: str = "") ->
     nick = (p.get("game_nickname") or "").strip()
     user = (p.get("username") or "").strip()
     is_synthetic = bool(user) and bool(re.match(r"^id_\d+$", user.lower()))
+    pretty_user = "" if is_synthetic else user
+    synth_label = (
+        user.lower().replace("id_", "id ", 1) if is_synthetic else ""
+    )
+
+    mode = _NAME_MODE
+    if mode == "tag":
+        if pretty_user:
+            return f"@{pretty_user}"
+        if nick:
+            return nick
+        if tag:
+            return tag
+        if synth_label:
+            return synth_label
+        return fallback
+    if mode == "nick":
+        if nick and tag:
+            return f"{nick} - {tag}"
+        if nick:
+            return nick
+        if tag:
+            return tag
+        if pretty_user:
+            return f"@{pretty_user}"
+        if synth_label:
+            return synth_label
+        return fallback
+
+    # mode == "full" — original behaviour, preserved verbatim.
     if is_synthetic:
-        synth = nick or user.lower().replace("id_", "id ", 1)
+        synth = nick or synth_label
         return f"{synth} - {tag}" if tag else synth
     if user and nick:
         if tag:
@@ -1668,6 +1720,7 @@ def render_playoff_pngs(tid: int) -> list[bytes]:
     # without us plumbing a tag map through every helper.
     _load_tag_map(tid)
     t = get_tournament(tid) or {}
+    _load_name_mode(t)
     stages = _collect_pairs_full(tid)
     third_pairs = _collect_third_place(tid)
 

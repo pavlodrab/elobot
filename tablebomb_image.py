@@ -144,6 +144,7 @@ def _draw_medal_card(
     goals_font: ImageFont.ImageFont,
     detail_font: ImageFont.ImageFont,
     row_alpha: int = 255,
+    name_mode: str = "full",
 ) -> None:
     """Draw a single scorer card with optional medal border."""
     border_color = BORDER
@@ -207,9 +208,22 @@ def _draw_medal_card(
     else:
         draw.text((name_x, y + _s(10)), raw_name, font=name_font, fill=TEXT)
 
-    # Owner
+    # Owner (the league player who scored). Honours the per-tournament
+    # ``name_display_mode``: ``"tag"`` shows ``@user`` only,
+    # ``"nick"`` shows the in-game nickname only (or the team_tag if
+    # the row carries one — the GROUP BY in ``get_top_scorers_*``
+    # leaves it on ``row_data``), and ``"full"`` keeps the legacy
+    # ``@user``-or-nickname fallback.
     owner = (row_data.get("username") or "").strip()
-    owner_label = f"@{owner}" if owner else (row_data.get("game_nickname") or "").strip()
+    nick = (row_data.get("game_nickname") or "").strip()
+    team = (row_data.get("team_tag") or "").strip()
+    mode = (name_mode or "full").lower()
+    if mode == "nick":
+        owner_label = nick or team or (f"@{owner}" if owner else "")
+    elif mode == "tag":
+        owner_label = f"@{owner}" if owner else (nick or team)
+    else:
+        owner_label = f"@{owner}" if owner else nick
     if owner_label:
         owner_label = _truncate(owner_label, detail_font,
                                 inner_w - (name_x - x - pad) - _s(100), draw)
@@ -325,11 +339,13 @@ def render_tablebomb_png(
 
     # Scorer cards
     y = title_h
+    name_mode = (t.get("name_display_mode") or "full").lower()
     for i, row_data in enumerate(top, 1):
         _draw_medal_card(img, draw, x=pad, y=y, w=cards_w, h=card_h,
                          position=i, row_data=row_data,
                          name_font=name_font, goals_font=goals_font,
-                         detail_font=detail_font, row_alpha=row_alpha)
+                         detail_font=detail_font, row_alpha=row_alpha,
+                         name_mode=name_mode)
         y += card_h + card_gap
 
     buf = BytesIO()

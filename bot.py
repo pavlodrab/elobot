@@ -1080,6 +1080,12 @@ def _submenu_ts_style(t: dict) -> InlineKeyboardMarkup:
     row_alpha = int(t.get("row_bg_alpha") or 255)
     row_pct = int(round(row_alpha * 100 / 255))
     gname = (t.get("group_display_name") or "").strip() or "Группа A"
+    name_mode = (t.get("name_display_mode") or "full").lower()
+    name_mode_lbl = {
+        "full": "полные",
+        "tag":  "только @теги",
+        "nick": "только ники / команды",
+    }.get(name_mode, "полные")
     rows = [
         [InlineKeyboardButton(
             f"🎨 Стиль сетки: {layout_lbl}",
@@ -1092,6 +1098,10 @@ def _submenu_ts_style(t: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             f"🪟 Прозрачность строк: {row_pct}%",
             callback_data=f"ts:rowa:{tid}",
+        )],
+        [InlineKeyboardButton(
+            f"🪪 Имена: {name_mode_lbl}",
+            callback_data=f"ts:names:{tid}",
         )],
         [InlineKeyboardButton(
             f"🏷 Имя группы: {gname}",
