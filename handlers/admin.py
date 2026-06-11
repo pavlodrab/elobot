@@ -1416,19 +1416,41 @@ async def cmd_admin_matchgoals(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
     lines.append("")
     lines.append(
-        "Изменить: <code>/admin_addgoal &lt;match_id&gt; @user [home|away] [мин]</code>, "
+        "Изменить: <code>/admin_addgoal &lt;match_id&gt; "
+        "[@user|home|away] [home|away] [мин] [name:&lt;имя&gt;]</code>, "
         "<code>/admin_delgoal &lt;goal_id&gt;</code>, "
-        "<code>/admin_setgoalauthor &lt;goal_id&gt; @user</code>."
+        "<code>/admin_setgoalauthor &lt;goal_id&gt; @user</code>, "
+        "<code>/admin_setgoalname &lt;goal_id&gt; &lt;имя&gt;</code>."
     )
     await send(update, "\n".join(lines))
 
 
 async def cmd_admin_addgoal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """``/admin_addgoal <match_id> <@user|id> [home|away] [минута]``.
+    """``/admin_addgoal <match_id> [@user|home|away] [home|away] [минута] [name:<имя>]``.
 
-    Если ``home``/``away`` не указан, бот выводит сторону из позиции
-    игрока в матче (player1 → home, player2 → away). Игрок обязан
-    быть участником матча.
+    Три режима записи гола:
+
+    1. **С участником матча** (старый сценарий):
+       ``/admin_addgoal 481 @vasya 12``
+       Сторона выводится из позиции игрока в матче (player1 → home,
+       player2 → away). ``raw_name`` = ``game_nickname`` игрока (или
+       его username, если ник не задан).
+
+    2. **С участником и кастомным именем футболиста**:
+       ``/admin_addgoal 481 @vasya 12 name:Mbappe``
+       То же, что (1), но ``raw_name`` берётся из ``name:`` —
+       полезно, когда у игрока в составе несколько футболистов.
+
+    3. **Без юзера, только сторона + имя** — для матчей, занесённых
+       просто счётом (без OCR-скрина):
+       ``/admin_addgoal 481 home name:Mbappe 12``
+       ``player_id`` сохраняется как ``NULL``. ``home``/``away`` и
+       ``name:<имя>`` обязательны. В ``/tablebomb`` гол всё равно
+       попадёт под этим именем, т.к. таблица бомбардиров считает
+       по ``raw_name`` + стороне матча.
+
+    Всё после ``name:`` до конца строки считается именем
+    футболиста — поддерживаются пробелы (``name:Cristiano Ronaldo``).
     """
     if not is_admin(update.effective_user.id):
         await send(update, "❌ Только админ.")
@@ -1443,13 +1465,18 @@ async def cmd_admin_addgoal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else None
     )
 
-    if len(args) < 1 or (len(args) < 2 and not reply_target):
-        await send(
-            update,
-            "Использование: <code>/admin_addgoal &lt;match_id&gt; "
-            "&lt;@user|id&gt; [home|away] [минута]</code>\n"
-            "Можно также ответом на сообщение игрока без указания @user.",
-        )
+    usage = (
+        "Использование: <code>/admin_addgoal &lt;match_id&gt; "
+        "[@user|home|away] [home|away] [минута] [name:&lt;имя&gt;]</code>\n"
+        "• Со ссылкой на игрока: <code>/admin_addgoal 481 @vasya 12</code>\n"
+        "• С кастомным именем: <code>/admin_addgoal 481 @vasya 12 name:Mbappe</code>\n"
+        "• Без юзера (матч занесён счётом): "
+        "<code>/admin_addgoal 481 home name:Mbappe 12</code>\n"
+        "Можно также ответом на сообщение игрока вместо @user."
+    )
+
+    if not args:
+        await send(update, usage)
         return
 
     mid = _parse_match_id_token(args[0])
@@ -1464,15 +1491,46 @@ async def cmd_admin_addgoal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     p2 = get_player_by_id(m["player2_id"])
 
     rest = args[1:]
+
+    # ── Step 1: extract `name:<...>` first — everything after that
+    # token (incl. the suffix in the token itself) is the footballer
+    # name, joined with spaces. This must happen BEFORE positional
+    # parsing so multi-word names don't trip the keyword scanner.
+    raw_name_override: str | None = None
+    for i, tok in enumerate(rest):
+        if tok.lower().startswith("name:"):
+            head = tok[len("name:"):]
+            tail = rest[i + 1:]
+            parts = ([head] if head else []) + list(tail)
+            raw_name_override = " ".join(parts).strip() or None
+            rest = rest[:i]
+            break
+    if raw_name_override is not None and len(raw_name_override) > 64:
+        await send(update, "❌ Слишком длинное имя футболиста (макс. 64 символа).")
+        return
+
+    # ── Step 2: optional player ref. If the first remaining token
+    # isn't a side keyword and looks like a player ref, consume it.
+    side_keywords = {
+        "home", "h", "дома", "д",
+        "away", "a", "гости", "г",
+    }
     target: dict | None = None
-    if rest and not rest[0].lower() in ("home", "away", "h", "a"):
-        # First non-keyword token is the player ref.
+    if rest and rest[0].lower() not in side_keywords and not rest[0].isdigit():
         tok = rest[0]
         target = _resolve_player_arg(tok)
         if not target:
             await send(update, f"❌ Игрок не найден: {html.escape(tok)}")
             return
         rest = rest[1:]
+    elif rest and rest[0].isdigit() and not reply_target:
+        # Pure-numeric first token can be either a telegram-id or a
+        # minute. Disambiguate: if it resolves to a registered player,
+        # treat as player ref; otherwise leave it for the minute slot.
+        cand = _resolve_player_arg(rest[0])
+        if cand:
+            target = cand
+            rest = rest[1:]
     elif reply_target:
         from handlers._helpers import _player_from_user
         target = _player_from_user(reply_target)
@@ -1482,10 +1540,8 @@ async def cmd_admin_addgoal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "❌ Адресат reply-а не зарегистрирован в боте.",
             )
             return
-    else:
-        await send(update, "❌ Укажи игрока: <code>@user</code> или telegram-id.")
-        return
 
+    # ── Step 3: parse side / minute from the remaining tokens.
     side: str | None = None
     minute: int | None = None
     for tok in rest:
@@ -1500,35 +1556,67 @@ async def cmd_admin_addgoal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await send(update, f"❌ Не понял аргумент: {html.escape(tok)}")
             return
 
-    auto_side = _side_of_player_in_match(m, target["id"])
-    if side is None:
-        side = auto_side
-    if side is None:
-        # Player not in match and no manual side given.
-        p1n = mention(p1["username"]) if p1 else "—"
-        p2n = mention(p2["username"]) if p2 else "—"
-        await send(
-            update,
-            f"❌ {mention(target['username'])} не участвует в матче "
-            f"#{mid} ({p1n} vs {p2n}). Участникам сторона ставится "
-            "автоматически; для голов «в свои» добавь "
-            "<code>home</code>/<code>away</code> явно.",
-        )
-        return
-    # Sanity warning if admin's manual side disagrees with the player's
-    # actual seat (allowed — own-goals exist — but worth flagging).
+    # ── Step 4: derive side / raw_name based on whether we have a
+    # target player or not.
     sanity = ""
-    if auto_side and side != auto_side:
-        sanity = (
-            f"\n⚠️ Указана сторона <b>{side}</b>, но "
-            f"{mention(target['username'])} играет с другой стороны "
-            f"(<b>{auto_side}</b>) — учту как автогол / спецслучай."
+    if target is not None:
+        auto_side = _side_of_player_in_match(m, target["id"])
+        if side is None:
+            side = auto_side
+        if side is None:
+            # Player not in match and no manual side given.
+            p1n = mention(p1["username"]) if p1 else "—"
+            p2n = mention(p2["username"]) if p2 else "—"
+            await send(
+                update,
+                f"❌ {mention(target['username'])} не участвует в матче "
+                f"#{mid} ({p1n} vs {p2n}). Участникам сторона ставится "
+                "автоматически; для голов «в свои» добавь "
+                "<code>home</code>/<code>away</code> явно.",
+            )
+            return
+        # Sanity warning if admin's manual side disagrees with the
+        # player's actual seat (allowed — own-goals exist — but worth
+        # flagging).
+        if auto_side and side != auto_side:
+            sanity = (
+                f"\n⚠️ Указана сторона <b>{side}</b>, но "
+                f"{mention(target['username'])} играет с другой стороны "
+                f"(<b>{auto_side}</b>) — учту как автогол / спецслучай."
+            )
+        raw_name = (
+            raw_name_override
+            or target.get("game_nickname")
+            or target.get("username")
         )
+        player_id_for_db: int | None = int(target["id"])
+    else:
+        # No player reference at all — bare-side mode for matches that
+        # were entered by score only.
+        if side is None:
+            await send(
+                update,
+                "❌ Без указания игрока нужны явные сторона и имя:\n"
+                "<code>/admin_addgoal &lt;match_id&gt; home|away "
+                "name:&lt;имя&gt; [минута]</code>\n"
+                "Либо укажи участника матча: "
+                "<code>@user</code> / telegram-id / reply.",
+            )
+            return
+        if not raw_name_override:
+            await send(
+                update,
+                "❌ Без <code>@user</code> нужно явно задать имя "
+                "футболиста через <code>name:&lt;имя&gt;</code>. Без "
+                "имени гол не попадёт в <code>/tablebomb</code>.",
+            )
+            return
+        raw_name = raw_name_override
+        player_id_for_db = None
 
-    raw_name = target.get("game_nickname") or target.get("username")
     gid = db.add_match_goal(
         match_id=mid,
-        player_id=int(target["id"]),
+        player_id=player_id_for_db,
         raw_name=raw_name,
         minute=minute,
         side=side,
@@ -1538,14 +1626,25 @@ async def cmd_admin_addgoal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         actor_telegram_id=update.effective_user.id,
         actor_username=update.effective_user.username,
         action="admin_addgoal",
-        details=f"match=#{mid} goal=#{gid} player_id={target['id']} side={side}",
+        details=(
+            f"match=#{mid} goal=#{gid} "
+            f"player_id={player_id_for_db if player_id_for_db is not None else 'NULL'} "
+            f"side={side} raw_name={raw_name!r}"
+        ),
     )
     side_tag = "🟢" if side == "home" else "🔵"
     min_str = f"{minute}'" if minute is not None else "—"
+    if target is not None:
+        who = (
+            f"{mention(target['username'])} "
+            f"<i>({html.escape(str(raw_name))})</i>"
+        )
+    else:
+        who = f"<i>{html.escape(str(raw_name))}</i> (без юзера)"
     await send(
         update,
         f"✅ Записан гол #{gid} в матче #{mid}: "
-        f"{side_tag} {mention(target['username'])}, минута {min_str}."
+        f"{side_tag} {who}, минута {min_str}."
         + sanity,
     )
 

@@ -577,7 +577,8 @@ ADMIN_ONLY_HELP_TEXT = """
   Алиасы: /editgoals, /set_goals, /setgoals
 /admin_matchgoals &lt;match_id&gt; — список голов матча
   Алиас: /adminmatchgoals, /matchgoals
-/admin_addgoal &lt;match_id&gt; @user [home|away] [мин] — добавить гол
+/admin_addgoal &lt;match_id&gt; [@user|home|away] [home|away] [мин] [name:&lt;имя&gt;] — добавить гол
+  Без @user (только сторона + name:) — для матчей, занесённых счётом.
   Алиасы: /adminaddgoal, /addgoal
 /admin_delgoal &lt;goal_id&gt; — удалить гол
   Алиасы: /admindelgoal, /delgoal

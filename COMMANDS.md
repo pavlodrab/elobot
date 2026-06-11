@@ -160,7 +160,7 @@
 | `/award_points`, `/awardpoints`, `/give_points`, `/givepoints @user N [ID] [причина]` | Выдать / отнять групповые очки (fair-play бонусы). |
 | `/edit_goals`, `/editgoals`, `/set_goals`, `/setgoals #<match_id> @sc1 @sc2 …` | Переписать список бомбардиров. `clear` — очистить. |
 | `/admin_matchgoals`, `/adminmatchgoals`, `/matchgoals <match_id>` | Список голов матча с goal_id. |
-| `/admin_addgoal`, `/adminaddgoal`, `/addgoal <match_id> @user [home\|away] [мин]` | Добавить один гол. |
+| `/admin_addgoal`, `/adminaddgoal`, `/addgoal <match_id> [@user\|home\|away] [home\|away] [мин] [name:<имя>]` | Добавить один гол. С `@user` — привязка к игроку (raw_name = его game_nickname). Без `@user` — нужны явная сторона и `name:<имя футболиста>` (для матчей, занесённых только счётом). `name:` поддерживает пробелы (всё после до конца строки). |
 | `/admin_delgoal`, `/admindelgoal`, `/delgoal <goal_id>` | Удалить гол по id. |
 | `/admin_setgoalauthor`, `/adminsetgoalauthor`, `/setgoalauthor <goal_id> @user` | Переназначить автора гола. |
 | `/prune_phantoms`, `/prunephantoms`, `/clean_phantoms [tid\|all]` | Удалить «фантомные» pending-матчи. |
