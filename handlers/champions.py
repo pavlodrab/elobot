@@ -595,7 +595,7 @@ def _resolve_name_to_player_id(
          channel posts that wrote the username without an ``@``).
 
     Returns the resolved id or ``None``. Never raises — caller treats
-    ``None`` as "couldn't resolve, log and skip".
+    ``None`` as "couldn't resolve".
     """
     if username:
         p = db.get_player(username)
@@ -619,10 +619,85 @@ def _resolve_name_to_player_id(
     return None
 
 
+def _resolve_or_create_player(
+    *,
+    raw_name: str | None,
+    username: str | None,
+    alias: str | None = None,
+    created_ids: set[int],
+) -> int | None:
+    """Resolve a name to a ``players.id``; create a placeholder row when
+    no match exists.
+
+    Used by ``/import_champions`` so a one-shot import absorbs every
+    winner / runner-up / podium reference in the channel dump even if
+    those people aren't yet registered in the bot. Auto-created records
+    use the name as the synthetic ``players.username`` (lower-cased
+    internally by ``upsert_player``) and the original capitalisation as
+    ``game_nickname`` for display. The user is expected to merge
+    duplicates afterwards via ``/relink_player`` or by mapping aliases
+    through ``/alias`` and re-running the import.
+
+    Adds any newly created id to ``created_ids`` so the caller can
+    surface a count to chat.
+    """
+    pid = _resolve_name_to_player_id(
+        raw_name=raw_name, username=username, alias=alias,
+    )
+    if pid is not None:
+        return pid
+    # Pick what to use as the synthetic key. Prefer the @-handle when
+    # present (real Telegram usernames are stable), then the raw name,
+    # then the parenthesised alias.
+    target = ""
+    nick: str | None = None
+    if username:
+        target = username.strip()
+    elif raw_name:
+        target = raw_name.strip()
+        nick = target  # remember original capitalisation for display
+    elif alias:
+        target = alias.strip()
+        nick = target
+    if not target:
+        return None
+    # ``upsert_player`` lowercases the username internally, so re-creation
+    # of e.g. "Антон" / "антон" / "АНТОН" all converge on one row.
+    existing = db.get_player(target.lower())
+    if existing:
+        return existing["id"]
+    p = db.upsert_player(target)
+    new_id = int(p["id"])
+    created_ids.add(new_id)
+    if nick and not (p.get("game_nickname") or "").strip():
+        try:
+            db.set_game_nickname(new_id, nick)
+        except Exception:
+            log.warning(
+                "set_game_nickname failed for new player %s (%r)", new_id, nick,
+            )
+    return new_id
+
+
+def _resolve_or_create_simple(
+    person: dict | None,
+    *,
+    created_ids: set[int],
+) -> int | None:
+    """Wrapper for runner-up / fantasy podium / cup-winner sub-objects."""
+    if not person:
+        return None
+    return _resolve_or_create_player(
+        raw_name=person.get("raw_name"),
+        username=person.get("username"),
+        created_ids=created_ids,
+    )
+
+
 def _resolve_simple(person: dict | None) -> int | None:
-    """Convenience wrapper around :func:`_resolve_name_to_player_id`
-    for runner-up / podium / cup-winner sub-objects, which only carry
-    ``raw_name`` + ``username`` (no ``alias``).
+    """Resolve-only helper (no creation). Kept for the rare cases where
+    we want to know if a person is already registered without creating
+    a placeholder.
     """
     if not person:
         return None
@@ -715,12 +790,13 @@ async def cmd_import_champions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         return
 
     before = db.count_tournament_winner_records()
+    created_player_ids: set[int] = set()
 
     imported = 0
     updated = 0
     skipped_no_winner: list[dict] = []
     skipped_other: list[dict] = []
-    succeeded_partial: list[str] = []  # winner found, runner-up not
+    succeeded_partial: list[str] = []  # winner found, runner-up not (legacy resolve-only)
 
     for rec in records:
         ttype = rec.get("tournament_type")
@@ -736,13 +812,22 @@ async def cmd_import_champions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
         if ttype == "fantasy":
             podium = rec.get("podium") or {}
-            winner_pid = _resolve_simple(podium.get("winner"))
+            winner_pid = _resolve_or_create_simple(
+                podium.get("winner"), created_ids=created_player_ids,
+            )
             if not winner_pid:
+                # No name material at all (raw_name + username both empty)
                 skipped_no_winner.append(rec)
                 continue
-            silver_pid = _resolve_simple(podium.get("silver"))
-            bronze_pid = _resolve_simple(podium.get("bronze"))
-            cup_pid = _resolve_simple(podium.get("cup_winner"))
+            silver_pid = _resolve_or_create_simple(
+                podium.get("silver"), created_ids=created_player_ids,
+            )
+            bronze_pid = _resolve_or_create_simple(
+                podium.get("bronze"), created_ids=created_player_ids,
+            )
+            cup_pid = _resolve_or_create_simple(
+                podium.get("cup_winner"), created_ids=created_player_ids,
+            )
 
             existing_id = _existing_winner_id(ttype, msg_id)
             db.add_tournament_winner(
@@ -769,20 +854,19 @@ async def cmd_import_champions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         # main / vsa
         winner = rec.get("winner") or {}
         runner = rec.get("runner_up") or {}
-        winner_pid = _resolve_name_to_player_id(
+        winner_pid = _resolve_or_create_player(
             raw_name=winner.get("raw_name"),
             username=winner.get("username"),
             alias=winner.get("alias"),
+            created_ids=created_player_ids,
         )
         if not winner_pid:
+            # Truly no name material — record can't be saved.
             skipped_no_winner.append(rec)
             continue
-        runner_pid = _resolve_simple(runner)
-        if runner and (runner.get("raw_name") or runner.get("username")) and not runner_pid:
-            succeeded_partial.append(
-                f"#{msg_id}: финалист "
-                f"{runner.get('username') or runner.get('raw_name')!s} не найден"
-            )
+        runner_pid = _resolve_or_create_simple(
+            runner, created_ids=created_player_ids,
+        )
         existing_id = _existing_winner_id(ttype, msg_id)
         db.add_tournament_winner(
             tournament_type=ttype,
@@ -810,31 +894,39 @@ async def cmd_import_champions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         "📥 <b>Импорт чемпионов</b>",
         f"Источник: <code>{html.escape(str(json_path))}</code>",
         "",
-        f"Алиасов авто-применено: <b>{auto_aliases}</b>",
+        f"Алиасов авто-применено:    <b>{auto_aliases}</b>",
         f"Импортировано новых записей: <b>{imported}</b>",
-        f"Обновлено существующих:   <b>{updated}</b>",
-        f"Пропущено (нет винера в БД): <b>{len(skipped_no_winner)}</b>",
+        f"Обновлено существующих:     <b>{updated}</b>",
+        f"Создано игроков на лету:    <b>{len(created_player_ids)}</b>",
     ]
+    if skipped_no_winner:
+        head_lines.append(
+            f"Пропущено (нет ни имени, ни @):  <b>{len(skipped_no_winner)}</b>"
+        )
     if skipped_other:
         head_lines.append(f"Пропущено по другой причине:  <b>{len(skipped_other)}</b>")
     head_lines.append("")
     head_lines.append(f"Записей в БД: было {before}, стало {after}.")
+    if created_player_ids:
+        head_lines.append("")
+        head_lines.append(
+            "ℹ️ Среди новых игроков почти наверняка есть дубли "
+            "(одно и то же лицо под разными именами / падежами / "
+            "написаниями). Слить дубликаты можно через "
+            "<code>/alias add \"Имя\" @realuser</code> + повторный "
+            "<code>/import_champions</code>, либо через "
+            "<code>/relink_player</code>."
+        )
 
     sections = ["\n".join(head_lines)]
 
     if skipped_no_winner:
-        ex_lines = ["", "<b>Не нашли чемпиона (первые 10):</b>"]
+        ex_lines = ["", "<b>Пропущенные (нет имени совсем):</b>"]
         for rec in skipped_no_winner[:10]:
             ttype = rec.get("tournament_type", "?")
             url = rec.get("url", "")
-            who: str
-            if ttype == "fantasy":
-                w = (rec.get("podium") or {}).get("winner") or {}
-            else:
-                w = rec.get("winner") or {}
-            who = w.get("username") or w.get("raw_name") or "?"
             ex_lines.append(
-                f"• {_post_link(url, str(rec.get('msg_id')))} ({ttype}): {html.escape(str(who))}"
+                f"• {_post_link(url, str(rec.get('msg_id')))} ({ttype})"
             )
         sections.append("\n".join(ex_lines))
 
@@ -842,12 +934,6 @@ async def cmd_import_champions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         sections.append(
             "\n<b>Финалисты не распознаны (записаны без них):</b>\n"
             + "\n".join(f"• {html.escape(p)}" for p in succeeded_partial[:10])
-        )
-    if len(skipped_no_winner) > 10:
-        sections.append(
-            f"\n… и ещё {len(skipped_no_winner) - 10} пропущенных. Добавь "
-            "недостающим игрокам алиасы через <code>/alias add</code> "
-            "и переимпортируй."
         )
 
     await send(update, "\n".join(sections))
