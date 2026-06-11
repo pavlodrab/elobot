@@ -431,6 +431,12 @@ PLAYER_HELP_TEXT = """
 /feedback &lt;текст&gt; — отправить отзыв/баг админам
 /cancel — отменить активный визард
 
+<b>Зал славы</b>
+/champions — чемпионы прошлых турниров (Гвардиолыч / Фэнтези / VSA) с инлайн-меню
+  Алиасы: /champs, /hall_of_fame, /halloffame, /zalslavy
+/champion @user — все чемпионства/финалы конкретного игрока
+  Алиас: /champ
+
 <b>Турниры (просмотр)</b>
 /tournaments — список активных турниров
 /list_players [ID] — состав турнира
@@ -631,9 +637,19 @@ ADMIN_ONLY_HELP_TEXT = """
   Алиас: /revokeowner
   Только для текущих владельцев и root-админов (ADMIN_IDS).
 /owners — список владельцев бота
-"""
 
-# Backwards-compat shim (some old code paths might still ref HELP_TEXT or
+<b>Зал славы (импорт из канала)</b>
+/alias add "Имя" @user — добавить алиас (free-form имя → игрок)
+/alias list [@user] — список алиасов (всех или одного игрока)
+/alias remove "Имя" — удалить алиас
+  Алиас команды: /aliases
+/import_champions [path] — массовый импорт чемпионов из JSON
+  По умолчанию читает <code>data/champions_parsed.json</code>;
+  попутно автоприменяет <code>data/aliases_to_review.json</code>,
+  если в нём заполнены <code>suggested_username</code>.
+  Идемпотентно — повторный запуск обновляет существующие записи.
+  Алиас: /importchampions
+"""
 # ADMIN_HELP_TEXT). Kept as the concatenation, BUT note that we never send
 # this as a single Telegram message — Telegram's hard limit is 4096 chars
 # and the combined text is well over that. See `cmd_help` which sends in
@@ -4228,6 +4244,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("pending_photo", None)
         return
 
+    # ── Champions / Hall of Fame inline browser ──────────────────────────
+    if data.startswith("chmp:"):
+        from handlers.champions import handle_callback as cb_champions
+        await cb_champions(update, ctx)
+        return
+
     # ── Tournament template wizard callbacks ─────────────────────────────
     if data.startswith("tpl_cat:"):
         from handlers.templates import cb_template_category
@@ -7649,6 +7671,29 @@ def main():
     app.add_handler(CommandHandler("bugreport", cmd_bug))
     app.add_handler(CommandHandler("bug_report", cmd_bug))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+
+    # ── Champions / Hall of Fame ──────────────────────────────────────
+    # User-facing browser of past tournament winners (parsed from the
+    # @gvardiolPlay channel dump). Admin-only sub-tools live alongside:
+    # /alias to map free-form names to registered players, and
+    # /import_champions to bulk-load data/champions_parsed.json.
+    from handlers.champions import (
+        cmd_champions as _cmd_champions,
+        cmd_champion as _cmd_champion,
+        cmd_alias as _cmd_alias,
+        cmd_import_champions as _cmd_import_champions,
+    )
+    app.add_handler(CommandHandler("champions",        _cmd_champions))
+    app.add_handler(CommandHandler("champs",           _cmd_champions))
+    app.add_handler(CommandHandler("hall_of_fame",     _cmd_champions))
+    app.add_handler(CommandHandler("halloffame",       _cmd_champions))
+    app.add_handler(CommandHandler("zalslavy",         _cmd_champions))
+    app.add_handler(CommandHandler("champion",         _cmd_champion))
+    app.add_handler(CommandHandler("champ",            _cmd_champion))
+    app.add_handler(CommandHandler("alias",            _cmd_alias))
+    app.add_handler(CommandHandler("aliases",          _cmd_alias))
+    app.add_handler(CommandHandler("import_champions", _cmd_import_champions))
+    app.add_handler(CommandHandler("importchampions",  _cmd_import_champions))
 
     # Photo handler — auto OCR match screenshot (also handles photo feedback)
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

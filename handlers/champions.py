@@ -1,0 +1,980 @@
+"""Hall-of-Fame for past tournaments parsed from the @gvardiolPlay channel.
+
+Three Telegram commands live here:
+
+* ``/champions`` — user-facing inline-keyboard browser. Pick tournament
+  type (Гвардиолыч / Фэнтези / VSA), then a view: top by titles,
+  chronology (paginated), or per-player. Every date and post link
+  jumps to the original channel announcement.
+* ``/champion @user`` — combined card for one player across every
+  tournament type (titles + final losses + fantasy podium finishes).
+* ``/alias`` — admin-only mapping of free-form names ("Феникс",
+  declensions like "Антона") to a registered player. Used by the
+  importer and any future free-form lookup.
+* ``/import_champions`` — admin-only one-shot bulk import of
+  ``data/champions_parsed.json`` produced by
+  ``scripts/parse_gvardiol_dump.py``. Idempotent.
+
+All callback-query routes are prefixed with ``chmp:`` and dispatched
+from ``bot.callback_handler`` via :func:`handle_callback`.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import logging
+import os
+import re
+import shlex
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
+from telegram.error import TelegramError
+from telegram.ext import ContextTypes
+
+import database as db
+from handlers._helpers import _resolve_player_arg
+from handlers.common import is_admin, mention, send
+
+log = logging.getLogger("fc_league_bot.handlers.champions")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tournament-type metadata
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Display labels for the three tournament types we recognise.
+TYPE_LABELS: dict[str, str] = {
+    "main":    "🏆 Турнир Гвардиолыча",
+    "fantasy": "💎 Фэнтези",
+    "vsa":     "🔥 VSA",
+}
+
+# Russian word for "trophy" with three case forms (1 / 2-4 / 5+).
+def _trophies_word(n: int) -> str:
+    n_abs = abs(int(n))
+    if n_abs % 100 in (11, 12, 13, 14):
+        return "трофеев"
+    last = n_abs % 10
+    if last == 1:
+        return "трофей"
+    if last in (2, 3, 4):
+        return "трофея"
+    return "трофеев"
+
+
+def _format_date(value: str | None) -> str:
+    """``"2024-10-16T18:35:52"`` → ``"16.10.2024"``. Empty/garbage → ``"—"``."""
+    if not value:
+        return "—"
+    s = str(value).strip()
+    # Take just the date part — anything after T/space is time we don't show.
+    s = re.split(r"[T ]", s, maxsplit=1)[0]
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        return s
+    return dt.strftime("%d.%m.%Y")
+
+
+def _player_label(p: dict | None, *, fallback: str = "—") -> str:
+    """One-line label for a player row used inside chat output.
+
+    Prefers ``game_nickname`` (escaped); falls back to ``@username``;
+    finally to ``fallback``. Synthetic ``id_<digits>`` placeholders are
+    rendered as plain ``id 12345`` via :func:`mention`.
+    """
+    if not p:
+        return fallback
+    nick = (p.get("game_nickname") or "").strip()
+    if nick:
+        return html.escape(nick)
+    return mention(p.get("username"))
+
+
+def _post_link(url: str | None, label: str) -> str:
+    """Wrap ``label`` as an HTML link to the channel post, or fall back
+    to plain escaped text when no URL is known.
+    """
+    if not url:
+        return html.escape(label)
+    return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+
+
+def _winner_summary_line(rec: dict) -> str:
+    """One-line summary for a single winner record. Used by the
+    chronology view.
+    """
+    date_label = _format_date(rec.get("tournament_date"))
+    date_html = _post_link(rec.get("source_url"), date_label)
+    bits: list[str] = [date_html]
+    tnum = rec.get("tournament_number")
+    if tnum:
+        bits.append(f"#{tnum}")
+    winner_label = _player_label(
+        db.get_player_by_id(rec["winner_player_id"])
+        if rec.get("winner_player_id") else None
+    )
+    line = " · ".join(bits) + f"  👑 {winner_label}"
+
+    # Runner-up (main / vsa) or full podium (fantasy).
+    if rec.get("tournament_type") == "fantasy":
+        silver = (
+            db.get_player_by_id(rec["fantasy_silver_player_id"])
+            if rec.get("fantasy_silver_player_id") else None
+        )
+        bronze = (
+            db.get_player_by_id(rec["fantasy_bronze_player_id"])
+            if rec.get("fantasy_bronze_player_id") else None
+        )
+        cup = (
+            db.get_player_by_id(rec["fantasy_cup_winner_player_id"])
+            if rec.get("fantasy_cup_winner_player_id") else None
+        )
+        if silver:
+            line += f"  🥈 {_player_label(silver)}"
+        if bronze:
+            line += f"  🥉 {_player_label(bronze)}"
+        if cup:
+            line += f"  🏅 {_player_label(cup)}"
+    else:
+        runner = (
+            db.get_player_by_id(rec["runner_up_player_id"])
+            if rec.get("runner_up_player_id") else None
+        )
+        if runner:
+            line += f"  vs {_player_label(runner)}"
+        score = rec.get("final_score")
+        if score:
+            line += f"  ({html.escape(score)})"
+    return line
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inline keyboards
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _kb_root() -> InlineKeyboardMarkup:
+    """Top-level menu: pick a tournament type."""
+    rows = [
+        [InlineKeyboardButton(TYPE_LABELS["main"],    callback_data="chmp:type:main")],
+        [InlineKeyboardButton(TYPE_LABELS["fantasy"], callback_data="chmp:type:fantasy")],
+        [InlineKeyboardButton(TYPE_LABELS["vsa"],     callback_data="chmp:type:vsa")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _kb_type(ttype: str) -> InlineKeyboardMarkup:
+    """Submenu inside a tournament type — pick a view."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Топ по трофеям", callback_data=f"chmp:top:{ttype}")],
+        [InlineKeyboardButton("📅 Хронология",     callback_data=f"chmp:hist:{ttype}:0")],
+        [InlineKeyboardButton("🔍 По игроку",      callback_data=f"chmp:byp:{ttype}")],
+        [InlineKeyboardButton("⬅️ В меню",         callback_data="chmp:menu")],
+    ])
+
+
+def _kb_back_to_type(ttype: str) -> InlineKeyboardMarkup:
+    """Footer "back" button for any view inside a tournament type."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"⬅️ {TYPE_LABELS.get(ttype, ttype)}",
+            callback_data=f"chmp:type:{ttype}",
+        )],
+        [InlineKeyboardButton("🏠 В меню", callback_data="chmp:menu")],
+    ])
+
+
+def _kb_history(ttype: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Pagination keyboard for the chronology view."""
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "◀️ Назад", callback_data=f"chmp:hist:{ttype}:{page - 1}"
+        ))
+    nav.append(InlineKeyboardButton(
+        f"стр. {page + 1}/{total_pages}", callback_data="chmp:noop"
+    ))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton(
+            "Вперёд ▶️", callback_data=f"chmp:hist:{ttype}:{page + 1}"
+        ))
+    rows: list[list[InlineKeyboardButton]] = [nav]
+    rows.append([
+        InlineKeyboardButton(
+            f"⬅️ {TYPE_LABELS.get(ttype, ttype)}",
+            callback_data=f"chmp:type:{ttype}",
+        ),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _kb_byplayer_picker(ttype: str, top: list[dict]) -> InlineKeyboardMarkup:
+    """For "by player" — show up to 10 buttons with the most-titled players."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for r in top[:10]:
+        pid = r["player_id"]
+        label = (r.get("game_nickname") or r.get("username") or f"id={pid}").strip()
+        # Telegram allows ≤64 chars in a button label — be defensive.
+        if len(label) > 28:
+            label = label[:27] + "…"
+        rows.append([InlineKeyboardButton(
+            f"{label} — {r['titles']} {_trophies_word(r['titles'])}",
+            callback_data=f"chmp:byp_p:{ttype}:{pid}",
+        )])
+    rows.append([InlineKeyboardButton(
+        f"⬅️ {TYPE_LABELS.get(ttype, ttype)}",
+        callback_data=f"chmp:type:{ttype}",
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Render: type submenu (with quick stats)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_root_text() -> str:
+    total = db.count_tournament_winner_records()
+    if total == 0:
+        return (
+            "🏆 <b>Зал славы</b>\n\n"
+            "Пока пусто. Админу: запусти <code>/import_champions</code>, "
+            "чтобы импортировать чемпионов из дампа канала "
+            "(<code>data/champions_parsed.json</code>)."
+        )
+    return (
+        "🏆 <b>Зал славы</b>\n\n"
+        f"Всего записей о турнирах: <b>{total}</b>\n\n"
+        "Выбери, какой турнир посмотреть:"
+    )
+
+
+def _render_type_text(ttype: str) -> str:
+    rows = db.list_tournament_winners(ttype)
+    label = TYPE_LABELS.get(ttype, ttype)
+    if not rows:
+        return (
+            f"<b>{label}</b>\n\n"
+            "По этому турниру ещё нет данных. Админу: импортируй через "
+            "<code>/import_champions</code> или добавь алиасы через "
+            "<code>/alias</code> и переимпортируй."
+        )
+    by_winner: dict[int, int] = {}
+    for r in rows:
+        by_winner[r["winner_player_id"]] = by_winner.get(r["winner_player_id"], 0) + 1
+    leader_id, leader_count = max(by_winner.items(), key=lambda x: x[1])
+    leader = db.get_player_by_id(leader_id)
+    leader_label = _player_label(leader)
+    lines = [
+        f"<b>{label}</b>",
+        "",
+        f"📈 Турниров в базе: <b>{len(rows)}</b>",
+        f"👑 Уникальных чемпионов: <b>{len(by_winner)}</b>",
+        f"🥇 Лидер по трофеям: <b>{leader_label}</b> "
+        f"({leader_count} {_trophies_word(leader_count)})",
+        "",
+        "Что показать?",
+    ]
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Render: top by titles
+# ─────────────────────────────────────────────────────────────────────────────
+
+# How many rows to show in the "top" view (everything past this is just noise).
+TOP_LIMIT = 25
+
+
+def _render_top_text(ttype: str) -> str:
+    label = TYPE_LABELS.get(ttype, ttype)
+    rows = db.count_titles_by_type(ttype)
+    if not rows:
+        return f"<b>{label} — Топ чемпионов</b>\n\nПока никто.\n"
+    lines = [f"<b>{label} — Топ чемпионов</b>", ""]
+    medals = ("🥇", "🥈", "🥉")
+    for i, r in enumerate(rows[:TOP_LIMIT], start=1):
+        prefix = f"{medals[i - 1]} " if i <= 3 else f"{i:>2}. "
+        p = {
+            "id": r["player_id"],
+            "username": r.get("username"),
+            "game_nickname": r.get("game_nickname"),
+        }
+        name = _player_label(p)
+        n = int(r["titles"])
+        lines.append(f"{prefix}{name} — <b>{n}</b> {_trophies_word(n)}")
+    if len(rows) > TOP_LIMIT:
+        lines.append("")
+        lines.append(f"… и ещё {len(rows) - TOP_LIMIT}")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Render: chronology (paginated)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# How many records show up on a single chronology page. Tuned to keep the
+# whole message comfortably under Telegram's 4096-char limit even when
+# every record has runner-up + score + alias.
+HIST_PAGE_SIZE = 10
+
+
+def _render_history_text(ttype: str, page: int) -> tuple[str, int]:
+    label = TYPE_LABELS.get(ttype, ttype)
+    rows = db.list_tournament_winners(ttype)
+    rows.reverse()  # newest first
+    total_pages = max(1, (len(rows) + HIST_PAGE_SIZE - 1) // HIST_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    if not rows:
+        return f"<b>{label} — Хронология</b>\n\nПока никто.\n", total_pages
+    start = page * HIST_PAGE_SIZE
+    chunk = rows[start:start + HIST_PAGE_SIZE]
+    lines = [f"<b>{label} — Хронология</b>", ""]
+    for i, rec in enumerate(chunk, start=start + 1):
+        lines.append(f"{i}. {_winner_summary_line(rec)}")
+    return "\n".join(lines), total_pages
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Render: per-player card
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_player_card(player_id: int, ttype: str | None = None) -> str:
+    p = db.get_player_by_id(player_id)
+    if not p:
+        return "❌ Игрок не найден."
+    name = _player_label(p)
+    head = f"👑 <b>{name}</b> — карточка чемпиона"
+    if ttype:
+        head += f" ({TYPE_LABELS.get(ttype, ttype)})"
+    sections: list[str] = [head, ""]
+
+    # Per-type breakdown. Always iterate all three so the user sees the
+    # complete picture in /champion; the "by player" callback narrows to
+    # one type by passing ``ttype``.
+    iter_types = (ttype,) if ttype else db.TOURNAMENT_WINNER_TYPES
+
+    any_data = False
+    for tt in iter_types:
+        wins = db.get_titles_for_player(player_id, tt)
+        all_finals = db.get_finals_for_player(player_id, tt)
+        non_wins = [r for r in all_finals if r["winner_player_id"] != player_id]
+
+        if not wins and not non_wins:
+            continue
+        any_data = True
+        sections.append(f"<b>{TYPE_LABELS.get(tt, tt)}</b>")
+
+        if wins:
+            sections.append(
+                f"🏆 Чемпионств: {len(wins)} {_trophies_word(len(wins))}"
+            )
+            for w in wins:
+                sections.append("  • " + _winner_summary_line(w))
+        if non_wins:
+            sections.append("")
+            sections.append(f"🥈 Финалов проиграно / призовых мест: {len(non_wins)}")
+            for r in non_wins:
+                sections.append("  • " + _winner_summary_line(r))
+        sections.append("")
+
+    if not any_data:
+        sections.append("Никаких чемпионств / финалов в базе пока нет.")
+    return "\n".join(sections).rstrip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_champions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/champions`` — open the inline-keyboard hall-of-fame browser."""
+    await send(update, _render_root_text(), reply_markup=_kb_root())
+
+
+async def cmd_champion(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/champion @user`` — combined per-player card across every type."""
+    args = list(ctx.args or [])
+    target_player: dict | None = None
+
+    msg = update.effective_message
+    if msg and msg.reply_to_message and msg.reply_to_message.from_user:
+        u = msg.reply_to_message.from_user
+        if u.username:
+            target_player = db.get_player(u.username)
+        if not target_player:
+            target_player = db.get_player_by_telegram_id(u.id)
+
+    if not target_player and args:
+        target_player = _resolve_player_arg(args[0])
+
+    if not target_player:
+        await send(
+            update,
+            "Использование: <code>/champion @user</code> "
+            "(или ответом на сообщение пользователя).\n\n"
+            "Покажет все чемпионства и финалы этого игрока во всех турнирах.",
+        )
+        return
+    text = _render_player_card(target_player["id"])
+    await send(update, text)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /alias  (admin)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_alias_args(message_text: str) -> list[str]:
+    """Split the raw command text honouring quoted multi-word names.
+
+    ``/alias add "Феникс" @phoenileo`` → ``["add", "Феникс", "@phoenileo"]``.
+    ``shlex`` already does the right thing with quotes; we only need to
+    strip the leading ``/alias`` token and tolerate ``shlex.split``
+    raising ``ValueError`` on unmatched quotes.
+    """
+    text = (message_text or "").strip()
+    # Drop the leading ``/alias`` (with optional ``@bot_username`` that
+    # Telegram appends in group chats).
+    text = re.sub(r"^/[A-Za-z_]\w*(?:@\w+)?\s*", "", text)
+    if not text:
+        return []
+    try:
+        return shlex.split(text, posix=True)
+    except ValueError:
+        # Fall back to whitespace split if quoting is broken — better
+        # than crashing the handler.
+        return text.split()
+
+
+async def cmd_alias(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only alias management.
+
+    Subcommands:
+      ``/alias add "<name>" @user``     — register an alias
+      ``/alias remove "<name>"``        — drop an alias
+      ``/alias list [@user]``           — show all aliases (or one player's)
+
+    The name MUST be quoted when it contains spaces or punctuation. Single
+    words can be passed without quotes.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    msg_text = (update.effective_message.text if update.effective_message else "") or ""
+    parts = _parse_alias_args(msg_text)
+    sub = parts[0].lower() if parts else ""
+
+    if sub in ("add", "set", "+"):
+        if len(parts) < 3:
+            await send(
+                update,
+                "Использование: <code>/alias add \"Имя\" @user</code>\n\n"
+                "Имя в кавычках, если содержит пробелы. "
+                "<code>@user</code> — telegram username игрока, "
+                "уже зарегистрированного в боте, или его telegram_id.",
+            )
+            return
+        alias_text = parts[1]
+        target = _resolve_player_arg(parts[2])
+        if not target:
+            await send(
+                update,
+                f"❌ Игрок {html.escape(parts[2])} не найден в боте. "
+                "Сначала зарегистрируй его (или попроси сделать "
+                "<code>/register</code>), потом задавай алиас.",
+            )
+            return
+        try:
+            inserted = db.add_player_alias(
+                alias_text, target["id"],
+                granted_by=update.effective_user.id,
+            )
+        except ValueError as e:
+            await send(update, f"❌ {html.escape(str(e))}")
+            return
+        verb = "добавлен" if inserted else "уже был назначен"
+        await send(
+            update,
+            f"✅ Алиас <b>{html.escape(alias_text)}</b> {verb} → "
+            f"{mention(target['username'])} (id={target['id']}).",
+        )
+        return
+
+    if sub in ("remove", "rm", "del", "delete", "-"):
+        if len(parts) < 2:
+            await send(update, "Использование: <code>/alias remove \"Имя\"</code>")
+            return
+        alias_text = parts[1]
+        if db.remove_player_alias(alias_text):
+            await send(
+                update,
+                f"✅ Алиас <b>{html.escape(alias_text)}</b> удалён.",
+            )
+        else:
+            await send(
+                update,
+                f"⚠️ Алиас <b>{html.escape(alias_text)}</b> не найден.",
+            )
+        return
+
+    if sub in ("list", "ls", ""):
+        target_player_id: int | None = None
+        if len(parts) >= 2:
+            target = _resolve_player_arg(parts[1])
+            if not target:
+                await send(update, f"❌ Игрок {html.escape(parts[1])} не найден.")
+                return
+            target_player_id = target["id"]
+        rows = db.list_player_aliases(target_player_id)
+        if not rows:
+            if target_player_id:
+                await send(update, "У этого игрока нет алиасов.")
+            else:
+                await send(
+                    update,
+                    "Алиасов пока нет. Добавь через "
+                    "<code>/alias add \"Имя\" @user</code>.",
+                )
+            return
+        lines = [f"📒 Всего алиасов: <b>{len(rows)}</b>", ""]
+        # Group by player for readability.
+        by_player: dict[int, list[dict]] = {}
+        for r in rows:
+            by_player.setdefault(r["player_id"], []).append(r)
+        for pid, items in by_player.items():
+            who = mention(items[0]["username"])
+            nick = (items[0].get("game_nickname") or "").strip()
+            head = f"<b>{who}</b>"
+            if nick:
+                head += f" ({html.escape(nick)})"
+            lines.append(head)
+            for r in items:
+                lines.append(f"  • {html.escape(r['alias'])}")
+            lines.append("")
+        await send(update, "\n".join(lines).rstrip())
+        return
+
+    await send(
+        update,
+        "Использование:\n"
+        "  <code>/alias add \"Имя\" @user</code> — добавить алиас\n"
+        "  <code>/alias remove \"Имя\"</code> — удалить алиас\n"
+        "  <code>/alias list [@user]</code> — список алиасов",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /import_champions  (admin)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_CHAMPIONS_JSON = "data/champions_parsed.json"
+DEFAULT_ALIASES_JSON = "data/aliases_to_review.json"
+
+
+def _resolve_name_to_player_id(
+    *,
+    raw_name: str | None,
+    username: str | None,
+    alias: str | None = None,
+) -> int | None:
+    """Best-effort name → ``players.id`` lookup used by the importer.
+
+    Lookup order, cheapest-and-most-precise first:
+      1. ``@username`` → ``players.username`` (lower-case exact).
+      2. ``raw_name`` / ``alias`` → ``player_aliases.alias``.
+      3. ``raw_name`` / ``alias`` → ``players.game_nickname`` (case-insensitive).
+      4. ``raw_name`` / ``alias`` → ``players.username`` (rare, but handles
+         channel posts that wrote the username without an ``@``).
+
+    Returns the resolved id or ``None``. Never raises — caller treats
+    ``None`` as "couldn't resolve, log and skip".
+    """
+    if username:
+        p = db.get_player(username)
+        if p:
+            return p["id"]
+    for cand in (raw_name, alias):
+        if not cand:
+            continue
+        c = cand.strip()
+        if not c:
+            continue
+        pid = db.resolve_alias_to_player_id(c)
+        if pid:
+            return pid
+        p = db.get_player_by_game_nickname(c)
+        if p:
+            return p["id"]
+        p = db.get_player(c)
+        if p:
+            return p["id"]
+    return None
+
+
+def _resolve_simple(person: dict | None) -> int | None:
+    """Convenience wrapper around :func:`_resolve_name_to_player_id`
+    for runner-up / podium / cup-winner sub-objects, which only carry
+    ``raw_name`` + ``username`` (no ``alias``).
+    """
+    if not person:
+        return None
+    return _resolve_name_to_player_id(
+        raw_name=person.get("raw_name"),
+        username=person.get("username"),
+    )
+
+
+def _autoapply_aliases_file(path: Path, granted_by: int | None) -> int:
+    """Read ``aliases_to_review.json`` and register every alias whose
+    ``suggested_username`` field is filled in. Returns the number of
+    new aliases that were actually inserted (already-existing identical
+    mappings are no-ops).
+    """
+    if not path.is_file():
+        return 0
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning("aliases JSON unreadable (%s): %s", path, e)
+        return 0
+    if not isinstance(data, list):
+        return 0
+    inserted = 0
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        alias_name = (entry.get("name") or "").strip()
+        suggested = (entry.get("suggested_username") or "").strip()
+        if not alias_name or not suggested:
+            continue
+        target = _resolve_player_arg(suggested)
+        if not target:
+            log.info(
+                "alias autoapply skipped: %r → %r (player not in DB)",
+                alias_name, suggested,
+            )
+            continue
+        try:
+            if db.add_player_alias(alias_name, target["id"], granted_by=granted_by):
+                inserted += 1
+        except ValueError as e:
+            log.info("alias autoapply skipped: %r — %s", alias_name, e)
+    return inserted
+
+
+async def cmd_import_champions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/import_champions [path]`` — bulk-import the parsed JSON.
+
+    Default path is ``data/champions_parsed.json``. The companion
+    ``data/aliases_to_review.json`` is auto-loaded if present, and any
+    entry with a filled ``suggested_username`` is registered as an
+    alias before the main import pass.
+
+    Idempotent: re-running updates existing rows in place
+    (``UNIQUE(tournament_type, source_message_id)``).
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    args = list(ctx.args or [])
+    json_path = Path(args[0] if args else DEFAULT_CHAMPIONS_JSON)
+    if not json_path.is_file():
+        await send(
+            update,
+            f"❌ Не нашёл файл <code>{html.escape(str(json_path))}</code>.\n\n"
+            "Положи дамп канала в <code>result.json</code> и запусти "
+            "<code>python scripts/parse_gvardiol_dump.py</code>, "
+            "после этого пробуй снова.",
+        )
+        return
+
+    aliases_path = json_path.with_name(os.path.basename(DEFAULT_ALIASES_JSON))
+    granted_by = update.effective_user.id
+    auto_aliases = _autoapply_aliases_file(aliases_path, granted_by=granted_by)
+
+    try:
+        with json_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        await send(update, f"❌ Не смог прочитать JSON: {html.escape(str(e))}")
+        return
+
+    records = payload.get("tournaments") or []
+    if not records:
+        await send(update, "JSON пустой — нечего импортировать.")
+        return
+
+    before = db.count_tournament_winner_records()
+
+    imported = 0
+    updated = 0
+    skipped_no_winner: list[dict] = []
+    skipped_other: list[dict] = []
+    succeeded_partial: list[str] = []  # winner found, runner-up not
+
+    for rec in records:
+        ttype = rec.get("tournament_type")
+        if ttype not in db.TOURNAMENT_WINNER_TYPES:
+            skipped_other.append({"msg_id": rec.get("msg_id"), "reason": f"unknown type {ttype!r}"})
+            continue
+        msg_id = rec.get("msg_id")
+        url = rec.get("url") or ""
+        if msg_id is None or not url:
+            skipped_other.append({"msg_id": msg_id, "reason": "missing msg_id / url"})
+            continue
+        date = rec.get("date") or ""
+
+        if ttype == "fantasy":
+            podium = rec.get("podium") or {}
+            winner_pid = _resolve_simple(podium.get("winner"))
+            if not winner_pid:
+                skipped_no_winner.append(rec)
+                continue
+            silver_pid = _resolve_simple(podium.get("silver"))
+            bronze_pid = _resolve_simple(podium.get("bronze"))
+            cup_pid = _resolve_simple(podium.get("cup_winner"))
+
+            existing_id = _existing_winner_id(ttype, msg_id)
+            db.add_tournament_winner(
+                tournament_type="fantasy",
+                tournament_date=date[:10] if date else None,
+                tournament_number=None,
+                winner_player_id=winner_pid,
+                runner_up_player_id=None,
+                fantasy_silver_player_id=silver_pid,
+                fantasy_bronze_player_id=bronze_pid,
+                fantasy_cup_winner_player_id=cup_pid,
+                final_score=None,
+                championship_count=None,
+                source_message_id=int(msg_id),
+                source_url=url,
+                notes=None,
+            )
+            if existing_id is not None:
+                updated += 1
+            else:
+                imported += 1
+            continue
+
+        # main / vsa
+        winner = rec.get("winner") or {}
+        runner = rec.get("runner_up") or {}
+        winner_pid = _resolve_name_to_player_id(
+            raw_name=winner.get("raw_name"),
+            username=winner.get("username"),
+            alias=winner.get("alias"),
+        )
+        if not winner_pid:
+            skipped_no_winner.append(rec)
+            continue
+        runner_pid = _resolve_simple(runner)
+        if runner and (runner.get("raw_name") or runner.get("username")) and not runner_pid:
+            succeeded_partial.append(
+                f"#{msg_id}: финалист "
+                f"{runner.get('username') or runner.get('raw_name')!s} не найден"
+            )
+        existing_id = _existing_winner_id(ttype, msg_id)
+        db.add_tournament_winner(
+            tournament_type=ttype,
+            tournament_date=date[:10] if date else None,
+            tournament_number=rec.get("tournament_number"),
+            winner_player_id=winner_pid,
+            runner_up_player_id=runner_pid,
+            final_score=rec.get("final_score"),
+            championship_count=rec.get("championship_count"),
+            source_message_id=int(msg_id),
+            source_url=url,
+            notes=None,
+        )
+        if existing_id is not None:
+            updated += 1
+        else:
+            imported += 1
+
+    after = db.count_tournament_winner_records()
+
+    # Build the summary message. Keep it compact — full per-record reasons
+    # for skipped entries go to the bot log; chat just shows counts and
+    # the first few examples.
+    head_lines = [
+        "📥 <b>Импорт чемпионов</b>",
+        f"Источник: <code>{html.escape(str(json_path))}</code>",
+        "",
+        f"Алиасов авто-применено: <b>{auto_aliases}</b>",
+        f"Импортировано новых записей: <b>{imported}</b>",
+        f"Обновлено существующих:   <b>{updated}</b>",
+        f"Пропущено (нет винера в БД): <b>{len(skipped_no_winner)}</b>",
+    ]
+    if skipped_other:
+        head_lines.append(f"Пропущено по другой причине:  <b>{len(skipped_other)}</b>")
+    head_lines.append("")
+    head_lines.append(f"Записей в БД: было {before}, стало {after}.")
+
+    sections = ["\n".join(head_lines)]
+
+    if skipped_no_winner:
+        ex_lines = ["", "<b>Не нашли чемпиона (первые 10):</b>"]
+        for rec in skipped_no_winner[:10]:
+            ttype = rec.get("tournament_type", "?")
+            url = rec.get("url", "")
+            who: str
+            if ttype == "fantasy":
+                w = (rec.get("podium") or {}).get("winner") or {}
+            else:
+                w = rec.get("winner") or {}
+            who = w.get("username") or w.get("raw_name") or "?"
+            ex_lines.append(
+                f"• {_post_link(url, str(rec.get('msg_id')))} ({ttype}): {html.escape(str(who))}"
+            )
+        sections.append("\n".join(ex_lines))
+
+    if succeeded_partial:
+        sections.append(
+            "\n<b>Финалисты не распознаны (записаны без них):</b>\n"
+            + "\n".join(f"• {html.escape(p)}" for p in succeeded_partial[:10])
+        )
+    if len(skipped_no_winner) > 10:
+        sections.append(
+            f"\n… и ещё {len(skipped_no_winner) - 10} пропущенных. Добавь "
+            "недостающим игрокам алиасы через <code>/alias add</code> "
+            "и переимпортируй."
+        )
+
+    await send(update, "\n".join(sections))
+
+
+def _existing_winner_id(ttype: str, msg_id: int | None) -> int | None:
+    """Tiny convenience wrapper used only by the importer to decide
+    whether the upsert is going to be an INSERT or an UPDATE so the
+    summary can show "imported" vs "updated" counts."""
+    if msg_id is None:
+        return None
+    conn = db.get_conn()
+    row = conn.execute(
+        "SELECT id FROM tournament_winners "
+        "WHERE tournament_type=? AND source_message_id=?",
+        (ttype, int(msg_id)),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return int(row["id"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback handler — dispatched from bot.callback_handler on prefix "chmp:"
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Single entry point for every ``chmp:*`` callback.
+
+    Routes:
+      ``chmp:menu``                    — root tournament-type picker
+      ``chmp:type:<ttype>``            — submenu for a tournament type
+      ``chmp:top:<ttype>``             — top-by-titles view
+      ``chmp:hist:<ttype>:<page>``     — chronology page
+      ``chmp:byp:<ttype>``             — by-player picker (top-10 buttons)
+      ``chmp:byp_p:<ttype>:<pid>``     — per-player card scoped to one type
+      ``chmp:noop``                    — no-op (used by the page-counter button)
+    """
+    query = update.callback_query
+    if not query:
+        return
+    data = (query.data or "").strip()
+    parts = data.split(":")
+
+    try:
+        if data == "chmp:noop":
+            return
+        if data == "chmp:menu":
+            await query.edit_message_text(
+                _render_root_text(),
+                parse_mode="HTML",
+                reply_markup=_kb_root(),
+            )
+            return
+        if len(parts) >= 3 and parts[1] == "type":
+            ttype = parts[2]
+            if ttype not in db.TOURNAMENT_WINNER_TYPES:
+                return
+            await query.edit_message_text(
+                _render_type_text(ttype),
+                parse_mode="HTML",
+                reply_markup=_kb_type(ttype),
+            )
+            return
+        if len(parts) >= 3 and parts[1] == "top":
+            ttype = parts[2]
+            if ttype not in db.TOURNAMENT_WINNER_TYPES:
+                return
+            await query.edit_message_text(
+                _render_top_text(ttype),
+                parse_mode="HTML",
+                reply_markup=_kb_back_to_type(ttype),
+            )
+            return
+        if len(parts) >= 3 and parts[1] == "hist":
+            ttype = parts[2]
+            if ttype not in db.TOURNAMENT_WINNER_TYPES:
+                return
+            page = int(parts[3]) if len(parts) >= 4 and parts[3].isdigit() else 0
+            text, total_pages = _render_history_text(ttype, page)
+            await query.edit_message_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=_kb_history(ttype, page, total_pages),
+            )
+            return
+        if len(parts) >= 3 and parts[1] == "byp":
+            ttype = parts[2]
+            if ttype not in db.TOURNAMENT_WINNER_TYPES:
+                return
+            top = db.count_titles_by_type(ttype)
+            label = TYPE_LABELS.get(ttype, ttype)
+            if not top:
+                await query.edit_message_text(
+                    f"<b>{label} — По игроку</b>\n\nВ базе пока никого.",
+                    parse_mode="HTML",
+                    reply_markup=_kb_back_to_type(ttype),
+                )
+                return
+            await query.edit_message_text(
+                f"<b>{label} — По игроку</b>\n\n"
+                "Выбери игрока из топ-10 или используй "
+                "<code>/champion @user</code> для любого другого.",
+                parse_mode="HTML",
+                reply_markup=_kb_byplayer_picker(ttype, top),
+            )
+            return
+        if len(parts) >= 4 and parts[1] == "byp_p":
+            ttype = parts[2]
+            if ttype not in db.TOURNAMENT_WINNER_TYPES:
+                return
+            try:
+                pid = int(parts[3])
+            except ValueError:
+                return
+            text = _render_player_card(pid, ttype=ttype)
+            await query.edit_message_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=_kb_back_to_type(ttype),
+            )
+            return
+    except TelegramError as e:
+        # "Message is not modified" pops up if the user spams the same
+        # button — quietly ignore, anything else is logged.
+        if "not modified" in str(e).lower():
+            return
+        log.warning("champions callback %r failed: %s", data, e)
+        return
