@@ -666,18 +666,11 @@ ADMIN_ONLY_HELP_TEXT = """
   Алиасы: /removetrophy, /del_trophy, /trophy_remove
 
 <b>Авто-шутки (LLM)</b>
+/jokes — открыть меню настроек авто-шуток (всё через кнопки)
+  Алиас: /jokes_menu. Включение, интервал, режим, контекст, порог,
+  модель (root) — всё внутри панели.
 /joke — выдать шутку сейчас по последним сообщениям этого чата
-  Cooldown 60 сек на чат. Требует /jokes_on заранее.
-/jokes_on, /jokes_off — включить/выключить логирование и авто-шутки в чате
-  В выключенных чатах сообщения не логируются (приватность).
-/jokes_interval &lt;минуты&gt; — частота авто-шуток (0 = только вручную)
-  Допустимо 5..1440 при положительном значении.
-/jokes_mode &lt;soft|normal|spicy|savage|absurd&gt; — «упоротость»
-/jokes_context &lt;N&gt; — сколько последних сообщений в промпт (20..200)
-/jokes_minmsgs &lt;N&gt; — минимум новых сообщений между авто-шутками
-/jokes_setmodel &lt;model|reset&gt; — переопределить OpenRouter-модель чата (root)
-/jokes_clear_log — стереть лог сообщений этого чата
-/jokes_settings — текущая конфигурация + статистика
+  Cooldown 60 сек на чат. Сначала включи в /jokes.
 /jokes_history [N] — последние N шуток (доступно всем)
 """
 # ADMIN_HELP_TEXT). Kept as the concatenation, BUT note that we never send
@@ -5248,6 +5241,15 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await cb_quote_settings(update, ctx)
         return
 
+    # ── Jokes inline menu ────────────────────────────────────────────────
+    # Single dispatcher for the whole ``j:*`` namespace — settings panel,
+    # submenus, and pending-input triggers. See ``cb_jokes_menu`` for the
+    # full callback_data schema.
+    if data.startswith("j:"):
+        from handlers.jokes import cb_jokes_menu
+        await cb_jokes_menu(update, ctx)
+        return
+
     # ── Top submenu ───────────────────────────────────────────────────────
     if data == "top:elo":
         await cmd_top(update, ctx)
@@ -6475,6 +6477,14 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if await handle_pending_tpl_create_text(update, ctx, txt):
         return
 
+    # ── Pending jokes-menu manual input (interval / context / minmsgs / model) ─
+    # Set when an admin taps "✏️ Ввести вручную" in the /jokes panel.
+    # Consumed here so the value lands on the right setting before any
+    # other text-router branch sees it.
+    from handlers.jokes import handle_pending_jokes_text
+    if await handle_pending_jokes_text(update, ctx):
+        return
+
     # ── Pending groupname input (from settings panel / set_groupname prompt) ──
     pending_g = ctx.user_data.pop("pending_groupname", None)
     if pending_g:
@@ -7315,19 +7325,18 @@ def main():
     # blocks the master text router below at group=0. Inside the
     # logger we double-check that ``jokes_enabled=true`` for the chat
     # before persisting anything (privacy).
+    #
+    # UX: as of 2026-06 there are only THREE slash commands —
+    # ``/jokes`` (admin: open inline panel), ``/joke`` (admin: fire
+    # one now), ``/jokes_history`` (public: read-only list). Every
+    # other setting (on/off/interval/mode/context/minmsgs/model/
+    # clear-log) lives behind buttons in the panel; the ``j:*``
+    # CallbackQueryHandler dispatches to ``cb_jokes_menu``.
     from handlers.jokes import (
         log_chat_message as _log_chat_message,
         cmd_joke as _cmd_joke,
-        cmd_jokes_on as _cmd_jokes_on,
-        cmd_jokes_off as _cmd_jokes_off,
-        cmd_jokes_interval as _cmd_jokes_interval,
-        cmd_jokes_mode as _cmd_jokes_mode,
-        cmd_jokes_context as _cmd_jokes_context,
-        cmd_jokes_minmsgs as _cmd_jokes_minmsgs,
-        cmd_jokes_setmodel as _cmd_jokes_setmodel,
-        cmd_jokes_clear_log as _cmd_jokes_clear_log,
+        cmd_jokes_menu as _cmd_jokes_menu,
         cmd_jokes_history as _cmd_jokes_history,
-        cmd_jokes_settings as _cmd_jokes_settings,
         job_jokes as _job_jokes,
     )
     app.add_handler(
@@ -7338,26 +7347,11 @@ def main():
         group=-1,
     )
     app.add_handler(CommandHandler("joke", _cmd_joke))
-    app.add_handler(CommandHandler("jokes_on", _cmd_jokes_on))
-    app.add_handler(CommandHandler("jokeson", _cmd_jokes_on))
-    app.add_handler(CommandHandler("jokes_off", _cmd_jokes_off))
-    app.add_handler(CommandHandler("jokesoff", _cmd_jokes_off))
-    app.add_handler(CommandHandler("jokes_interval", _cmd_jokes_interval))
-    app.add_handler(CommandHandler("jokesinterval", _cmd_jokes_interval))
-    app.add_handler(CommandHandler("jokes_mode", _cmd_jokes_mode))
-    app.add_handler(CommandHandler("jokesmode", _cmd_jokes_mode))
-    app.add_handler(CommandHandler("jokes_context", _cmd_jokes_context))
-    app.add_handler(CommandHandler("jokescontext", _cmd_jokes_context))
-    app.add_handler(CommandHandler("jokes_minmsgs", _cmd_jokes_minmsgs))
-    app.add_handler(CommandHandler("jokesminmsgs", _cmd_jokes_minmsgs))
-    app.add_handler(CommandHandler("jokes_setmodel", _cmd_jokes_setmodel))
-    app.add_handler(CommandHandler("jokessetmodel", _cmd_jokes_setmodel))
-    app.add_handler(CommandHandler("jokes_clear_log", _cmd_jokes_clear_log))
-    app.add_handler(CommandHandler("jokesclearlog", _cmd_jokes_clear_log))
+    app.add_handler(CommandHandler("jokes", _cmd_jokes_menu))
+    app.add_handler(CommandHandler("jokes_menu", _cmd_jokes_menu))
+    app.add_handler(CommandHandler("jokesmenu", _cmd_jokes_menu))
     app.add_handler(CommandHandler("jokes_history", _cmd_jokes_history))
     app.add_handler(CommandHandler("jokeshistory", _cmd_jokes_history))
-    app.add_handler(CommandHandler("jokes_settings", _cmd_jokes_settings))
-    app.add_handler(CommandHandler("jokessettings", _cmd_jokes_settings))
     # NB: Telegram only allows ASCII / digits / underscore in command
     # names, so the Russian-only aliases (/цитаты, /баг) had to go —
     # ``CommandHandler('цитаты', ...)`` raises at startup. Users
