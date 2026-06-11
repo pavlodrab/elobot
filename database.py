@@ -482,6 +482,21 @@ def init_db():
         c.execute(
             "ALTER TABLE tournaments ADD COLUMN row_bg_alpha INTEGER NOT NULL DEFAULT 255"
         )
+
+    # Player-name display mode for rendered images and text summaries.
+    # 'full' (default) — current behaviour: "<nick> - <team> (@user)".
+    # 'tag'  — only the Telegram @-tag is shown (falls back to nick /
+    #          team / "id N" when the player has no public username).
+    # 'nick' — only the in-game nickname / per-tournament team tag is
+    #          shown (the @-tag is hidden). Lets admins run brand-
+    #          centric tournaments where Telegram handles are noise.
+    # Toggled per tournament via the "🎨 Оформление" → "🪪 Имена"
+    # picker in the inline settings panel. Added 2026-06.
+    if not _column_exists(conn, "tournaments", "name_display_mode"):
+        c.execute(
+            "ALTER TABLE tournaments "
+            "ADD COLUMN name_display_mode TEXT NOT NULL DEFAULT 'full'"
+        )
     if not _column_exists(conn, "tournaments", "ocr_mode"):
         # OCR recognition mode for match screenshots:
         # 'ai'         — full AI OCR: score + opponent nicknames (default)

@@ -5193,6 +5193,54 @@ async def _handle_tournament_settings_cb(
         )
         return
 
+    if action == "names":
+        # Pick how participant names are rendered in /table, /playoff,
+        # /tablebomb and the tournament summary text. ``full`` is the
+        # historical "<nick> - <Team> (@user)" combo; ``tag`` shows
+        # only the Telegram @-handle; ``nick`` shows only the in-game
+        # nickname / team name (no @-tag), which is what brand- or
+        # team-centric tournaments usually want.
+        cur = (t.get("name_display_mode") or "full").lower()
+        if cur not in ("full", "tag", "nick"):
+            cur = "full"
+        opts = [
+            ("🪪 Полные (ник + тег + @user)", f"ts:names_set:{tid}:full"),
+            ("@ Только теги Telegram",         f"ts:names_set:{tid}:tag"),
+            ("🏷 Только ники / команды",        f"ts:names_set:{tid}:nick"),
+        ]
+        cur_lbl = {
+            "full": "полные имена",
+            "tag":  "только @теги",
+            "nick": "только ники / команды",
+        }[cur]
+        await query.edit_message_text(
+            f"🪪 <b>Отображение имён участников</b> — какое имя показывать "
+            f"в таблице групп, сетке плей-офф, бомбардирах и текстовой "
+            f"сводке.\n\n"
+            f"  • <b>Полные</b> — «ник - команда (@user)» (по умолчанию)\n"
+            f"  • <b>Только @теги</b> — только Telegram-хендл, без ника "
+            f"и команды\n"
+            f"  • <b>Только ники / команды</b> — игровой ник или название "
+            f"команды без @тега\n\n"
+            f"Текущее: <b>{cur_lbl}</b>",
+            parse_mode="HTML",
+            reply_markup=_picker("names", opts),
+        )
+        return
+    if action == "names_set":
+        mode = parts[3] if len(parts) > 3 else "full"
+        if mode not in ("full", "tag", "nick"):
+            mode = "full"
+        update_tournament(tid, name_display_mode=mode)
+        t = get_tournament(tid)
+        from bot import _submenu_ts_style
+        await query.edit_message_text(
+            f"🎨 <b>Оформление</b> — {html.escape(t['name'])} (ID {tid})",
+            parse_mode="HTML",
+            reply_markup=_submenu_ts_style(t),
+        )
+        return
+
     if action == "format":
         # Pick whether the tournament runs groups, playoff or both.
         # NOTE: only allowed while the tournament hasn't actually started

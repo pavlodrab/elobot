@@ -213,7 +213,7 @@ def _truncate(
     return truncate_text_with_emoji(text, font, max_w)
 
 
-def _display_name(p: dict) -> str:
+def _display_name(p: dict, mode: str = "full") -> str:
     """Prefer the in-game nickname when set, fall back to telegram username.
 
     Hides the synthetic ``id_<digits>`` placeholder (created for users
@@ -224,13 +224,57 @@ def _display_name(p: dict) -> str:
     ``tournament_players`` JOIN propagates it as ``p['team_tag']``),
     it's woven into the rendered name as ``"<nick> - <Team> (@user)"``
     so standings PNGs make team affiliations visible at a glance.
+
+    ``mode`` toggles which fields are surfaced — picked from the
+    tournament's "🎨 Оформление" → "🪪 Имена" setting:
+
+    * ``"full"`` (default) — preserve historic behaviour (everything).
+    * ``"tag"``  — show only the Telegram ``@username`` (with sane
+      fallbacks when the user has no public handle).
+    * ``"nick"`` — show only the in-game nickname / team tag; hide the
+      ``@-tag`` entirely so brand-centric tournaments look clean.
     """
     nick = (p.get("game_nickname") or "").strip()
     user = (p.get("username") or "").strip()
     tag = (p.get("team_tag") or "").strip()
     is_synthetic = bool(user) and bool(re.match(r"^id_\d+$", user.lower()))
+    pretty_user = "" if is_synthetic else user
+    synth_label = (
+        user.lower().replace("id_", "id ", 1) if is_synthetic else ""
+    )
+
+    mode = (mode or "full").lower()
+    if mode == "tag":
+        # @-tag preferred. Fall back through nick → team tag → "id N"
+        # so the row never renders blank for a synthetic-id user.
+        if pretty_user:
+            return f"@{pretty_user}"
+        if nick:
+            return nick
+        if tag:
+            return tag
+        if synth_label:
+            return synth_label
+        return "?"
+    if mode == "nick":
+        # Nick / team-name preferred. The Telegram handle is hidden
+        # entirely; keep nick + tag combined when both are set so the
+        # team affiliation is still visible.
+        if nick and tag:
+            return f"{nick} - {tag}"
+        if nick:
+            return nick
+        if tag:
+            return tag
+        if pretty_user:
+            return f"@{pretty_user}"
+        if synth_label:
+            return synth_label
+        return "?"
+
+    # mode == "full" — original behaviour, preserved verbatim.
     if is_synthetic:
-        synth = nick or user.lower().replace("id_", "id ", 1)
+        synth = nick or synth_label
         return f"{synth} - {tag}" if tag else synth
     if not user:
         # Last-resort: no username at all. Use the nickname or a dash.
@@ -333,6 +377,7 @@ def list_standings_groups(tid: int) -> list[str]:
 
 def _render(t: dict, standings: dict, qualify_n: int) -> bytes:
     """Draw ``standings`` (whole tournament or a single-group slice) as PNG."""
+    name_mode = (t.get("name_display_mode") or "full").lower()
     title_font  = _font(_s(34), bold=True)
     sub_font    = _font(_s(20), bold=False)
     group_font  = _font(_s(26), bold=True)
@@ -456,7 +501,7 @@ def _render(t: dict, standings: dict, qualify_n: int) -> bytes:
 
             values: list[str] = [
                 str(pos),
-                _display_name(p),
+                _display_name(p, name_mode),
                 str(played),
                 str(p.get("group_wins") or 0),
                 str(p.get("group_draws") or 0),
