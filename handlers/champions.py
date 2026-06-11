@@ -1095,3 +1095,445 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             return
         log.warning("champions callback %r failed: %s", data, e)
         return
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /rename_champion  /add_trophy  /list_trophies  /remove_trophy   (admin)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# These four commands let an admin curate the Hall-of-Fame leaderboard
+# by hand without re-running the importer:
+#
+#   * ``/rename_champion <player> <NewNick>`` — fix the displayed name
+#     (e.g. an auto-created placeholder like ``Paqrez001`` becomes the
+#     person's real in-game tag). Wraps :func:`db.set_game_nickname`.
+#
+#   * ``/add_trophy <player> [type] [date] [#N] [score]`` — manually
+#     award a trophy (creates a fresh ``tournament_winners`` row with a
+#     synthetic negative ``source_message_id`` so it doesn't collide
+#     with imported rows). Defaults: type=``main``, date=today.
+#
+#   * ``/list_trophies <player>`` — print the player's trophies with
+#     their internal record ids, so the admin knows what to feed
+#     ``/remove_trophy``.
+#
+#   * ``/remove_trophy <id>`` — delete one specific trophy by id.
+#
+# All four are admin-only. None of them touches `players.elo`, the
+# active-tournament tables, or any match data — they live entirely
+# inside ``tournament_winners`` + ``players.game_nickname``.
+
+# Tokens admins can pass to spell out today's date.
+_TODAY_TOKENS = frozenset({"today", "сегодня", "now"})
+
+# Tournament-type aliases (so admins can type "гвардиолыч" / "fantasy").
+_TYPE_ALIASES: dict[str, str] = {
+    "main": "main", "g": "main", "guardiola": "main", "гвардиолыч": "main",
+    "fantasy": "fantasy", "f": "fantasy", "fant": "fantasy",
+    "фэнтези": "fantasy", "фентези": "fantasy", "фэнтэзи": "fantasy",
+    "vsa": "vsa",
+    "supercup": "supercup", "super": "supercup", "lg": "supercup",
+    "суперкубок": "supercup", "lgcup": "supercup", "lg_cup": "supercup",
+    "minicup": "supercup", "мини-кубок": "supercup", "мини_кубок": "supercup",
+}
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SCORE_RE = re.compile(r"^\d{1,2}\s*[:\-]\s*\d{1,2}$")
+_TNUM_RE = re.compile(r"^#(\d{1,3})$")
+
+
+def _normalise_score(token: str) -> str:
+    """``"3-1"`` → ``"3:1"``; ``"3:1"`` → ``"3:1"``."""
+    return token.replace("-", ":").replace(" ", "")
+
+
+def _next_manual_msg_id(tournament_type: str) -> int:
+    """Pick the next available negative ``source_message_id`` for this
+    tournament type so manual entries never collide with channel-imported
+    ones (which always have positive Telegram message ids).
+    """
+    conn = db.get_conn()
+    row = conn.execute(
+        "SELECT MIN(source_message_id) AS min_id FROM tournament_winners "
+        "WHERE tournament_type=?",
+        (tournament_type,),
+    ).fetchone()
+    conn.close()
+    min_id: int | None = None
+    if row is not None:
+        try:
+            raw = row["min_id"]
+        except (KeyError, IndexError, TypeError):
+            raw = row[0] if row else None
+        if raw is not None:
+            try:
+                min_id = int(raw)
+            except (TypeError, ValueError):
+                min_id = None
+    base = min_id if (min_id is not None and min_id < 0) else 0
+    return base - 1
+
+
+async def cmd_rename_champion(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/rename_champion <player> <NewDisplayName>`` — admin-only.
+
+    Sets ``players.game_nickname`` for the resolved player. The leaderboard
+    in ``/champions`` reads ``game_nickname`` first, so the change takes
+    effect on the next open. Player is resolved via ``_resolve_player_arg``
+    (so ``@user``, numeric Telegram ID, or current display nick all work);
+    if you want to look one up by their internal players.id, prefix with
+    ``id=`` (e.g. ``id=42``).
+
+    For mass rename (multiple records pointing at the same person),
+    consider ``/relink_player`` instead — that *merges* two player rows
+    rather than just relabelling one.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    args = list(ctx.args or [])
+    if len(args) < 2:
+        await send(
+            update,
+            "Использование: <code>/rename_champion &lt;игрок&gt; &lt;Новый ник&gt;</code>\n\n"
+            "Меняет отображаемый ник игрока в зале славы.\n\n"
+            "Примеры:\n"
+            "  <code>/rename_champion @freshl66 Фрешл</code>\n"
+            "  <code>/rename_champion Paqrez001 Илья</code>\n"
+            "  <code>/rename_champion id=42 Антон</code>\n\n"
+            "ℹ️ Объединить два дубля в одного — <code>/relink_player</code>.",
+        )
+        return
+
+    raw_target = args[0]
+    new_nick = " ".join(args[1:]).strip()
+    if not new_nick:
+        await send(update, "❌ Не указан новый ник.")
+        return
+    if len(new_nick) > 64:
+        await send(update, "❌ Слишком длинный ник (макс. 64 символа).")
+        return
+
+    target: dict | None = None
+    if raw_target.lower().startswith("id="):
+        try:
+            pid = int(raw_target.split("=", 1)[1])
+        except ValueError:
+            pid = -1
+        if pid > 0:
+            target = db.get_player_by_id(pid)
+    if not target:
+        target = _resolve_player_arg(raw_target)
+    if not target:
+        await send(
+            update,
+            f"❌ Не нашёл игрока «<code>{html.escape(raw_target)}</code>».\n\n"
+            "Можно указать @username, числовой Telegram ID, "
+            "текущий отображаемый ник, или <code>id=&lt;players.id&gt;</code>.",
+        )
+        return
+
+    # Don't let one rename collide with another player's already-set nick.
+    existing = db.get_player_by_game_nickname(new_nick)
+    if existing and int(existing["id"]) != int(target["id"]):
+        await send(
+            update,
+            f"❌ Ник <b>{html.escape(new_nick)}</b> уже занят игроком "
+            f"{mention(existing['username'])} (id=<code>{existing['id']}</code>).\n"
+            "Если это один и тот же человек — слей записи через "
+            "<code>/relink_player</code>.",
+        )
+        return
+
+    old_nick = (target.get("game_nickname") or "").strip() or "—"
+    db.set_game_nickname(int(target["id"]), new_nick)
+
+    await send(
+        update,
+        "✅ Ник обновлён.\n"
+        f"Игрок: {mention(target['username'])} "
+        f"(id=<code>{target['id']}</code>)\n"
+        f"  было:  <b>{html.escape(old_nick)}</b>\n"
+        f"  стало: <b>{html.escape(new_nick)}</b>\n\n"
+        "Открой <code>/champions</code> — список обновится с новым ником.",
+    )
+
+
+def _parse_add_trophy_args(rest: list[str]) -> tuple[str, str | None, int | None, str | None, list[str]]:
+    """Pull optional ``[type] [date] [#N] [score]`` tokens from ``rest``
+    in any order. Returns ``(ttype, date_iso, tnum, score, leftovers)``;
+    leftovers go into ``notes`` so admins can leave a free-form comment.
+    """
+    ttype = "main"
+    ttype_set = False
+    date_iso: str | None = None
+    tnum: int | None = None
+    score: str | None = None
+    leftovers: list[str] = []
+
+    for tok in rest:
+        t = tok.strip()
+        if not t:
+            continue
+        low = t.lower()
+
+        # Tournament type (only the first match wins; rest become notes).
+        if not ttype_set and low in _TYPE_ALIASES:
+            ttype = _TYPE_ALIASES[low]
+            ttype_set = True
+            continue
+
+        # Date.
+        if date_iso is None and low in _TODAY_TOKENS:
+            date_iso = datetime.utcnow().strftime("%Y-%m-%d")
+            continue
+        if date_iso is None and _DATE_RE.match(t):
+            try:
+                datetime.strptime(t, "%Y-%m-%d")
+                date_iso = t
+                continue
+            except ValueError:
+                pass  # fall through, becomes part of notes
+
+        # Tournament number ``#N``.
+        if tnum is None:
+            m = _TNUM_RE.match(t)
+            if m:
+                tnum = int(m.group(1))
+                continue
+
+        # Score ``X:Y`` / ``X-Y``.
+        if score is None and _SCORE_RE.match(t):
+            score = _normalise_score(t)
+            continue
+
+        leftovers.append(tok)
+
+    return ttype, date_iso, tnum, score, leftovers
+
+
+async def cmd_add_trophy(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/add_trophy <player> [main|fantasy|vsa|supercup] [YYYY-MM-DD|today] [#N] [X:Y] [notes…]``
+
+    Admin-only. Adds a manual trophy to the Hall of Fame for ``<player>``.
+    Defaults: type ``main`` and ``date=today``. Tournament number and
+    final score are optional and order-independent. Anything that doesn't
+    parse as one of those tokens becomes the row's free-form ``notes``.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    args = list(ctx.args or [])
+    if not args:
+        await send(
+            update,
+            "Использование: <code>/add_trophy &lt;игрок&gt; "
+            "[main|fantasy|vsa|supercup] [YYYY-MM-DD|today] [#N] [X:Y] [заметки]</code>\n\n"
+            "Примеры:\n"
+            "  <code>/add_trophy @freshl66</code> — main, сегодня\n"
+            "  <code>/add_trophy Paqrez001 main 2024-08-27 #3</code>\n"
+            "  <code>/add_trophy @nurstw fantasy 2026-05-30</code>\n"
+            "  <code>/add_trophy @user main 2025-04-01 #42 3:1 ручная правка</code>\n\n"
+            "ℹ️ Записать алиас «Имя → @user» — <code>/alias add</code>.\n"
+            "Удалить трофей — <code>/list_trophies @user</code> "
+            "+ <code>/remove_trophy &lt;id&gt;</code>.",
+        )
+        return
+
+    raw_target, *rest = args
+    target = _resolve_player_arg(raw_target)
+    if not target:
+        await send(
+            update,
+            f"❌ Не нашёл игрока «<code>{html.escape(raw_target)}</code>».\n\n"
+            "Можно указать @username, числовой Telegram ID, или "
+            "его отображаемый ник.",
+        )
+        return
+
+    ttype, date_iso, tnum, score, leftovers = _parse_add_trophy_args(rest)
+    if date_iso is None:
+        date_iso = datetime.utcnow().strftime("%Y-%m-%d")
+
+    by = "@" + (update.effective_user.username or str(update.effective_user.id))
+    notes_text = " ".join(leftovers).strip()
+    note_full = f"manual: added by {by} on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+    if notes_text:
+        note_full += f" — {notes_text}"
+
+    msg_id = _next_manual_msg_id(ttype)
+    try:
+        new_id = db.add_tournament_winner(
+            tournament_type=ttype,
+            tournament_date=date_iso,
+            tournament_number=tnum,
+            winner_player_id=int(target["id"]),
+            runner_up_player_id=None,
+            final_score=score,
+            championship_count=None,
+            source_message_id=msg_id,
+            source_url="",
+            notes=note_full,
+        )
+    except ValueError as e:
+        await send(update, f"❌ {html.escape(str(e))}")
+        return
+
+    label = TYPE_LABELS.get(ttype, ttype)
+    titles_after = len(db.get_titles_for_player(int(target["id"]), ttype))
+    word = _trophies_word(titles_after)
+
+    bits = [
+        "🏆 <b>Трофей добавлен</b>",
+        "",
+        f"Игрок: {_player_label(target)} "
+        f"(id=<code>{target['id']}</code>)",
+        f"Турнир: {label}",
+        f"Дата:   <b>{_format_date(date_iso)}</b>",
+    ]
+    if tnum:
+        bits.append(f"Номер:  #{tnum}")
+    if score:
+        bits.append(f"Счёт:   <b>{html.escape(score)}</b>")
+    bits.append("")
+    bits.append(f"Внутренний id записи: <code>{new_id}</code>")
+    bits.append(
+        f"Всего у игрока в «{label}»: <b>{titles_after}</b> {word}"
+    )
+    bits.append("")
+    bits.append(
+        "Удалить эту запись: <code>/remove_trophy "
+        f"{new_id}</code>."
+    )
+    if notes_text:
+        bits.append("")
+        bits.append(f"Заметка: {html.escape(notes_text)}")
+    await send(update, "\n".join(bits))
+
+
+async def cmd_list_trophies(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/list_trophies <player>`` — admin-only debug helper.
+
+    Lists all trophies for ``<player>`` together with their internal
+    record ids and tournament types, so the admin can pass the right id
+    to ``/remove_trophy``. Unlike ``/champion``, this view *only* shows
+    rows where the player is the winner (silver / bronze / runner-up
+    placements aren't deletable as "trophies").
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    args = list(ctx.args or [])
+    if not args:
+        await send(
+            update,
+            "Использование: <code>/list_trophies &lt;игрок&gt;</code>\n\n"
+            "Покажет все его трофеи с внутренними ID — их можно "
+            "скармливать <code>/remove_trophy &lt;id&gt;</code>.",
+        )
+        return
+
+    target = _resolve_player_arg(args[0])
+    if not target:
+        await send(
+            update,
+            f"❌ Не нашёл игрока «<code>{html.escape(args[0])}</code>».",
+        )
+        return
+
+    rows = db.get_titles_for_player(int(target["id"]))
+    if not rows:
+        await send(
+            update,
+            f"У {_player_label(target)} нет трофеев в зале славы.",
+        )
+        return
+
+    lines = [
+        f"🏆 Трофеи: {_player_label(target)} "
+        f"(id=<code>{target['id']}</code>) — всего <b>{len(rows)}</b>",
+        "",
+    ]
+    for r in rows:
+        rec_id = r.get("id")
+        ttype = r.get("tournament_type") or "?"
+        label = TYPE_LABELS.get(ttype, ttype)
+        date_label = _format_date(r.get("tournament_date"))
+        date_html = _post_link(r.get("source_url"), date_label)
+        bits: list[str] = [f"#<code>{rec_id}</code>", label, date_html]
+        tnum = r.get("tournament_number")
+        if tnum:
+            bits.append(f"тур #{tnum}")
+        score = r.get("final_score")
+        if score:
+            bits.append(f"({html.escape(str(score))})")
+        notes = (r.get("notes") or "").strip()
+        if notes.startswith("manual:"):
+            bits.append("✏️ ручная")
+        lines.append("• " + " · ".join(bits))
+    lines.append("")
+    lines.append(
+        "Удалить запись: <code>/remove_trophy &lt;id&gt;</code> "
+        "(id из этого списка)."
+    )
+    await send(update, "\n".join(lines))
+
+
+async def cmd_remove_trophy(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/remove_trophy <id>`` — admin-only.
+
+    Deletes one ``tournament_winners`` row by primary-key id. The id
+    comes from ``/list_trophies`` (or from the success message of
+    ``/add_trophy``). The deletion is final — re-running the importer
+    later will re-create channel-sourced rows, but manually-added
+    trophies have no source post and would have to be re-entered by
+    hand.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    args = list(ctx.args or [])
+    if not args or not args[0].lstrip("-").isdigit():
+        await send(
+            update,
+            "Использование: <code>/remove_trophy &lt;id&gt;</code>\n\n"
+            "ID — внутренний id записи из <code>/list_trophies @user</code>.",
+        )
+        return
+
+    rec_id = int(args[0])
+    rec = db.get_tournament_winner_by_id(rec_id)
+    if not rec:
+        await send(update, f"❌ Записи с id=<code>{rec_id}</code> нет.")
+        return
+
+    winner_pid = rec.get("winner_player_id")
+    winner = db.get_player_by_id(int(winner_pid)) if winner_pid else None
+    ttype = rec.get("tournament_type") or "?"
+    label = TYPE_LABELS.get(ttype, ttype)
+    date_label = _format_date(rec.get("tournament_date"))
+
+    if not db.delete_tournament_winner(rec_id):
+        await send(
+            update,
+            f"⚠️ Не удалось удалить запись id=<code>{rec_id}</code> "
+            "(возможно, удалена параллельно).",
+        )
+        return
+
+    titles_left = (
+        len(db.get_titles_for_player(int(winner_pid), ttype))
+        if winner_pid else 0
+    )
+    word = _trophies_word(titles_left)
+    await send(
+        update,
+        "🗑 <b>Трофей удалён</b>\n\n"
+        f"Запись: <code>{rec_id}</code> — {label}, {date_label}\n"
+        f"Игрок:  {_player_label(winner)}\n\n"
+        f"Осталось у игрока в «{label}»: <b>{titles_left}</b> {word}.",
+    )
