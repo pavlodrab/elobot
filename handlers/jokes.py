@@ -47,7 +47,11 @@ import urllib.request
 from datetime import datetime
 from typing import Optional
 
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
@@ -616,61 +620,925 @@ async def log_chat_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Slash commands
+# Slash commands & inline menu (/jokes)
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# UX model (since 2026-06): the only admin-facing slash command is
+# ``/jokes`` — it opens an inline-keyboard panel where every setting
+# is a button. The legacy ``/jokes_on``/``/jokes_off``/``/jokes_*``
+# commands were retired; their handlers were removed and only ``/joke``
+# (manual trigger) and ``/jokes_history`` (public read) survive at the
+# slash-command level.
 
-def _format_jokes_settings(settings: dict, *, in_chat_id: str | int) -> str:
-    """Pretty-print current per-chat config + status for /jokes_settings."""
-    enabled = bool(settings.get("jokes_enabled"))
-    interval = int(settings.get("jokes_interval_minutes") or 0)
-    mode = settings.get("jokes_mode") or "normal"
-    context = int(settings.get("jokes_context_size") or 100)
-    min_msgs = int(settings.get("jokes_min_msgs_since_last") or 20)
-    override = (settings.get("jokes_model_override") or "").strip()
-    last_at = settings.get("jokes_last_joke_at") or "—"
+# Preset values shown as quick-pick buttons in the submenus. Each
+# submenu also has an "✏️ Ввести вручную" escape hatch that drops the
+# user into a pending-input state consumed by
+# :func:`handle_pending_jokes_text`.
+_JOKES_INTV_PRESETS: tuple[int, ...] = (30, 60, 120, 240, 360, 720, 1440)
+_JOKES_CTX_PRESETS: tuple[int, ...] = (20, 50, 100, 150, 200)
+_JOKES_MIN_PRESETS: tuple[int, ...] = (0, 5, 10, 20, 50, 100)
 
-    last_at_label = str(last_at) if last_at and last_at != "—" else "—"
-    # Count how many messages logged since last joke.
+# Pretty labels for mode buttons; the underlying value is the bare
+# JOKES_VALID_MODES key.
+_JOKES_MODE_LABELS: dict[str, str] = {
+    "soft":   "😇 soft",
+    "normal": "🙂 normal",
+    "spicy":  "🌶 spicy",
+    "savage": "🔥 savage",
+    "absurd": "🌀 absurd",
+}
+
+
+def _intv_label(minutes: int) -> str:
+    """Human-readable interval label for status panels & buttons."""
+    if minutes <= 0:
+        return "выкл"
+    if minutes == 1440:
+        return "каждые 1440 мин (сутки)"
+    return f"каждые {minutes} мин"
+
+
+def _jokes_menu_text(chat_id: str | int) -> str:
+    """Render the main panel body for ``/jokes`` (and any 'refresh' or
+    'back to main' callback). Pure read — touches DB only.
+    """
+    s = db.get_jokes_settings(chat_id)
+    enabled  = bool(s.get("jokes_enabled"))
+    interval = int(s.get("jokes_interval_minutes") or 0)
+    mode     = s.get("jokes_mode") or "normal"
+    context  = int(s.get("jokes_context_size") or 100)
+    min_msgs = int(s.get("jokes_min_msgs_since_last") or 20)
+    override = (s.get("jokes_model_override") or "").strip()
+    last_at  = s.get("jokes_last_joke_at") or "—"
+
+    log_total = len(db.recent_chat_messages(chat_id, limit=db.JOKES_MAX_CONTEXT))
     since_last = db.count_messages_since(
-        in_chat_id, str(last_at) if last_at and last_at != "—" else None,
+        chat_id,
+        str(last_at) if last_at and last_at != "—" else None,
     )
-    log_total = len(db.recent_chat_messages(in_chat_id, limit=db.JOKES_MAX_CONTEXT))
 
     state_lbl = "🟢 включено" if enabled else "🔴 выключено"
-    interval_lbl = "выкл" if interval <= 0 else f"каждые {interval} мин"
-    mode_lbl = mode
-
-    chain = _joke_models()
     if override:
-        chain_lbl = f"<code>{html.escape(override)}</code> → " + " → ".join(
-            f"<code>{html.escape(m)}</code>" for m in chain
-        )
+        model_lbl = f"<code>{html.escape(override)}</code>"
     else:
-        chain_lbl = " → ".join(f"<code>{html.escape(m)}</code>" for m in chain)
+        model_lbl = "<i>дефолтная цепочка</i>"
 
     return (
-        "🃏 <b>Настройки авто-шуток</b>\n\n"
-        f"Состояние: {state_lbl}\n"
-        f"Интервал авто-шуток: <b>{interval_lbl}</b>\n"
-        f"Режим: <b>{html.escape(mode_lbl)}</b>\n"
-        f"Контекст для шутки: <b>{context}</b> сообщений\n"
-        f"Мин. новых сообщений после последней шутки: <b>{min_msgs}</b>\n\n"
-        f"Последняя шутка: <b>{html.escape(last_at_label)}</b>\n"
-        f"Сообщений в логе сейчас: <b>{log_total}</b> "
-        f"(после последней шутки: <b>{since_last}</b>)\n\n"
-        f"Модель (цепочка fallback): {chain_lbl}\n\n"
-        "<i>Команды:</i>\n"
-        "  /jokes_on, /jokes_off — вкл/выкл логирование и авто-шутки\n"
-        "  /jokes_interval &lt;минуты&gt; — частота (0 = только вручную)\n"
-        f"  /jokes_mode &lt;{ '|'.join(db.JOKES_VALID_MODES) }&gt;\n"
-        "  /jokes_context &lt;N&gt; — сколько сообщений в промпт "
-        f"({db.JOKES_MIN_CONTEXT}..{db.JOKES_MAX_CONTEXT})\n"
-        "  /jokes_minmsgs &lt;N&gt; — порог накопления для авто-шутки\n"
-        "  /jokes_setmodel &lt;model|reset&gt; — модель этого чата (root)\n"
-        "  /jokes_clear_log — очистить лог сообщений\n"
-        "  /joke — выдать шутку сейчас\n"
-        "  /jokes_history [N] — последние N шуток (всем)"
+        "🃏 <b>Авто-шутки</b>\n\n"
+        f"Состояние: <b>{state_lbl}</b>\n"
+        f"Интервал: <b>{html.escape(_intv_label(interval))}</b>\n"
+        f"Режим: <b>{html.escape(mode)}</b>\n"
+        f"Контекст: <b>{context}</b> сообщений\n"
+        f"Порог: <b>{min_msgs}</b> новых перед авто-шуткой\n"
+        f"Модель: {model_lbl}\n"
+        f"Последняя: <b>{html.escape(str(last_at))}</b>\n"
+        f"В логе: <b>{log_total}</b> сообщений "
+        f"(после последней: <b>{since_last}</b>)"
     )
+
+
+def _jokes_menu_kb(
+    chat_id: str | int, *, enabled: bool, is_root: bool,
+) -> InlineKeyboardMarkup:
+    """Main panel keyboard. The "🤖 Модель ▸" row is only shown to
+    root admins; all other rows are visible to anyone but each
+    callback re-checks ``is_admin`` before mutating state.
+    """
+    cid = str(chat_id)
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("▶️ Шутку сейчас", callback_data=f"j:run:{cid}")],
+        [
+            InlineKeyboardButton(
+                "🔴 Выключить" if enabled else "🟢 Включить",
+                callback_data=f"j:toggle:{cid}",
+            ),
+            InlineKeyboardButton("📜 История", callback_data=f"j:hist:{cid}"),
+        ],
+        [InlineKeyboardButton("⏰ Интервал ▸", callback_data=f"j:intv:{cid}")],
+        [InlineKeyboardButton("🌶 Режим ▸",   callback_data=f"j:mode:{cid}")],
+        [InlineKeyboardButton("🧠 Контекст ▸", callback_data=f"j:ctx:{cid}")],
+        [InlineKeyboardButton("📊 Порог накопления ▸", callback_data=f"j:min:{cid}")],
+    ]
+    if is_root:
+        rows.append(
+            [InlineKeyboardButton("🤖 Модель ▸ (root)", callback_data=f"j:model:{cid}")]
+        )
+    rows.append([
+        InlineKeyboardButton("🗑 Очистить лог", callback_data=f"j:clear:{cid}"),
+        InlineKeyboardButton("🔄 Обновить",     callback_data=f"j:menu:{cid}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _kb_back_to_menu(chat_id: str | int) -> list[InlineKeyboardButton]:
+    """Common single-button row used at the bottom of every submenu."""
+    return [InlineKeyboardButton("⬅️ Назад", callback_data=f"j:menu:{chat_id}")]
+
+
+def _jokes_intv_kb(chat_id: str | int) -> InlineKeyboardMarkup:
+    """⏰ Interval submenu — preset minutes + manual entry + 'off'."""
+    cid = str(chat_id)
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("⛔ Выкл", callback_data=f"j:intv:set:{cid}:0")],
+    ]
+    # Pack presets 3-per-row for a tidy grid.
+    row: list[InlineKeyboardButton] = []
+    for n in _JOKES_INTV_PRESETS:
+        label = "1440 (сутки)" if n == 1440 else str(n)
+        row.append(InlineKeyboardButton(label, callback_data=f"j:intv:set:{cid}:{n}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("✏️ Ввести вручную", callback_data=f"j:intv:edit:{cid}")])
+    rows.append(_kb_back_to_menu(cid))
+    return InlineKeyboardMarkup(rows)
+
+
+def _jokes_mode_kb(chat_id: str | int) -> InlineKeyboardMarkup:
+    """🌶 Mode submenu — fixed list (matches db.JOKES_VALID_MODES)."""
+    cid = str(chat_id)
+    items = list(db.JOKES_VALID_MODES)
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for m in items:
+        label = _JOKES_MODE_LABELS.get(m, m)
+        row.append(InlineKeyboardButton(label, callback_data=f"j:mode:set:{cid}:{m}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(_kb_back_to_menu(cid))
+    return InlineKeyboardMarkup(rows)
+
+
+def _jokes_ctx_kb(chat_id: str | int) -> InlineKeyboardMarkup:
+    """🧠 Context-size submenu — preset N + manual entry."""
+    cid = str(chat_id)
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for n in _JOKES_CTX_PRESETS:
+        row.append(InlineKeyboardButton(str(n), callback_data=f"j:ctx:set:{cid}:{n}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("✏️ Ввести вручную", callback_data=f"j:ctx:edit:{cid}")])
+    rows.append(_kb_back_to_menu(cid))
+    return InlineKeyboardMarkup(rows)
+
+
+def _jokes_min_kb(chat_id: str | int) -> InlineKeyboardMarkup:
+    """📊 Min-messages-since-last submenu — preset N + manual entry."""
+    cid = str(chat_id)
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for n in _JOKES_MIN_PRESETS:
+        row.append(InlineKeyboardButton(str(n), callback_data=f"j:min:set:{cid}:{n}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("✏️ Ввести вручную", callback_data=f"j:min:edit:{cid}")])
+    rows.append(_kb_back_to_menu(cid))
+    return InlineKeyboardMarkup(rows)
+
+
+def _jokes_model_text(chat_id: str | int) -> str:
+    """Body of the 🤖 Модель submenu (root only)."""
+    s = db.get_jokes_settings(chat_id)
+    override = (s.get("jokes_model_override") or "").strip()
+    chain = _joke_models()
+    chain_html = "\n".join(f"   → <code>{html.escape(m)}</code>" for m in chain)
+    if override:
+        cur_lbl = f"<code>{html.escape(override)}</code> (override)"
+    else:
+        cur_lbl = "<i>дефолтная цепочка</i>"
+    return (
+        "🤖 <b>Модель этого чата</b>\n\n"
+        f"Сейчас: {cur_lbl}\n\n"
+        "Дефолтная цепочка fallback:\n"
+        f"{chain_html}\n\n"
+        "<i>Override идёт первым; если он недоступен, используется цепочка.</i>"
+    )
+
+
+def _jokes_model_kb(chat_id: str | int) -> InlineKeyboardMarkup:
+    """🤖 Модель submenu keyboard."""
+    cid = str(chat_id)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Ввести свою модель", callback_data=f"j:model:edit:{cid}")],
+        [InlineKeyboardButton("↺ Сбросить на дефолт",  callback_data=f"j:model:reset:{cid}")],
+        _kb_back_to_menu(cid),
+    ])
+
+
+def _jokes_history_text(chat_id: str | int, *, limit: int = 5) -> str:
+    """Body for the 📜 История submenu — last N posted jokes (HTML)."""
+    rows = db.list_jokes_history(chat_id, limit=limit)
+    if not rows:
+        return "📭 В этом чате ещё не было шуток."
+    lines = [f"📜 <b>Последние {len(rows)} шуток</b>"]
+    for r in rows:
+        ts = (r.get("ts") or "—")[:16]
+        mode = r.get("mode") or "—"
+        src  = "ручная" if r.get("source") == "manual" else "авто"
+        body = (r.get("text") or "").strip()
+        if len(body) > 300:
+            body = body[:300].rstrip() + "…"
+        body = _strip_mentions(html.escape(body))
+        lines.append("")
+        lines.append(
+            f"<i>{html.escape(str(ts))} · {html.escape(mode)} · {src}</i>"
+        )
+        lines.append(body)
+    return "\n".join(lines)
+
+
+def _jokes_clear_kb(chat_id: str | int) -> InlineKeyboardMarkup:
+    """🗑 Confirmation prompt before wiping the rolling chat_messages log."""
+    cid = str(chat_id)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("❌ Нет",          callback_data=f"j:menu:{cid}"),
+            InlineKeyboardButton("✅ Да, удалить", callback_data=f"j:clear:yes:{cid}"),
+        ],
+    ])
+
+
+async def _send_or_edit(
+    query, *, text: str, reply_markup=None,
+) -> None:
+    """Edit the panel message in place when possible; fall back to a
+    fresh ``send_message`` if Telegram refuses (e.g. the message is
+    too old, or already has identical content). Errors are logged
+    and swallowed — the panel is best-effort UI.
+    """
+    try:
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
+        )
+        return
+    except TelegramError as e:
+        msg = str(e).lower()
+        # "Message is not modified" is benign — same content shown.
+        if "not modified" in msg:
+            return
+        log.debug("jokes menu edit failed (%s); falling back to send", e)
+    # Fallback: post a fresh panel.
+    try:
+        await query.message.chat.send_message(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
+        )
+    except TelegramError:
+        log.warning("jokes menu fallback send also failed", exc_info=True)
+
+
+async def cmd_jokes_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/jokes`` (alias ``/jokes_menu``) — admin: open the inline
+    settings panel. Replaces the retired
+    ``/jokes_on/off/interval/mode/context/minmsgs/setmodel/clear_log/settings``
+    family. Body shown is identical for everyone but mutating
+    callbacks check ``is_admin`` per-tap.
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    if user is None or chat is None:
+        return
+    if not is_admin(user.id):
+        await send(update, "❌ Только админ.")
+        return
+    s = db.get_jokes_settings(str(chat.id))
+    body = _jokes_menu_text(str(chat.id))
+    kb = _jokes_menu_kb(
+        str(chat.id),
+        enabled=bool(s.get("jokes_enabled")),
+        is_root=is_root_admin(user.id),
+    )
+    await send(update, body, reply_markup=kb)
+
+
+async def cb_jokes_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Single dispatcher for the ``j:*`` callback namespace.
+
+    Layout::
+
+        j:menu:<cid>                    main panel (refresh / back)
+        j:run:<cid>                     ▶️ generate joke now
+        j:toggle:<cid>                  🟢/🔴 enable/disable
+        j:hist:<cid>                    📜 history view
+        j:intv:<cid>                    ⏰ interval submenu
+        j:intv:set:<cid>:<n>            apply interval preset
+        j:intv:edit:<cid>               manual interval entry → pending
+        j:mode:<cid>                    🌶 mode submenu
+        j:mode:set:<cid>:<name>         apply mode
+        j:ctx:<cid>                     🧠 context submenu
+        j:ctx:set:<cid>:<n>             apply context size preset
+        j:ctx:edit:<cid>                manual context entry → pending
+        j:min:<cid>                     📊 min-msgs submenu
+        j:min:set:<cid>:<n>             apply min-msgs preset
+        j:min:edit:<cid>                manual min-msgs entry → pending
+        j:model:<cid>                   🤖 model submenu (root)
+        j:model:edit:<cid>              manual model entry → pending (root)
+        j:model:reset:<cid>             clear override → default chain (root)
+        j:clear:<cid>                   🗑 confirm wipe
+        j:clear:yes:<cid>               🗑 wipe confirmed
+    """
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    try:
+        await query.answer()
+    except TelegramError:
+        pass
+    user = update.effective_user
+    if user is None:
+        return
+    parts = query.data.split(":")
+    # parts[0] == "j"
+    if len(parts) < 2:
+        return
+    action = parts[1]
+
+    # All callbacks except ``hist`` are admin-only. We read the chat
+    # id from the callback_data (parts[2:]) rather than the message
+    # context so it survives the panel being forwarded etc.
+    def _cid_at(idx: int) -> str | None:
+        return parts[idx] if len(parts) > idx else None
+
+    is_admin_user = is_admin(user.id)
+    is_root_user  = is_root_admin(user.id)
+
+    async def _show_main(cid: str) -> None:
+        s = db.get_jokes_settings(cid)
+        await _send_or_edit(
+            query,
+            text=_jokes_menu_text(cid),
+            reply_markup=_jokes_menu_kb(
+                cid,
+                enabled=bool(s.get("jokes_enabled")),
+                is_root=is_root_user,
+            ),
+        )
+
+    # ── Main panel: j:menu:<cid> ───────────────────────────────────────
+    if action == "menu":
+        cid = _cid_at(2)
+        if not cid:
+            return
+        await _show_main(cid)
+        return
+
+    # ── ▶️ Generate now: j:run:<cid> ───────────────────────────────────
+    if action == "run":
+        cid = _cid_at(2)
+        if not cid:
+            return
+        if not is_admin_user:
+            try:
+                await query.answer("Только админ.", show_alert=True)
+            except TelegramError:
+                pass
+            return
+        # Refuse fast if the chat hasn't enabled logging yet.
+        if not db.is_jokes_enabled(cid):
+            try:
+                await query.answer(
+                    "Сначала нажми «🟢 Включить» — нужны логи сообщений.",
+                    show_alert=True,
+                )
+            except TelegramError:
+                pass
+            return
+        cd = _manual_cooldown_remaining(cid)
+        if cd > 0:
+            try:
+                await query.answer(f"⏳ Подожди ещё {cd} сек — анти-спам.", show_alert=True)
+            except TelegramError:
+                pass
+            return
+        rows_count = len(db.recent_chat_messages(cid, limit=db.JOKES_MAX_CONTEXT))
+        if rows_count < db.JOKES_MIN_CONTEXT:
+            try:
+                await query.answer(
+                    f"📭 Слишком мало сообщений ({rows_count}/{db.JOKES_MIN_CONTEXT}).",
+                    show_alert=True,
+                )
+            except TelegramError:
+                pass
+            return
+        _manual_cooldown_set(cid)
+        # Generate + post in the chat (NOT inside the panel — we want
+        # the joke to be a normal chat message everyone can react to).
+        chat_obj = query.message.chat if query.message else None
+        notice = None
+        try:
+            if chat_obj is not None:
+                notice = await chat_obj.send_message("🤖 Думаю…")
+        except TelegramError:
+            notice = None
+        outcome = await generate_joke_for_chat(cid)
+        if outcome.text:
+            final_text = outcome.text
+            parse_mode = None
+        else:
+            diag = "\n".join(outcome.attempts[-3:]) if outcome.attempts else ""
+            final_text = (
+                "😶 Шутка не вышла. Все модели вернули пустоту или ошибку.\n"
+                + (f"<code>{html.escape(diag[:300])}</code>" if diag else "")
+            )
+            parse_mode = "HTML"
+        posted = False
+        if notice is not None:
+            try:
+                await notice.edit_text(
+                    final_text,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=True,
+                )
+                posted = True
+            except TelegramError:
+                posted = False
+        if not posted and chat_obj is not None:
+            try:
+                await chat_obj.send_message(
+                    final_text,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=True,
+                )
+                posted = True
+            except TelegramError as e:
+                log.warning("j:run failed to post in chat %s: %s", cid, e)
+        if outcome.text and posted:
+            try:
+                db.add_joke_history(
+                    cid,
+                    mode=outcome.mode,
+                    model=outcome.model,
+                    text=outcome.text,
+                    context_size=outcome.context_size,
+                    source="manual",
+                )
+                db.mark_chat_joke_sent(cid)
+            except Exception:
+                log.exception("j:run history bookkeeping failed for chat %s", cid)
+        # Refresh the panel so "Last joke" / "messages since" reflect reality.
+        await _show_main(cid)
+        return
+
+    # ── 🟢/🔴 Toggle: j:toggle:<cid> ───────────────────────────────────
+    if action == "toggle":
+        cid = _cid_at(2)
+        if not cid:
+            return
+        if not is_admin_user:
+            try:
+                await query.answer("Только админ.", show_alert=True)
+            except TelegramError:
+                pass
+            return
+        cur = db.is_jokes_enabled(cid)
+        db.set_jokes_enabled(cid, not cur)
+        await _show_main(cid)
+        return
+
+    # ── 📜 History: j:hist:<cid>  (public) ─────────────────────────────
+    if action == "hist":
+        cid = _cid_at(2)
+        if not cid:
+            return
+        await _send_or_edit(
+            query,
+            text=_jokes_history_text(cid, limit=5),
+            reply_markup=InlineKeyboardMarkup([_kb_back_to_menu(cid)]),
+        )
+        return
+
+    # ── ⏰ Interval ────────────────────────────────────────────────────
+    if action == "intv":
+        sub = _cid_at(2)
+        if sub == "set":
+            cid = _cid_at(3)
+            n_raw = _cid_at(4)
+            if not cid or n_raw is None:
+                return
+            if not is_admin_user:
+                try:
+                    await query.answer("Только админ.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            try:
+                n = int(n_raw)
+            except ValueError:
+                return
+            db.set_jokes_interval(cid, n)
+            await _show_main(cid)
+            return
+        if sub == "edit":
+            cid = _cid_at(3)
+            if not cid or not is_admin_user:
+                if not is_admin_user:
+                    try:
+                        await query.answer("Только админ.", show_alert=True)
+                    except TelegramError:
+                        pass
+                return
+            ctx.user_data["pending_jokes_input"] = {"kind": "interval", "chat_id": cid}
+            try:
+                await query.message.reply_text(
+                    "✏️ Введи интервал в минутах одним сообщением.\n"
+                    f"Допустимо: <b>0</b> (выкл) или "
+                    f"<b>{db.JOKES_MIN_INTERVAL_MIN}..{db.JOKES_MAX_INTERVAL_MIN}</b>.\n"
+                    "Отмена: <code>отмена</code>.",
+                    parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
+            return
+        # Plain ``j:intv:<cid>`` → submenu.
+        cid = sub
+        if not cid:
+            return
+        cur = int(db.get_jokes_settings(cid).get("jokes_interval_minutes") or 0)
+        await _send_or_edit(
+            query,
+            text=(
+                "⏰ <b>Интервал авто-шуток</b>\n\n"
+                f"Сейчас: <b>{html.escape(_intv_label(cur))}</b>\n\n"
+                f"Допустимо: <b>0</b> (выкл) или "
+                f"<b>{db.JOKES_MIN_INTERVAL_MIN}..{db.JOKES_MAX_INTERVAL_MIN}</b> мин."
+            ),
+            reply_markup=_jokes_intv_kb(cid),
+        )
+        return
+
+    # ── 🌶 Mode ────────────────────────────────────────────────────────
+    if action == "mode":
+        sub = _cid_at(2)
+        if sub == "set":
+            cid = _cid_at(3)
+            mode = _cid_at(4)
+            if not cid or not mode:
+                return
+            if not is_admin_user:
+                try:
+                    await query.answer("Только админ.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            if mode not in db.JOKES_VALID_MODES:
+                try:
+                    await query.answer("Неизвестный режим.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            db.set_jokes_mode(cid, mode)
+            await _show_main(cid)
+            return
+        # Plain ``j:mode:<cid>`` → submenu.
+        cid = sub
+        if not cid:
+            return
+        cur = db.get_jokes_settings(cid).get("jokes_mode") or "normal"
+        await _send_or_edit(
+            query,
+            text=(
+                "🌶 <b>Упоротость</b>\n\n"
+                f"Сейчас: <b>{html.escape(cur)}</b>\n\n"
+                "<i>soft → normal → spicy → savage → absurd</i>"
+            ),
+            reply_markup=_jokes_mode_kb(cid),
+        )
+        return
+
+    # ── 🧠 Context size ────────────────────────────────────────────────
+    if action == "ctx":
+        sub = _cid_at(2)
+        if sub == "set":
+            cid = _cid_at(3)
+            n_raw = _cid_at(4)
+            if not cid or n_raw is None:
+                return
+            if not is_admin_user:
+                try:
+                    await query.answer("Только админ.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            try:
+                n = int(n_raw)
+            except ValueError:
+                return
+            db.set_jokes_context_size(cid, n)
+            await _show_main(cid)
+            return
+        if sub == "edit":
+            cid = _cid_at(3)
+            if not cid:
+                return
+            if not is_admin_user:
+                try:
+                    await query.answer("Только админ.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            ctx.user_data["pending_jokes_input"] = {"kind": "context", "chat_id": cid}
+            try:
+                await query.message.reply_text(
+                    "✏️ Введи размер контекста (число сообщений) одним сообщением.\n"
+                    f"Допустимо: <b>{db.JOKES_MIN_CONTEXT}..{db.JOKES_MAX_CONTEXT}</b>.\n"
+                    "Отмена: <code>отмена</code>.",
+                    parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
+            return
+        cid = sub
+        if not cid:
+            return
+        cur = int(db.get_jokes_settings(cid).get("jokes_context_size") or 100)
+        await _send_or_edit(
+            query,
+            text=(
+                "🧠 <b>Размер контекста</b>\n\n"
+                f"Сейчас: <b>{cur}</b> сообщений\n\n"
+                f"Допустимо: <b>{db.JOKES_MIN_CONTEXT}..{db.JOKES_MAX_CONTEXT}</b>."
+            ),
+            reply_markup=_jokes_ctx_kb(cid),
+        )
+        return
+
+    # ── 📊 Min messages since last ─────────────────────────────────────
+    if action == "min":
+        sub = _cid_at(2)
+        if sub == "set":
+            cid = _cid_at(3)
+            n_raw = _cid_at(4)
+            if not cid or n_raw is None:
+                return
+            if not is_admin_user:
+                try:
+                    await query.answer("Только админ.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            try:
+                n = int(n_raw)
+            except ValueError:
+                return
+            db.set_jokes_min_msgs_since_last(cid, n)
+            await _show_main(cid)
+            return
+        if sub == "edit":
+            cid = _cid_at(3)
+            if not cid:
+                return
+            if not is_admin_user:
+                try:
+                    await query.answer("Только админ.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            ctx.user_data["pending_jokes_input"] = {"kind": "minmsgs", "chat_id": cid}
+            try:
+                await query.message.reply_text(
+                    "✏️ Введи порог накопления (число) одним сообщением.\n"
+                    "Допустимо: <b>0</b> и больше (0 = без порога).\n"
+                    "Отмена: <code>отмена</code>.",
+                    parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
+            return
+        cid = sub
+        if not cid:
+            return
+        cur = int(db.get_jokes_settings(cid).get("jokes_min_msgs_since_last") or 20)
+        await _send_or_edit(
+            query,
+            text=(
+                "📊 <b>Порог накопления</b>\n\n"
+                f"Сейчас: <b>{cur}</b> новых сообщений\n\n"
+                "<i>Авто-шутка не пойдёт, пока в чате не накопится N "
+                "новых сообщений после прошлой шутки.</i>"
+            ),
+            reply_markup=_jokes_min_kb(cid),
+        )
+        return
+
+    # ── 🤖 Model (root only) ───────────────────────────────────────────
+    if action == "model":
+        sub = _cid_at(2)
+        if not is_root_user:
+            try:
+                await query.answer("Только root-админ.", show_alert=True)
+            except TelegramError:
+                pass
+            return
+        if sub == "edit":
+            cid = _cid_at(3)
+            if not cid:
+                return
+            ctx.user_data["pending_jokes_input"] = {"kind": "model", "chat_id": cid}
+            try:
+                await query.message.reply_text(
+                    "✏️ Введи имя модели OpenRouter одним сообщением "
+                    "(например <code>google/gemma-4-31b-it:free</code>).\n"
+                    "Сброс на дефолт: <code>reset</code>.\n"
+                    "Отмена: <code>отмена</code>.",
+                    parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
+            return
+        if sub == "reset":
+            cid = _cid_at(3)
+            if not cid:
+                return
+            db.set_jokes_model_override(cid, None)
+            await _show_main(cid)
+            return
+        # Plain ``j:model:<cid>`` → submenu.
+        cid = sub
+        if not cid:
+            return
+        await _send_or_edit(
+            query,
+            text=_jokes_model_text(cid),
+            reply_markup=_jokes_model_kb(cid),
+        )
+        return
+
+    # ── 🗑 Clear log ───────────────────────────────────────────────────
+    if action == "clear":
+        sub = _cid_at(2)
+        if sub == "yes":
+            cid = _cid_at(3)
+            if not cid:
+                return
+            if not is_admin_user:
+                try:
+                    await query.answer("Только админ.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            n = db.clear_chat_messages_log(cid)
+            try:
+                await query.answer(f"🗑 Удалено: {n}.")
+            except TelegramError:
+                pass
+            await _show_main(cid)
+            return
+        # Plain ``j:clear:<cid>`` → confirm prompt.
+        cid = sub
+        if not cid:
+            return
+        if not is_admin_user:
+            try:
+                await query.answer("Только админ.", show_alert=True)
+            except TelegramError:
+                pass
+            return
+        log_total = len(db.recent_chat_messages(cid, limit=db.JOKES_MAX_CONTEXT))
+        await _send_or_edit(
+            query,
+            text=(
+                "🗑 <b>Удалить весь лог сообщений?</b>\n\n"
+                f"В чате накоплено: <b>{log_total}</b>.\n"
+                "Это <i>не</i> удалит историю шуток и не сбросит настройки."
+            ),
+            reply_markup=_jokes_clear_kb(cid),
+        )
+        return
+
+    # Unknown action — silently ignore (defensive: future renames).
+    log.debug("cb_jokes_menu: unknown action %r in %r", action, query.data)
+
+
+async def handle_pending_jokes_text(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Consume the next non-command text message after a user tapped
+    "✏️ Ввести вручную" in any of the submenus. Returns ``True`` when
+    the message was consumed (so the master text router knows to stop).
+
+    Pending state shape::
+
+        ctx.user_data["pending_jokes_input"] = {
+            "kind": "interval" | "context" | "minmsgs" | "model",
+            "chat_id": "<cid>",
+        }
+    """
+    pending = ctx.user_data.get("pending_jokes_input")
+    if not pending or not isinstance(pending, dict):
+        return False
+    msg = update.effective_message
+    user = update.effective_user
+    if msg is None or user is None:
+        return False
+    txt = (msg.text or "").strip()
+    if not txt:
+        return False
+
+    kind = pending.get("kind")
+    cid = str(pending.get("chat_id") or "")
+    if not kind or not cid:
+        ctx.user_data.pop("pending_jokes_input", None)
+        return False
+
+    # Cancel keyword.
+    if txt.lower() in ("отмена", "cancel", "отменить"):
+        ctx.user_data.pop("pending_jokes_input", None)
+        await send(update, "❌ Отменено.")
+        return True
+
+    # All four kinds require admin (and model — root). Re-check
+    # because the pending state could outlive a permission change.
+    if kind == "model":
+        if not is_root_admin(user.id):
+            ctx.user_data.pop("pending_jokes_input", None)
+            await send(update, "❌ Только root-админ.")
+            return True
+    else:
+        if not is_admin(user.id):
+            ctx.user_data.pop("pending_jokes_input", None)
+            await send(update, "❌ Только админ.")
+            return True
+
+    ctx.user_data.pop("pending_jokes_input", None)
+
+    if kind == "interval":
+        if not txt.lstrip("-").isdigit():
+            await send(update, "❌ Нужно целое число минут (или <code>отмена</code>).")
+            return True
+        try:
+            n = int(txt)
+        except ValueError:
+            await send(update, "❌ Некорректное число.")
+            return True
+        db.set_jokes_interval(cid, n)
+        new = int(db.get_jokes_settings(cid).get("jokes_interval_minutes") or 0)
+        await send(update, f"✅ Интервал: <b>{html.escape(_intv_label(new))}</b>.")
+        return True
+
+    if kind == "context":
+        if not txt.lstrip("-").isdigit():
+            await send(update, "❌ Нужно целое число (или <code>отмена</code>).")
+            return True
+        try:
+            n = int(txt)
+        except ValueError:
+            await send(update, "❌ Некорректное число.")
+            return True
+        db.set_jokes_context_size(cid, n)
+        new = int(db.get_jokes_settings(cid).get("jokes_context_size") or 100)
+        await send(update, f"✅ Контекст: <b>{new}</b> сообщений.")
+        return True
+
+    if kind == "minmsgs":
+        if not txt.lstrip("-").isdigit():
+            await send(update, "❌ Нужно целое число (или <code>отмена</code>).")
+            return True
+        try:
+            n = int(txt)
+        except ValueError:
+            await send(update, "❌ Некорректное число.")
+            return True
+        db.set_jokes_min_msgs_since_last(cid, n)
+        new = int(db.get_jokes_settings(cid).get("jokes_min_msgs_since_last") or 20)
+        await send(update, f"✅ Порог накопления: <b>{new}</b>.")
+        return True
+
+    if kind == "model":
+        if txt.lower() in ("reset", "-", "default", "none", "off"):
+            db.set_jokes_model_override(cid, None)
+            await send(update, "✅ Сброшено на дефолтную цепочку.")
+            return True
+        # Light validation — OpenRouter ids are usually ``vendor/name[:tag]``.
+        if " " in txt or len(txt) > 200:
+            await send(update, "❌ Похоже на не-модель (есть пробелы или слишком длинное).")
+            return True
+        db.set_jokes_model_override(cid, txt)
+        await send(
+            update,
+            f"✅ Модель этого чата: <code>{html.escape(txt)}</code>.\n"
+            "Дефолтная цепочка идёт после неё как fallback.",
+        )
+        return True
+
+    # Unknown kind — drop silently.
+    return True
 
 
 async def cmd_joke(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -693,7 +1561,8 @@ async def cmd_joke(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await send(
             update,
             "❌ В этом чате авто-шутки выключены.\n"
-            "Включи логирование и шутки командой <code>/jokes_on</code>.",
+            "Открой меню <code>/jokes</code> и нажми "
+            "«🟢 Включить».",
         )
         return
 
@@ -777,247 +1646,6 @@ async def cmd_joke(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             log.exception("/joke history bookkeeping failed for chat %s", chat.id)
 
 
-async def cmd_jokes_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/jokes_on`` — admin: enable lazy logging + allow ``/joke``.
-    Does NOT change the auto-interval; admin sets that separately.
-    """
-    user = update.effective_user
-    chat = update.effective_chat
-    if user is None or chat is None:
-        return
-    if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
-        return
-    db.set_jokes_enabled(str(chat.id), True)
-    settings = db.get_jokes_settings(str(chat.id))
-    interval = int(settings.get("jokes_interval_minutes") or 0)
-    interval_lbl = "выкл (только вручную через /joke)" if interval <= 0 else f"каждые {interval} мин"
-    await send(
-        update,
-        "✅ <b>Авто-шутки включены</b> в этом чате.\n\n"
-        "Бот начал логировать сообщения для контекста.\n"
-        f"Текущий авто-интервал: <b>{interval_lbl}</b>.\n\n"
-        "Запустить шутку прямо сейчас: <code>/joke</code>\n"
-        "Изменить настройки: <code>/jokes_settings</code>.",
-    )
-
-
-async def cmd_jokes_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/jokes_off`` — admin: stop logging and silence auto-loop.
-    Existing logged rows stay until ``/jokes_clear_log`` is called.
-    """
-    user = update.effective_user
-    chat = update.effective_chat
-    if user is None or chat is None:
-        return
-    if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
-        return
-    db.set_jokes_enabled(str(chat.id), False)
-    await send(
-        update,
-        "🔴 <b>Авто-шутки выключены</b> в этом чате.\n\n"
-        "Логирование сообщений остановлено. Существующий лог сохранён "
-        "(стереть — <code>/jokes_clear_log</code>).",
-    )
-
-
-async def cmd_jokes_interval(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/jokes_interval <minutes>`` — admin. ``0`` disables auto-loop
-    (manual /joke still works). Clamped to ``[JOKES_MIN_INTERVAL_MIN,
-    JOKES_MAX_INTERVAL_MIN]`` when positive.
-    """
-    user = update.effective_user
-    chat = update.effective_chat
-    if user is None or chat is None:
-        return
-    if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
-        return
-    args = list(ctx.args or [])
-    if not args or not args[0].lstrip("-").isdigit():
-        cur = db.get_jokes_settings(str(chat.id))
-        cur_int = int(cur.get("jokes_interval_minutes") or 0)
-        cur_lbl = "выкл" if cur_int <= 0 else f"{cur_int} мин"
-        await send(
-            update,
-            "Использование: <code>/jokes_interval &lt;минуты&gt;</code>\n\n"
-            f"Сейчас: <b>{cur_lbl}</b>\n"
-            "Поставь <code>0</code>, чтобы выключить авто-петлю "
-            "(ручной <code>/joke</code> остаётся).\n"
-            f"Допустимый диапазон при положительном значении: "
-            f"<b>{db.JOKES_MIN_INTERVAL_MIN}..{db.JOKES_MAX_INTERVAL_MIN}</b> мин.",
-        )
-        return
-    try:
-        minutes = int(args[0])
-    except ValueError:
-        await send(update, "❌ Минуты — целым числом.")
-        return
-    db.set_jokes_interval(str(chat.id), minutes)
-    new = int(db.get_jokes_settings(str(chat.id)).get("jokes_interval_minutes") or 0)
-    if new <= 0:
-        msg = "✅ Авто-интервал выключен. Ручной <code>/joke</code> работает."
-    else:
-        msg = f"✅ Авто-интервал: <b>каждые {new} мин</b>."
-    await send(update, msg)
-
-
-async def cmd_jokes_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/jokes_mode <soft|normal|spicy|savage|absurd>`` — admin."""
-    user = update.effective_user
-    chat = update.effective_chat
-    if user is None or chat is None:
-        return
-    if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
-        return
-    args = list(ctx.args or [])
-    if not args:
-        cur = db.get_jokes_settings(str(chat.id)).get("jokes_mode") or "normal"
-        await send(
-            update,
-            "Использование: <code>/jokes_mode &lt;режим&gt;</code>\n\n"
-            f"Сейчас: <b>{html.escape(cur)}</b>\n"
-            f"Доступные: <code>{ '</code>, <code>'.join(db.JOKES_VALID_MODES) }</code>\n\n"
-            "<i>Шкала упоротости:</i>\n"
-            "  soft — мягкая, без сарказма\n"
-            "  normal — лёгкий сарказм (дефолт)\n"
-            "  spicy — едкие шутки, чёрный юмор\n"
-            "  savage — на грани приличий\n"
-            "  absurd — сюрреализм, абсурд",
-        )
-        return
-    mode = args[0].lower().strip()
-    if mode not in db.JOKES_VALID_MODES:
-        await send(
-            update,
-            f"❌ Неизвестный режим. Доступно: "
-            f"<code>{ '</code>, <code>'.join(db.JOKES_VALID_MODES) }</code>",
-        )
-        return
-    db.set_jokes_mode(str(chat.id), mode)
-    await send(update, f"✅ Режим: <b>{html.escape(mode)}</b>.")
-
-
-async def cmd_jokes_context(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/jokes_context <N>`` — admin: how many messages to feed the LLM."""
-    user = update.effective_user
-    chat = update.effective_chat
-    if user is None or chat is None:
-        return
-    if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
-        return
-    args = list(ctx.args or [])
-    if not args or not args[0].lstrip("-").isdigit():
-        cur = int(db.get_jokes_settings(str(chat.id)).get("jokes_context_size") or 100)
-        await send(
-            update,
-            "Использование: <code>/jokes_context &lt;N&gt;</code>\n\n"
-            f"Сейчас: <b>{cur}</b>\n"
-            f"Допустимо: <b>{db.JOKES_MIN_CONTEXT}..{db.JOKES_MAX_CONTEXT}</b>.",
-        )
-        return
-    try:
-        n = int(args[0])
-    except ValueError:
-        await send(update, "❌ Число.")
-        return
-    db.set_jokes_context_size(str(chat.id), n)
-    new = int(db.get_jokes_settings(str(chat.id)).get("jokes_context_size") or 100)
-    await send(update, f"✅ Контекст для шутки: <b>{new}</b> сообщений.")
-
-
-async def cmd_jokes_minmsgs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/jokes_minmsgs <N>`` — admin. Auto-loop floor: how many new
-    messages must accumulate before the next auto-joke fires.
-    """
-    user = update.effective_user
-    chat = update.effective_chat
-    if user is None or chat is None:
-        return
-    if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
-        return
-    args = list(ctx.args or [])
-    if not args or not args[0].lstrip("-").isdigit():
-        cur = int(db.get_jokes_settings(str(chat.id)).get("jokes_min_msgs_since_last") or 20)
-        await send(
-            update,
-            "Использование: <code>/jokes_minmsgs &lt;N&gt;</code>\n\n"
-            f"Сейчас: <b>{cur}</b>\n"
-            "Это нижняя граница для авто-шутки — не шутить, пока в чате "
-            "не накопилось хотя бы N новых сообщений после прошлой шутки.",
-        )
-        return
-    try:
-        n = max(0, int(args[0]))
-    except ValueError:
-        await send(update, "❌ Число.")
-        return
-    db.set_jokes_min_msgs_since_last(str(chat.id), n)
-    await send(update, f"✅ Порог накопления: <b>{n}</b>.")
-
-
-async def cmd_jokes_setmodel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/jokes_setmodel <model>`` — root admin only. Pin one
-    OpenRouter model id for this chat. ``reset`` / ``-`` / empty
-    restores the default fallback chain.
-    """
-    user = update.effective_user
-    chat = update.effective_chat
-    if user is None or chat is None:
-        return
-    if not is_root_admin(user.id):
-        await send(update, "❌ Только root-админ (env ADMIN_IDS).")
-        return
-    args = list(ctx.args or [])
-    if not args:
-        cur = (db.get_jokes_settings(str(chat.id)).get("jokes_model_override") or "").strip()
-        chain = _joke_models()
-        cur_lbl = (
-            f"<code>{html.escape(cur)}</code>" if cur
-            else "<i>нет — используется дефолтная цепочка</i>"
-        )
-        await send(
-            update,
-            "Использование: <code>/jokes_setmodel &lt;model|reset&gt;</code>\n\n"
-            f"Сейчас: {cur_lbl}\n"
-            f"Дефолтная цепочка: " + " → ".join(
-                f"<code>{html.escape(m)}</code>" for m in chain
-            ),
-        )
-        return
-    val = args[0].strip()
-    if val.lower() in ("reset", "-", "default", "none", "off"):
-        db.set_jokes_model_override(str(chat.id), None)
-        await send(update, "✅ Сброшено на дефолтную цепочку.")
-        return
-    db.set_jokes_model_override(str(chat.id), val)
-    await send(
-        update,
-        f"✅ Модель этого чата: <code>{html.escape(val)}</code>.\n"
-        "Дефолтная цепочка идёт после неё как fallback.",
-    )
-
-
-async def cmd_jokes_clear_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/jokes_clear_log`` — admin: drop accumulated chat_messages
-    rows for this chat. Doesn't change settings, doesn't touch
-    ``jokes_history``.
-    """
-    user = update.effective_user
-    chat = update.effective_chat
-    if user is None or chat is None:
-        return
-    if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
-        return
-    n = db.clear_chat_messages_log(str(chat.id))
-    await send(update, f"🗑 Лог сообщений очищен. Удалено: <b>{n}</b>.")
-
-
 async def cmd_jokes_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """``/jokes_history [N]`` — public. Show the last N posted jokes
     for this chat (default 5, max 20).
@@ -1053,21 +1681,6 @@ async def cmd_jokes_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         )
         lines.append(body)
     await send(update, "\n".join(lines))
-
-
-async def cmd_jokes_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/jokes_settings`` — admin: print current per-chat config
-    plus log/queue stats. Static text — change via dedicated commands.
-    """
-    user = update.effective_user
-    chat = update.effective_chat
-    if user is None or chat is None:
-        return
-    if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
-        return
-    settings = db.get_jokes_settings(str(chat.id))
-    await send(update, _format_jokes_settings(settings, in_chat_id=str(chat.id)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1206,16 +1819,10 @@ __all__ = [
     "generate_joke_for_chat",
     "job_jokes",
     "cmd_joke",
-    "cmd_jokes_on",
-    "cmd_jokes_off",
-    "cmd_jokes_interval",
-    "cmd_jokes_mode",
-    "cmd_jokes_context",
-    "cmd_jokes_minmsgs",
-    "cmd_jokes_setmodel",
-    "cmd_jokes_clear_log",
+    "cmd_jokes_menu",
+    "cb_jokes_menu",
+    "handle_pending_jokes_text",
     "cmd_jokes_history",
-    "cmd_jokes_settings",
     # for tests / smoke
     "JokeOutcome",
 ]
