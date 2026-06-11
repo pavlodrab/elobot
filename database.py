@@ -138,6 +138,8 @@ __all__ = [
     "get_jokes_settings",
     "is_jokes_enabled",
     "set_jokes_enabled",
+    "is_analyze_enabled",
+    "set_analyze_enabled",
     "set_jokes_interval",
     "set_jokes_mode",
     "set_jokes_context_size",
@@ -1049,6 +1051,17 @@ def init_db():
     if not _column_exists(conn, "chat_settings", "jokes_last_joke_at"):
         c.execute(
             "ALTER TABLE chat_settings ADD COLUMN jokes_last_joke_at DATETIME"
+        )
+
+    # Per-chat analyze module opt-in (2026-06). Independent privacy
+    # gate from jokes — admins may want one without the other. The
+    # message-logger hook in handlers.jokes.log_chat_message persists
+    # to chat_messages whenever EITHER flag is on, so /analyze can
+    # reuse the same rolling buffer without reusing /jokes_on.
+    if not _column_exists(conn, "chat_settings", "analyze_enabled"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN analyze_enabled INTEGER NOT NULL DEFAULT 0"
         )
 
     # Custom display name for the single group in a league (Лига, Сетка 1, etc.)
@@ -4425,6 +4438,48 @@ def set_jokes_enabled(chat_id: str | int, enabled: bool) -> None:
     conn.close()
 
 
+# ── /analyze module: privacy gate (2026-06) ─────────────────────────────────
+#
+# Independent of jokes_enabled. The chat_messages logger writes a row
+# whenever EITHER flag is on, so a chat can opt into /analyze without
+# enabling auto-jokes (and vice-versa). The opt-out cmd (``/analyze_off``)
+# stops new logging but keeps the existing buffer; ``/jokes_clear_log``
+# (admin) is the way to wipe it on demand.
+
+def is_analyze_enabled(chat_id: str | int) -> bool:
+    """Cheap boolean lookup for the message logger and the /analyze
+    handler. Mirrors :func:`is_jokes_enabled` shape on purpose — both
+    are queried on the hot path of every text message.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT analyze_enabled FROM chat_settings WHERE chat_id=?",
+        (str(chat_id),),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return False
+    try:
+        val = row["analyze_enabled"] if hasattr(row, "keys") else row[0]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return bool(val or 0)
+
+
+def set_analyze_enabled(chat_id: str | int, enabled: bool) -> None:
+    """Toggle the /analyze opt-in for one chat. Admin-only at the
+    handler layer (``/analyze_on`` / ``/analyze_off``).
+    """
+    conn = get_conn()
+    _ensure_chat_settings_row(conn, str(chat_id))
+    conn.execute(
+        "UPDATE chat_settings SET analyze_enabled=? WHERE chat_id=?",
+        (1 if enabled else 0, str(chat_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
 def set_jokes_interval(chat_id: str | int, minutes: int) -> None:
     """How often the auto-loop fires. ``0`` keeps logging on but stops
     scheduled posts (admin can still trigger manually with /joke).
@@ -4634,8 +4689,13 @@ def recent_chat_messages(chat_id: str | int, limit: int = 100) -> list[dict]:
     """Up to ``limit`` most-recent messages for ``chat_id``, ordered
     *oldest first* (which is what an LLM prompt wants). Empty list if
     nothing is logged yet.
+
+    The hard ceiling is :data:`JOKES_LOG_CAP` — the physical size of
+    the rolling buffer. Callers that have a tighter prompt budget
+    (e.g. ``handlers.jokes`` clamps to :data:`JOKES_MAX_CONTEXT`)
+    should clamp ``limit`` themselves before calling.
     """
-    n = max(1, min(JOKES_MAX_CONTEXT, int(limit)))
+    n = max(1, min(JOKES_LOG_CAP, int(limit)))
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, message_id, telegram_id, username, display_name, text, ts "

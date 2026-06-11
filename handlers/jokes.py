@@ -671,7 +671,10 @@ async def log_chat_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             return
         if text.startswith("/"):
             return
-        if not db.is_jokes_enabled(str(chat.id)):
+        if not (
+            db.is_jokes_enabled(str(chat.id))
+            or db.is_analyze_enabled(str(chat.id))
+        ):
             return
         db.log_chat_message(
             str(chat.id),
