@@ -52,9 +52,10 @@ log = logging.getLogger("fc_league_bot.handlers.champions")
 
 # Display labels for the three tournament types we recognise.
 TYPE_LABELS: dict[str, str] = {
-    "main":    "🏆 Турнир Гвардиолыча",
-    "fantasy": "💎 Фэнтези",
-    "vsa":     "🔥 VSA",
+    "main":     "🏆 Турнир Гвардиолыча",
+    "fantasy":  "💎 Фэнтези",
+    "vsa":      "🔥 VSA",
+    "supercup": "🏅 Суперкубок",
 }
 
 # Russian word for "trophy" with three case forms (1 / 2-4 / 5+).
@@ -164,9 +165,10 @@ def _winner_summary_line(rec: dict) -> str:
 def _kb_root() -> InlineKeyboardMarkup:
     """Top-level menu: pick a tournament type."""
     rows = [
-        [InlineKeyboardButton(TYPE_LABELS["main"],    callback_data="chmp:type:main")],
-        [InlineKeyboardButton(TYPE_LABELS["fantasy"], callback_data="chmp:type:fantasy")],
-        [InlineKeyboardButton(TYPE_LABELS["vsa"],     callback_data="chmp:type:vsa")],
+        [InlineKeyboardButton(TYPE_LABELS["main"],     callback_data="chmp:type:main")],
+        [InlineKeyboardButton(TYPE_LABELS["fantasy"],  callback_data="chmp:type:fantasy")],
+        [InlineKeyboardButton(TYPE_LABELS["vsa"],      callback_data="chmp:type:vsa")],
+        [InlineKeyboardButton(TYPE_LABELS["supercup"], callback_data="chmp:type:supercup")],
     ]
     return InlineKeyboardMarkup(rows)
 

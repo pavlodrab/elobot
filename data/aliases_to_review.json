@@ -1,7 +1,7 @@
 [
   {
     "name": "Антон",
-    "occurrences": 7,
+    "occurrences": 8,
     "suggested_username": null,
     "examples": [
       {
@@ -38,7 +38,7 @@
   },
   {
     "name": "Freshl",
-    "occurrences": 6,
+    "occurrences": 7,
     "suggested_username": null,
     "examples": [
       {
@@ -69,6 +69,43 @@
         "msg_id": 1125,
         "url": "https://t.me/gvardiolPlay/1125",
         "date": "2025-07-31",
+        "role": "winner"
+      }
+    ]
+  },
+  {
+    "name": "Нурс",
+    "occurrences": 6,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 749,
+        "url": "https://t.me/gvardiolPlay/749",
+        "date": "2025-04-09",
+        "role": "winner"
+      },
+      {
+        "msg_id": 848,
+        "url": "https://t.me/gvardiolPlay/848",
+        "date": "2025-05-19",
+        "role": "winner"
+      },
+      {
+        "msg_id": 1142,
+        "url": "https://t.me/gvardiolPlay/1142",
+        "date": "2025-08-06",
+        "role": "winner"
+      },
+      {
+        "msg_id": 1147,
+        "url": "https://t.me/gvardiolPlay/1147",
+        "date": "2025-08-06",
+        "role": "winner"
+      },
+      {
+        "msg_id": 1215,
+        "url": "https://t.me/gvardiolPlay/1215",
+        "date": "2025-09-02",
         "role": "winner"
       }
     ]
@@ -111,33 +148,33 @@
     ]
   },
   {
-    "name": "Нурс",
+    "name": "Вадим",
     "occurrences": 4,
     "suggested_username": null,
     "examples": [
       {
-        "msg_id": 749,
-        "url": "https://t.me/gvardiolPlay/749",
-        "date": "2025-04-09",
-        "role": "winner"
-      },
-      {
-        "msg_id": 848,
-        "url": "https://t.me/gvardiolPlay/848",
+        "msg_id": 849,
+        "url": "https://t.me/gvardiolPlay/849",
         "date": "2025-05-19",
         "role": "winner"
       },
       {
-        "msg_id": 1215,
-        "url": "https://t.me/gvardiolPlay/1215",
-        "date": "2025-09-02",
+        "msg_id": 850,
+        "url": "https://t.me/gvardiolPlay/850",
+        "date": "2025-05-19",
         "role": "winner"
       },
       {
-        "msg_id": 1331,
-        "url": "https://t.me/gvardiolPlay/1331",
-        "date": "2025-10-23",
+        "msg_id": 1355,
+        "url": "https://t.me/gvardiolPlay/1355",
+        "date": "2025-11-05",
         "role": "winner"
+      },
+      {
+        "msg_id": 1470,
+        "url": "https://t.me/gvardiolPlay/1470",
+        "date": "2026-01-23",
+        "role": "runner_up"
       }
     ]
   },
@@ -194,31 +231,6 @@
         "url": "https://t.me/gvardiolPlay/1078",
         "date": "2025-07-23",
         "role": "winner_alias"
-      }
-    ]
-  },
-  {
-    "name": "Вадим",
-    "occurrences": 3,
-    "suggested_username": null,
-    "examples": [
-      {
-        "msg_id": 849,
-        "url": "https://t.me/gvardiolPlay/849",
-        "date": "2025-05-19",
-        "role": "winner"
-      },
-      {
-        "msg_id": 1355,
-        "url": "https://t.me/gvardiolPlay/1355",
-        "date": "2025-11-05",
-        "role": "winner"
-      },
-      {
-        "msg_id": 1470,
-        "url": "https://t.me/gvardiolPlay/1470",
-        "date": "2026-01-23",
-        "role": "runner_up"
       }
     ]
   },
@@ -625,6 +637,19 @@
     ]
   },
   {
+    "name": "Spa_Msk",
+    "occurrences": 1,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 850,
+        "url": "https://t.me/gvardiolPlay/850",
+        "date": "2025-05-19",
+        "role": "winner_alias"
+      }
+    ]
+  },
+  {
     "name": "Нурса",
     "occurrences": 1,
     "suggested_username": null,
@@ -763,6 +788,32 @@
         "msg_id": 1399,
         "url": "https://t.me/gvardiolPlay/1399",
         "date": "2025-12-03",
+        "role": "runner_up"
+      }
+    ]
+  },
+  {
+    "name": "Andrii",
+    "occurrences": 1,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 1418,
+        "url": "https://t.me/gvardiolPlay/1418",
+        "date": "2025-12-12",
+        "role": "winner"
+      }
+    ]
+  },
+  {
+    "name": "Нурсу",
+    "occurrences": 1,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 1418,
+        "url": "https://t.me/gvardiolPlay/1418",
+        "date": "2025-12-12",
         "role": "runner_up"
       }
     ]

@@ -3686,7 +3686,11 @@ def list_chats_with_quote_interval() -> list[dict]:
 
 # Tournament types we recognise. Anything else is rejected at insert time so
 # typos in the importer can't pollute the leaderboard.
-TOURNAMENT_WINNER_TYPES = ("main", "fantasy", "vsa")
+#   - 'main'     — Турнир Гвардиолыча (regular numbered tournament)
+#   - 'fantasy'  — Фэнтези Лиги Чемпионов / АПЛ (podium-format)
+#   - 'vsa'      — Турнир по VSA
+#   - 'supercup' — Суперкубок / LG CUP / Мини-кубок (secondary post-tournament cups)
+TOURNAMENT_WINNER_TYPES = ("main", "fantasy", "vsa", "supercup")
 
 
 def _norm_alias(alias: str) -> str:

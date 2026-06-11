@@ -53,6 +53,13 @@ def classify_tournament_type(text: str) -> str:
     head = text[:CLASSIFY_HEAD_CHARS].lower()
     if re.search(r"\bvsa\b", head):
         return "vsa"
+    # Secondary cups — Суперкубок (post-tournament champions cup),
+    # LG CUP, мини-кубок. They run alongside the main tournament and
+    # crown a separate winner; expose them as their own bucket so they
+    # don't inflate main-tournament trophy counts but are still
+    # browsable in /champions.
+    if re.search(r"победитель\s+суперкубка|обладатель\s+суперкубка|\blg\s+cup\b|мини[-\s]кубк", head):
+        return "supercup"
     if any(k in head for k in ("фэнтези", "фентези", "фэнтэзи", "fantasy", "лиги чемпионов")):
         # the basic Гвардиолыч tournament is sometimes called "Лига Чемпионшипа"
         # but never "Лиги Чемпионов" — so this works as a fantasy-LC marker.
@@ -103,13 +110,10 @@ NEGATIVE_PATTERNS: List[Tuple[str, str]] = [
     (r"совершил\s+настоящий\s+подвиг.*?в\s+полуфинал", "semifinal progress post"),
     (r"обеспечил\s+себе\s+место\s+в\s+полуфинал", "semifinal progress post"),
     (r"\bвнимание\s+будет\s+приковано\s+к", "tournament status update"),
-    # Sub-tournaments that aren't part of the main "Турнир Гвардиолыча"
-    # series — Суперкубок (post-tournament champions cup), LG CUP, and
-    # the "мини-кубок" event run in parallel and would otherwise inflate
-    # the main trophy counts. Keeping them out per the user's "3 types" design.
-    (r"победитель\s+суперкубка", "Суперкубок (separate sub-tournament)"),
-    (r"\blg\s+cup\b", "LG CUP (separate sub-tournament)"),
-    (r"мини[-\s]кубка?", "мини-кубок (separate sub-tournament)"),
+    # Sub-tournaments outside main+fantasy+vsa.
+    # NOTE: Суперкубок / LG CUP / мини-кубок are NOT skipped any more —
+    # they are now classified as their own ``supercup`` tournament type.
+    # See ``classify_tournament_type`` above.
     # Champions League / inter-league commentary, not a tournament finale.
     (r"плей-офф\s+наш", "inter-league CL commentary"),
     (r"общий\s+счёт\s*[—\-–]?\s*\d+\s*:\s*\d+\s+в\s+пользу", "inter-league CL match commentary"),
@@ -203,6 +207,15 @@ POSITIVE_SIGNALS = [
     r"победу\s+в\s+кубке\s+фэнтези",
     # VSA-specific
     r"турнир\s+по\s+vsa",
+    # Supercup-family (Суперкубок / LG CUP / Мини-кубок)
+    r"победитель\s+суперкубка",
+    r"обладатель\s+суперкубка",
+    r"\blg\s+cup\b",
+    r"мини[-\s]кубк",
+    r"первый\s+победитель\s+мини",
+    # "Подводим итоги юбилейного турнира" (50th tournament finale, [1147])
+    r"подводим\s+итоги\s+(?:юбилейного\s+)?турнира",
+    r"призовые\s+места\s*:",
 ]
 
 
@@ -559,6 +572,33 @@ WINNER_PATTERNS: List[Tuple[re.Pattern, str]] = [
         re.IGNORECASE,
     ), "name"),
 
+    # ---- Supercup family ----
+
+    # "Победитель Суперкубка — Имя!" / "Победитель Суперкубка — Имя (alias)!"
+    (re.compile(
+        rf"победитель\s+суперкубка\s*{_DASH}\s*({_NAME_WITH_OPT_ALIAS})",
+        re.IGNORECASE,
+    ), "name"),
+
+    # "Имя — is a two-time winner LG CUP!" — name in front, English suffix.
+    (re.compile(
+        rf"(?m)^\s*({_NAME_TOKEN})\s*{_DASH}\s*is\s+a\s+\S+\s*winner\s+lg\s+cup",
+        re.IGNORECASE,
+    ), "name"),
+
+    # "Первый победитель мини-кубка — Имя!"
+    (re.compile(
+        rf"(?:первый\s+)?победитель\s+мини[-\s]кубка\s*{_DASH}\s*({_NAME_TOKEN})",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- "ПОДВОДИМ ИТОГИ ... Призовые места: 1. Имя" ([1147]) ----
+
+    (re.compile(
+        rf"призовые\s+места\s*:\s*\n+\s*1\s*\.\s*({_NAME_TOKEN})",
+        re.IGNORECASE,
+    ), "name"),
+
     # ---- Last-resort fallbacks (anchored to absolute start of post) ----
 
     # "Поздравляем нового X-кратного чемпиона N турнира\n+Имя"
@@ -697,6 +737,20 @@ RUNNER_UP_PATTERNS: List[Tuple[re.Pattern, str]] = [
     # Looser: "одолел Имя" / "обыграл Имя" / "разобрал Имя" anywhere
     (re.compile(
         rf"(?:одолел|обыграл|разобрал)\s+(?:не\s+безызвестного\s+|самого\s+|ярко\s+и\s+уверенно\s+)?({_NAME_WITH_OPT_ALIAS}?)\s*[,!\.\n⚔💔]",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- Подиум Призовых мест: "2. Имя" ([1147]) ----
+
+    (re.compile(
+        rf"призовые\s+места\s*:[^\n]*\n[^\n]*\n+\s*2\s*\.\s*({_NAME_TOKEN})",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- "А проигравшему Имя" ([1418] мини-кубок) ----
+
+    (re.compile(
+        rf"а\s+проигравшему\s+({_NAME_WITH_OPT_ALIAS})",
         re.IGNORECASE,
     ), "name"),
 ]
