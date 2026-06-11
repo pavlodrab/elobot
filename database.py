@@ -134,6 +134,7 @@ __all__ = [
     "JOKES_MAX_INTERVAL_MIN",
     "JOKES_MIN_CONTEXT",
     "JOKES_MAX_CONTEXT",
+    "JOKES_MAX_CUSTOM_PROMPT",
     "get_jokes_settings",
     "is_jokes_enabled",
     "set_jokes_enabled",
@@ -142,6 +143,7 @@ __all__ = [
     "set_jokes_context_size",
     "set_jokes_min_msgs_since_last",
     "set_jokes_model_override",
+    "set_jokes_custom_prompt",
     "mark_chat_joke_sent",
     "list_chats_with_jokes_enabled",
     "log_chat_message",
@@ -1036,6 +1038,13 @@ def init_db():
         c.execute(
             "ALTER TABLE chat_settings "
             "ADD COLUMN jokes_model_override TEXT"
+        )
+    if not _column_exists(conn, "chat_settings", "jokes_custom_prompt"):
+        # Per-chat system-prompt override. NULL = use the current
+        # mode's preset prompt (the default).
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN jokes_custom_prompt TEXT"
         )
     if not _column_exists(conn, "chat_settings", "jokes_last_joke_at"):
         c.execute(
@@ -4299,6 +4308,7 @@ JOKES_MIN_INTERVAL_MIN = 5       # below this an admin probably mis-typed
 JOKES_MAX_INTERVAL_MIN = 60 * 24 # 24h — above this auto-jokes basically off
 JOKES_MIN_CONTEXT = 20           # less than this and the LLM has no signal
 JOKES_MAX_CONTEXT = 200          # more than this and we blow OpenRouter context
+JOKES_MAX_CUSTOM_PROMPT = 2000   # per-chat custom system-prompt override cap
 
 
 def _jokes_defaults(chat_id: str | int) -> dict:
@@ -4318,6 +4328,7 @@ def _jokes_defaults(chat_id: str | int) -> dict:
         "jokes_context_size": 100,
         "jokes_min_msgs_since_last": 20,
         "jokes_model_override": None,
+        "jokes_custom_prompt": None,
         "jokes_last_joke_at": None,
     }
 
@@ -4331,7 +4342,7 @@ def get_jokes_settings(chat_id: str | int) -> dict:
     row = conn.execute(
         "SELECT chat_id, jokes_enabled, jokes_interval_minutes, jokes_mode, "
         "       jokes_context_size, jokes_min_msgs_since_last, "
-        "       jokes_model_override, jokes_last_joke_at "
+        "       jokes_model_override, jokes_custom_prompt, jokes_last_joke_at "
         "FROM chat_settings WHERE chat_id=?",
         (str(chat_id),),
     ).fetchone()
@@ -4340,8 +4351,11 @@ def get_jokes_settings(chat_id: str | int) -> dict:
     if row is None:
         return base
     d = dict(row)
+    # Nullable string columns: keep DB NULL (= "not set") instead of
+    # backfilling defaults. Numeric/bool/mode columns get backfilled.
+    _nullable = {"jokes_model_override", "jokes_custom_prompt", "jokes_last_joke_at"}
     for k, v in base.items():
-        if d.get(k) is None and k != "jokes_model_override" and k != "jokes_last_joke_at":
+        if d.get(k) is None and k not in _nullable:
             d[k] = v
     # Coerce types so callers don't have to.
     d["jokes_enabled"] = bool(d.get("jokes_enabled") or 0)
@@ -4493,6 +4507,34 @@ def set_jokes_model_override(chat_id: str | int, model: str | None) -> None:
     conn.close()
 
 
+def set_jokes_custom_prompt(chat_id: str | int, prompt: str | None) -> None:
+    """Per-chat custom system-prompt override. When set, it replaces
+    the mode's prompt fragment in :func:`handlers.jokes._build_prompt`
+    while floor rules (safety + format) still apply.
+
+    ``None`` / empty / ``"reset"`` clears the override (chat falls
+    back to the current mode preset). The text is hard-capped at
+    ``JOKES_MAX_CUSTOM_PROMPT`` chars at write time so a chat with
+    pathological config can't blow OpenRouter context.
+    """
+    if prompt is None:
+        val = None
+    else:
+        s = str(prompt).strip()
+        if not s or s.lower() in ("reset", "default", "none", "off", "-"):
+            val = None
+        else:
+            val = s[:JOKES_MAX_CUSTOM_PROMPT]
+    conn = get_conn()
+    _ensure_chat_settings_row(conn, str(chat_id))
+    conn.execute(
+        "UPDATE chat_settings SET jokes_custom_prompt=? WHERE chat_id=?",
+        (val, str(chat_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
 def mark_chat_joke_sent(chat_id: str | int) -> None:
     """Update jokes_last_joke_at to UTC-now after the bot posts a joke
     so the auto-loop throttles correctly.
@@ -4518,7 +4560,7 @@ def list_chats_with_jokes_enabled() -> list[dict]:
     rows = conn.execute(
         "SELECT chat_id, jokes_enabled, jokes_interval_minutes, jokes_mode, "
         "       jokes_context_size, jokes_min_msgs_since_last, "
-        "       jokes_model_override, jokes_last_joke_at "
+        "       jokes_model_override, jokes_custom_prompt, jokes_last_joke_at "
         "FROM chat_settings WHERE jokes_enabled=1"
     ).fetchall()
     conn.close()

@@ -67,73 +67,123 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Default OpenRouter fallback chain — the user picked these models.
-# An admin can override per-chat with ``/jokes_setmodel``, or globally
+# An admin can override per-chat with the model submenu, or globally
 # with the ``JOKES_MODELS`` env var (comma-separated).
+#
+# Order rationale: stable instruction-tuned models first, ":alpha"
+# / experimental tags last. Owl-Alpha used to lead the chain but
+# kept producing the lazy "Сначала X, потом Y" template across all
+# our chats — moved to last position 2026-06.
 _DEFAULT_JOKE_MODELS: tuple[str, ...] = (
-    "openrouter/owl-alpha",
     "google/gemma-4-31b-it:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
+    "openrouter/owl-alpha",
 )
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Per-mode (system prompt fragment, temperature). Floor rules are
 # prepended to every prompt regardless of mode — they never bend.
+#
+# Each mode prompt is intentionally written as concrete *structural*
+# guidance ("pick one specific quote, build a punchline"), not vague
+# vibe descriptors ("be witty"). Free-tier models default to lazy
+# summary patterns when given vague instructions; concrete structure
+# instructions push them off that local minimum.
 _MODE_PROMPTS: dict[str, tuple[str, float]] = {
     "soft": (
-        "Сделай одну добрую, мягкую, безобидную шутку про этот чат. "
-        "Тёплая ирония, без сарказма, без чёрного юмора, без подколов в "
-        "адрес конкретных людей. Если поводов для шутки в контексте нет "
-        "— нейтральная самоирония про сам чат.",
-        0.6,
+        "Тёплая, добрая шутка с лёгким панчлайном. Найди ОДНУ милую "
+        "деталь в одной конкретной реплике из контекста и обыграй её "
+        "мягко через неожиданный угол. Без сарказма, без подколов "
+        "конкретных людей. Тон — как добрый друг, а не как стендапер.",
+        0.7,
     ),
     "normal": (
-        "Сделай одну остроумную шутку про этот чат — дружеский сарказм, "
-        "лёгкая подколка по поводу того, что обсуждали. Без обидного "
-        "перехода на личности, но честно, не приторно.",
-        0.8,
+        "Дружеская шутка с чётким панчлайном. Возьми ОДНУ конкретную "
+        "реплику или ситуацию у одного автора и построй на ней "
+        "наблюдение, где концовка ломает заданное ожидание. "
+        "Категорически нельзя пересказывать 2–3 темы подряд — это "
+        "пересказ повестки, а не шутка.",
+        0.85,
     ),
     "spicy": (
-        "Сделай одну едкую, колкую шутку про этот чат — с чёрным юмором "
-        "и ехидством. Можно поддеть, можно посмеяться над абсурдом "
-        "обсуждения. Но конкретного человека не унижать — высмеивай "
-        "ситуацию, а не личность.",
+        "Едкая шутка с чёрным юмором, но с панчлайном — не просто "
+        "сарказм. Выбери одну конкретную реплику, которая напрашивается "
+        "на колкость, и сломай ожидание неожиданным углом. Высмеивай "
+        "конкретное действие или фразу, а не человека целиком, "
+        "не общую «атмосферу чата».",
         1.0,
     ),
     "savage": (
-        "Сделай одну беспощадную шутку про этот чат на грани приличий — "
-        "максимум сарказма, чёрный юмор, можно зацепить тех, кто "
-        "доминирует в обсуждении. Но без оскорблений, угроз и буквальных "
-        "переходов на личности — поэтика, а не помои.",
+        "Беспощадный, сухой панчлайн на грани приличий. Цепляйся за "
+        "самую уязвимую конкретную реплику в контексте и ломай её "
+        "одним точным наблюдением. Без растекания по нескольким темам, "
+        "без обобщающих концовок про «уровень чата». Поэтика, а не "
+        "помои; точность, а не громкость.",
         1.1,
     ),
     "absurd": (
-        "Сделай одну сюрреалистическую, абсурдную шутку — ассоциация, "
-        "которая логически рушится. Можно неожиданное сравнение, можно "
-        "сюр в духе ОБЭРИУ, но текст должен быть смешным, а не просто "
-        "набором слов. Опирайся на темы из чата.",
-        1.2,
+        "Сюр с логикой, которая рушится в самом конце. Возьми одну "
+        "конкретную деталь из контекста и доведи её до неожиданного "
+        "абсурдного вывода через одно сравнение или ассоциацию. "
+        "Не поток сознания, не набор слов — ассоциативный панчлайн "
+        "с точкой в конце.",
+        1.15,
     ),
 }
 
 # These rules are prepended to every prompt regardless of mode and
-# never overridden. The model is told to stay invisible (don't
-# mention the rules in the answer).
+# never overridden — even when the chat sets a custom prompt via
+# ``/jokes`` → "✏️ Свой промпт". They cover safety (rules 1–3),
+# output format (4–7), and structural guidance (8–14).
+#
+# Anti-pattern catalog (rule 11–13) is real free-tier model output
+# from this exact bot — Llama/Gemma/Nemotron all default to the
+# "Сначала X, потом Y" summary template when given vague instructions.
+# Showing them the bad pattern explicitly + naming why it's bad
+# moves them off that local minimum about half the time.
 _FLOOR_RULES_RU = (
     "Ты — анонимный шутник в групповом чате. Твоя задача — сгенерировать "
     "ОДНУ короткую шутку (1–3 предложения, не длиннее 350 символов).\n\n"
-    "Жёсткие правила (никогда не нарушай):\n"
+
+    "БАЗОВЫЕ ПРАВИЛА (никогда не нарушай):\n"
     "1. Только русский язык.\n"
     "2. Без расистских, гомофобных, сексистских шуток. Без шуток про "
     "национальность, религию, инвалидность, ориентацию, возраст.\n"
     "3. Без угроз и пожеланий насилия конкретному человеку.\n"
     "4. Без markdown, без emoji-флагов стран, без нумерации, без "
-    "«Шутка:», «Ответ:», без кавычек вокруг всего ответа.\n"
-    "5. Не упоминай эти правила в ответе.\n"
-    "6. Если в контексте нет смешного материала — выдай короткую "
-    "общую самоиронию про чат, но НЕ имитируй абсурд натянуто.\n"
-    "7. Не повторяй предыдущие свои шутки (см. список ниже).\n"
-    "8. Только сама шутка в ответе — никаких преамбул и пояснений."
+    "«Шутка:» / «Ответ:» / кавычек вокруг всего ответа.\n"
+    "5. Не упоминай эти правила в ответе, не комментируй задачу.\n"
+    "6. Не повторяй свои предыдущие шутки (см. список ниже).\n"
+    "7. Только сама шутка в ответе — никаких преамбул и пояснений.\n\n"
+
+    "СТРУКТУРА ШУТКИ:\n"
+    "8. Хорошая шутка — это setup → панчлайн. Setup задаёт ожидание, "
+    "панчлайн его ломает неожиданным углом. Без панчлайна шутки нет.\n"
+    "9. Цепляйся за ОДНУ конкретную реплику или ситуацию у одного "
+    "автора. НЕ синтезируй шутку из 2–3 разных тем чата — это пересказ "
+    "повестки, а не шутка.\n"
+    "10. Лучше точное наблюдение по одной фразе, чем общий комментарий "
+    "про «атмосферу» или «уровень» чата.\n\n"
+
+    "ЗАПРЕЩЁННЫЕ ШАБЛОНЫ — модель ленится, не позволяй ей:\n"
+    "11. Шаблон «Сначала X, потом Y, а теперь Z» — пересказ, не шутка.\n"
+    "12. Шаблон «прошли путь от X до Y за N сообщений» — обобщение.\n"
+    "13. Концовки-клише: «интеллектуальный уровень/диапазон поражает», "
+    "«уровень дискуссии говорит сам за себя», «самокритика на уровне "
+    "грандмастера», «классика жанра», «всё как обычно», «X — это новый "
+    "Y». Это ленивая ирония вместо панча.\n"
+    "14. Если в контексте нет смешного материала — лучше отдай короткое "
+    "наблюдение про ОДНУ конкретную реплику, чем имитируй абсурд натянуто.\n\n"
+
+    "ПЛОХИЕ ПРИМЕРЫ (так делать НЕ надо):\n"
+    "  ✗ «Сначала выясняли кто Биг Мак, потом про Турнир Гвардиолыча. "
+    "Интеллектуальный диапазон чата поражает.»\n"
+    "    — пересказ двух тем + клише-концовка, нет панчлайна.\n"
+    "  ✗ «Прошли путь от фастфуда до киберспорта за десять сообщений.»\n"
+    "    — запрещённый шаблон обобщения, не цепляется за конкретику.\n"
+    "  ✗ «Самокритика на уровне грандмастера.»\n"
+    "    — клише-концовка вместо наблюдения с панчем."
 )
 
 
@@ -312,10 +362,20 @@ def _build_prompt(
     mode: str,
     context_text: str,
     history_text: str,
+    custom_prompt: str | None = None,
 ) -> tuple[str, str, float]:
-    """Return ``(system, user, temperature)`` for the OpenRouter call."""
+    """Return ``(system, user, temperature)`` for the OpenRouter call.
+
+    If ``custom_prompt`` is non-empty, it replaces the mode's prompt
+    fragment in the system message — but :data:`_FLOOR_RULES_RU` is
+    still prepended (safety + format + anti-pattern rules apply
+    unconditionally). The temperature still comes from ``mode``: a
+    chat that wants a different temperature should pick a different
+    mode; the custom prompt is the *style*, mode is the *energy*.
+    """
     mode_prompt, temperature = _MODE_PROMPTS.get(mode, _MODE_PROMPTS["normal"])
-    system = _FLOOR_RULES_RU + "\n\n" + mode_prompt
+    style_prompt = (custom_prompt or "").strip() or mode_prompt
+    system = _FLOOR_RULES_RU + "\n\n" + style_prompt
     user_parts = [
         "Ниже — последние сообщения группового чата (в хронологическом "
         "порядке, [Имя]: текст):",
@@ -526,8 +586,11 @@ async def generate_joke_for_chat(chat_id: str | int) -> JokeOutcome:
     history = db.list_jokes_history(chat_id, limit=5)
     history_text = _format_recent_jokes_for_prompt(history)
 
+    custom_prompt = (settings.get("jokes_custom_prompt") or "").strip() or None
+
     system, user, temperature = _build_prompt(
         mode=mode, context_text=context_text, history_text=history_text,
+        custom_prompt=custom_prompt,
     )
 
     # Build the model fallback list: per-chat override goes first,
@@ -672,6 +735,7 @@ def _jokes_menu_text(chat_id: str | int) -> str:
     context  = int(s.get("jokes_context_size") or 100)
     min_msgs = int(s.get("jokes_min_msgs_since_last") or 20)
     override = (s.get("jokes_model_override") or "").strip()
+    custom_prompt = (s.get("jokes_custom_prompt") or "").strip()
     last_at  = s.get("jokes_last_joke_at") or "—"
 
     log_total = len(db.recent_chat_messages(chat_id, limit=db.JOKES_MAX_CONTEXT))
@@ -685,12 +749,17 @@ def _jokes_menu_text(chat_id: str | int) -> str:
         model_lbl = f"<code>{html.escape(override)}</code>"
     else:
         model_lbl = "<i>дефолтная цепочка</i>"
+    if custom_prompt:
+        prompt_lbl = f"задан ({len(custom_prompt)} симв.)"
+    else:
+        prompt_lbl = "<i>—</i>"
 
     return (
         "🃏 <b>Авто-шутки</b>\n\n"
         f"Состояние: <b>{state_lbl}</b>\n"
         f"Интервал: <b>{html.escape(_intv_label(interval))}</b>\n"
         f"Режим: <b>{html.escape(mode)}</b>\n"
+        f"Свой промпт: {prompt_lbl}\n"
         f"Контекст: <b>{context}</b> сообщений\n"
         f"Порог: <b>{min_msgs}</b> новых перед авто-шуткой\n"
         f"Модель: {model_lbl}\n"
@@ -719,6 +788,7 @@ def _jokes_menu_kb(
         ],
         [InlineKeyboardButton("⏰ Интервал ▸", callback_data=f"j:intv:{cid}")],
         [InlineKeyboardButton("🌶 Режим ▸",   callback_data=f"j:mode:{cid}")],
+        [InlineKeyboardButton("✏️ Свой промпт ▸", callback_data=f"j:prompt:{cid}")],
         [InlineKeyboardButton("🧠 Контекст ▸", callback_data=f"j:ctx:{cid}")],
         [InlineKeyboardButton("📊 Порог накопления ▸", callback_data=f"j:min:{cid}")],
     ]
@@ -840,6 +910,59 @@ def _jokes_model_kb(chat_id: str | int) -> InlineKeyboardMarkup:
     ])
 
 
+def _jokes_prompt_text(chat_id: str | int) -> str:
+    """Body of the ✏️ Свой промпт submenu.
+
+    Shows the chat's current custom prompt verbatim (or notes that it
+    isn't set, so the chat falls back to the active mode preset).
+    HTML-escapes the prompt text — admins can paste anything in there.
+    """
+    s = db.get_jokes_settings(chat_id)
+    cur = (s.get("jokes_custom_prompt") or "").strip()
+    mode = s.get("jokes_mode") or "normal"
+    cap = db.JOKES_MAX_CUSTOM_PROMPT
+    head = (
+        "✏️ <b>Свой системный промпт</b>\n\n"
+        "Текст, который заменит preset режима. Базовые правила "
+        "безопасности и формата (без markdown, по-русски, "
+        "не повторяться, setup→панчлайн) применяются всегда.\n"
+        f"Лимит: <b>{cap}</b> символов. "
+        "Температуру по-прежнему задаёт режим — переключай "
+        "<b>🌶 Режим</b>, если нужна другая «энергия».\n\n"
+    )
+    if cur:
+        body = (
+            f"<b>Сейчас задан</b> ({len(cur)} симв.):\n"
+            f"<blockquote>{html.escape(cur)}</blockquote>"
+        )
+    else:
+        body = (
+            f"<i>Свой промпт не задан — используется preset режима "
+            f"<b>{html.escape(mode)}</b>.</i>"
+        )
+    return head + body
+
+
+def _jokes_prompt_kb(chat_id: str | int) -> InlineKeyboardMarkup:
+    """✏️ Свой промпт submenu keyboard."""
+    cid = str(chat_id)
+    s = db.get_jokes_settings(cid)
+    has_custom = bool((s.get("jokes_custom_prompt") or "").strip())
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            "✏️ Изменить" if has_custom else "✏️ Задать",
+            callback_data=f"j:prompt:edit:{cid}",
+        )],
+    ]
+    if has_custom:
+        rows.append([InlineKeyboardButton(
+            "↺ Сбросить на preset режима",
+            callback_data=f"j:prompt:reset:{cid}",
+        )])
+    rows.append(_kb_back_to_menu(cid))
+    return InlineKeyboardMarkup(rows)
+
+
 def _jokes_history_text(chat_id: str | int, *, limit: int = 5) -> str:
     """Body for the 📜 История submenu — last N posted jokes (HTML)."""
     rows = db.list_jokes_history(chat_id, limit=limit)
@@ -954,6 +1077,9 @@ async def cb_jokes_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         j:model:<cid>                   🤖 model submenu (root)
         j:model:edit:<cid>              manual model entry → pending (root)
         j:model:reset:<cid>             clear override → default chain (root)
+        j:prompt:<cid>                  ✏️ custom-prompt submenu
+        j:prompt:edit:<cid>             manual custom-prompt entry → pending
+        j:prompt:reset:<cid>            clear custom prompt → mode preset
         j:clear:<cid>                   🗑 confirm wipe
         j:clear:yes:<cid>               🗑 wipe confirmed
     """
@@ -1383,6 +1509,62 @@ async def cb_jokes_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    # ── ✏️ Custom prompt ───────────────────────────────────────────────
+    if action == "prompt":
+        sub = _cid_at(2)
+        if sub == "edit":
+            cid = _cid_at(3)
+            if not cid:
+                return
+            if not is_admin_user:
+                try:
+                    await query.answer("Только админ.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            ctx.user_data["pending_jokes_input"] = {"kind": "prompt", "chat_id": cid}
+            try:
+                await query.message.reply_text(
+                    "✏️ Отправь следующим сообщением свой системный промпт "
+                    "(он заменит preset режима).\n\n"
+                    f"Лимит: <b>{db.JOKES_MAX_CUSTOM_PROMPT}</b> символов. "
+                    "Базовые правила безопасности/формата всё равно "
+                    "применяются.\n"
+                    "Сброс на preset: <code>reset</code>.\n"
+                    "Отмена: <code>отмена</code>.",
+                    parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
+            return
+        if sub == "reset":
+            cid = _cid_at(3)
+            if not cid:
+                return
+            if not is_admin_user:
+                try:
+                    await query.answer("Только админ.", show_alert=True)
+                except TelegramError:
+                    pass
+                return
+            db.set_jokes_custom_prompt(cid, None)
+            await _send_or_edit(
+                query,
+                text=_jokes_prompt_text(cid),
+                reply_markup=_jokes_prompt_kb(cid),
+            )
+            return
+        # Plain ``j:prompt:<cid>`` → submenu.
+        cid = sub
+        if not cid:
+            return
+        await _send_or_edit(
+            query,
+            text=_jokes_prompt_text(cid),
+            reply_markup=_jokes_prompt_kb(cid),
+        )
+        return
+
     # ── 🗑 Clear log ───────────────────────────────────────────────────
     if action == "clear":
         sub = _cid_at(2)
@@ -1439,7 +1621,7 @@ async def handle_pending_jokes_text(
     Pending state shape::
 
         ctx.user_data["pending_jokes_input"] = {
-            "kind": "interval" | "context" | "minmsgs" | "model",
+            "kind": "interval" | "context" | "minmsgs" | "model" | "prompt",
             "chat_id": "<cid>",
         }
     """
@@ -1537,6 +1719,42 @@ async def handle_pending_jokes_text(
             update,
             f"✅ Модель этого чата: <code>{html.escape(txt)}</code>.\n"
             "Дефолтная цепочка идёт после неё как fallback.",
+        )
+        return True
+
+    if kind == "prompt":
+        # Reset keywords clear the override and fall back to mode preset.
+        if txt.lower() in ("reset", "default", "none", "off", "-"):
+            db.set_jokes_custom_prompt(cid, None)
+            mode = db.get_jokes_settings(cid).get("jokes_mode") or "normal"
+            await send(
+                update,
+                f"✅ Свой промпт сброшен — используется preset режима "
+                f"<b>{html.escape(mode)}</b>.",
+            )
+            return True
+        cap = db.JOKES_MAX_CUSTOM_PROMPT
+        if len(txt) > cap:
+            await send(
+                update,
+                f"❌ Слишком длинно: <b>{len(txt)}</b> симв., лимит "
+                f"<b>{cap}</b>. Сократи и пришли ещё раз "
+                "(меню <code>/jokes</code> → ✏️ Свой промпт).",
+            )
+            return True
+        if len(txt) < 5:
+            await send(
+                update,
+                "❌ Слишком коротко — нужно минимум 5 символов "
+                "(или <code>отмена</code> / <code>reset</code>).",
+            )
+            return True
+        db.set_jokes_custom_prompt(cid, txt)
+        new_len = len((db.get_jokes_settings(cid).get("jokes_custom_prompt") or ""))
+        await send(
+            update,
+            f"✅ Свой промпт сохранён ({new_len} симв.). "
+            "Базовые правила безопасности/формата применяются всегда.",
         )
         return True
 
