@@ -9,13 +9,116 @@ Public entry point:
 
 from __future__ import annotations
 
+import re
 from io import BytesIO
 from typing import Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
 from bg_helper import make_canvas
-from database import get_player_by_id, get_tournament, get_tour_matches
+from database import (
+    get_player_by_id,
+    get_tournament,
+    get_tournament_players,
+    get_tour_matches,
+)
+
+
+# ── Per-render team-tag and name-mode caches ────────────────────────────────
+# Mirror the same approach used in ``playoff_image.py``: populated by
+# ``render_tour_png`` from ``tournaments.name_display_mode`` /
+# ``tournament_players.team_tag`` and consumed by ``_display_name`` so
+# we don't have to thread either through every cell-render call.
+# Single-threaded asyncio worker → no race conditions in practice.
+_TAG_BY_PID: dict[int, str] = {}
+_NAME_MODE: str = "full"
+
+
+def _load_tag_map(tid: int) -> None:
+    """Refresh ``_TAG_BY_PID`` with the per-tournament team tags."""
+    _TAG_BY_PID.clear()
+    try:
+        rows = get_tournament_players(tid)
+    except Exception:
+        return
+    for r in rows:
+        pid = r.get("player_id")
+        tag = (r.get("team_tag") or "").strip()
+        if isinstance(pid, int) and tag:
+            _TAG_BY_PID[pid] = tag
+
+
+def _load_name_mode(t: dict | None) -> None:
+    """Refresh module-level ``_NAME_MODE`` from the tournament row."""
+    global _NAME_MODE
+    raw = ((t or {}).get("name_display_mode") or "full")
+    mode = str(raw).strip().lower()
+    if mode not in ("full", "tag", "nick"):
+        mode = "full"
+    _NAME_MODE = mode
+
+
+def _display_name(p: dict | None, *, fallback: str = "?") -> str:
+    """Pick the right participant label for the active ``_NAME_MODE``.
+
+    Mirrors the logic in ``playoff_image._display_name`` so /tours and
+    /playoff stay visually consistent — including the synthetic
+    ``id_<digits>`` placeholder handling and the per-tournament team
+    tag fallback.
+    """
+    if not p:
+        return fallback
+    pid_local = p.get("id")
+    tag = ""
+    if isinstance(pid_local, int):
+        tag = (_TAG_BY_PID.get(pid_local) or "").strip()
+    nick = (p.get("game_nickname") or "").strip()
+    user = (p.get("username") or "").strip()
+    is_synthetic = bool(user) and bool(re.match(r"^id_\d+$", user.lower()))
+    pretty_user = "" if is_synthetic else user
+    synth_label = (
+        user.lower().replace("id_", "id ", 1) if is_synthetic else ""
+    )
+
+    mode = _NAME_MODE
+    if mode == "tag":
+        if pretty_user:
+            return f"@{pretty_user}"
+        if nick:
+            return nick
+        if tag:
+            return tag
+        if synth_label:
+            return synth_label
+        return fallback
+    if mode == "nick":
+        if nick and tag:
+            return f"{nick} - {tag}"
+        if nick:
+            return nick
+        if tag:
+            return tag
+        if pretty_user:
+            return f"@{pretty_user}"
+        if synth_label:
+            return synth_label
+        return fallback
+
+    # mode == "full" — historic behaviour, preserved verbatim.
+    if is_synthetic:
+        synth = nick or synth_label
+        return f"{synth} - {tag}" if tag else synth
+    if user and nick:
+        if tag:
+            return f"{nick} - {tag} (@{user})"
+        if nick.lower() == user.lower():
+            return f"@{user}"
+        return f"{nick} (@{user})"
+    if user:
+        if tag:
+            return f"{tag} (@{user})"
+        return f"@{user}"
+    return f"{nick} - {tag}" if (nick and tag) else (nick or tag or fallback)
 
 
 # ── palette (matches standings_image.py) ──────────────────────────────────────
@@ -170,6 +273,12 @@ def render_tour_png(tid: int, tour_numbers: Iterable[int]) -> bytes:
     t = get_tournament(tid) or {}
     name = (t.get("name") or "Турнир").strip()
 
+    # Refresh caches once per render so every nested ``_display_name``
+    # call resolves the right tag / mode without us threading them
+    # through ``_draw_text_in_cell``.
+    _load_tag_map(tid)
+    _load_name_mode(t)
+
     title_font = _font(_s(34), bold=True)
     sub_font   = _font(_s(20), bold=False)
     tour_font  = _font(_s(26), bold=True)
@@ -266,8 +375,17 @@ def render_tour_png(tid: int, tour_numbers: Iterable[int]) -> bytes:
 
             p1 = get_player_by_id(m["player1_id"])
             p2 = get_player_by_id(m["player2_id"])
-            n1 = (p1 or {}).get("username", "?")
-            n2 = (p2 or {}).get("username", "?")
+            # Honour the per-tournament name-display mode (full /
+            # @tag / nick) and trim long ``"<nick> - <Team> (@user)"``
+            # labels with an ellipsis so they don't bleed into the
+            # neighbouring "Счёт" column. Inner padding here matches
+            # ``_draw_text_in_cell``'s default (``_s(12)`` on each
+            # side, hence ``_s(24)`` total).
+            from emoji_helper import truncate_text_with_emoji
+            host_w  = _COLS_RAW[1][1] - _s(24)
+            guest_w = _COLS_RAW[3][1] - _s(24)
+            n1 = truncate_text_with_emoji(_display_name(p1), name_font, host_w)
+            n2 = truncate_text_with_emoji(_display_name(p2), name_font, guest_w)
 
             s1 = m.get("score1")
             s2 = m.get("score2")

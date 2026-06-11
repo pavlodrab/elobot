@@ -7973,6 +7973,13 @@ async def cmd_tourstext(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     tour_numbers = _parse_tour_range(range_arg, t) if range_arg else _current_tour_range(t)
     lines = [f"📅 <b>Турнир: {html.escape(t['name'])}</b>\n"]
+    # Reuse the mode-aware label helper from ``tournament_summary`` so
+    # the text /tourstext output respects the same per-tournament
+    # name-display mode as the rendered images. The helpers are
+    # underscored by convention but are stable internal API.
+    import tournament_summary as _tsum
+    _tsum._load_tag_map(t["id"])
+    _tsum._load_name_mode(t)
     for tn in tour_numbers:
         matches = db.get_tour_matches(t["id"], tn)
         if not matches:
@@ -7982,8 +7989,8 @@ async def cmd_tourstext(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for m in matches:
             p1 = get_player_by_id(m["player1_id"])
             p2 = get_player_by_id(m["player2_id"])
-            n1 = html.escape(p1["username"]) if p1 else "?"
-            n2 = html.escape(p2["username"]) if p2 else "?"
+            n1 = html.escape(_tsum._player_label(p1))
+            n2 = html.escape(_tsum._player_label(p2))
             status_icons = {"pending": "⏳", "reported": "🟡", "confirmed": "✅", "awaiting_admin": "🟡"}
             icon = status_icons.get(m.get("status", ""), "⏳")
             sc = f"{m.get('score1') or '?'}:{m.get('score2') or '?'}" if m.get("status") == "confirmed" else "–:–"
