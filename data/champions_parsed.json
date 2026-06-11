@@ -1,0 +1,1311 @@
+{
+  "channel": "gvardiolPlay",
+  "channel_title": "Турниры Гвардиолыча ФК Мобайл",
+  "parsed_at": "2026-06-11T12:37:21.054163+00:00",
+  "stats": {
+    "total_messages": 1157,
+    "parsed_records": 61,
+    "skipped_candidates": 12,
+    "by_type": {
+      "main": 58,
+      "vsa": 1,
+      "fantasy": 2
+    },
+    "by_confidence": {
+      "medium": 55,
+      "high": 6
+    }
+  },
+  "tournaments": [
+    {
+      "msg_id": 89,
+      "date": "2024-08-27T11:54:11",
+      "url": "https://t.me/gvardiolPlay/89",
+      "tournament_type": "main",
+      "tournament_number": 3,
+      "winner": {
+        "raw_name": "Paqrez001",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем нового победителя нашего 3 турнира в FC Mobile - Paqrez001🎉🎉🎉\nПосмотрим сможет ли он защитить свой титул  или Drmidrol попытаться вернуть  чемпионство в следующем турнире😅🫣\nА может появиться абсолютно новый чемпион😏❤️‍🔥\nМы узнаем уже в новом турнире!!!\n\nP.s: теперь у нас новый кубок)"
+    },
+    {
+      "msg_id": 152,
+      "date": "2024-09-16T22:10:10",
+      "url": "https://t.me/gvardiolPlay/152",
+      "tournament_type": "main",
+      "tournament_number": 6,
+      "winner": {
+        "raw_name": "Paqrezz001",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем победителя 6 турнира Гвардиолыча в fc mobile 🎉🎉🎉❤️‍🔥\nPaqrezz001 показал свой уровень игры и уже догнал Demidrol по количеству побед в турнирах😏😎 вопрос только в том кто из них первым завоеюет 3й кубок🫣🙃 или же их обойдёт кто то другой?)\n\nБлагодарим LOCOMOTIV за отличные игры, он показал себя на отличном уровне игры🔥🔥🔥 \n\nИ также спасибо всем участникам за очередной хороший турнир. \nБудем ждать всех желающих уже на 6 турнире Гвардиолыча, который будет называться Игры Резервов🔥❤️‍🔥\nВсе кто пожелает расчехляйте своих запасных, которые \"пылятся на полках\"\nИли же можете докупить🤝 главное без рангов и тренеровок💪"
+    },
+    {
+      "msg_id": 196,
+      "date": "2024-10-08T12:41:16",
+      "url": "https://t.me/gvardiolPlay/196",
+      "tournament_type": "main",
+      "tournament_number": 8,
+      "winner": {
+        "raw_name": "Ducorp",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем нового двухкратного чемпиона 8 турнира Гвардиолыча 🔥🎉🎉🎉\nDucorp отлично прошел по турниру (зачем то брал твинк, не известно для чего) но это заслуженная победа👍\n\nЕму противостоял опытный соперник, который показал хороший и стойкий 1 матч👍💯 благодарим за участие 🤝\n\nСпасибо всем участникам турнира, кто отыграл свои матчи🤝💪 \nУже завтра участники 9 турнира Гвардиолыча узнают свои сборные и на этом турнире будет нововведения по формату проведения😅☝️ о котором узнаете уже скоро) \n\nP.s: у нас теперь 3х двухкратных чемпиона турнира:\nDemidrol, Paqrez001 и Ducorp🔥🔥🔥 \nУ двух из них будет возможность стать 3х кратным чемпионом уже на этом турнире))) или кто то другой сможет сделать это первым?))) зовите друзей которые хороши играют в РИ из ваших лиг что бы узнать кто же самый сильный в нашем турнире!🔥🔥🔥"
+    },
+    {
+      "msg_id": 236,
+      "date": "2024-10-16T18:35:52",
+      "url": "https://t.me/gvardiolPlay/236",
+      "tournament_type": "main",
+      "tournament_number": 9,
+      "winner": {
+        "raw_name": null,
+        "username": "freshl66",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": "Drakelovc"
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "high",
+      "needs_review": false,
+      "raw_text": "Поздравляем победителя турнира Гвардиолыча #9 @freshl66 🎉🎉🎉\nТолько пришел и уже победил, отличны старт🫣😅\n\nТак же благодарим и финалиста @Drakelovc  выдал хорошие матчи, особенно во втором показал мастер класс защиты (Кошта = one love)😍\n\nПо традиции - благодарю всех участников кто отыграл все свои матчи ❤️‍🔥🧑‍💻 \n\nСовсем скоро через недолгое время будет жеребьевка #10 турнира Гвардиолыча 🔥❤️‍🔥😎 ждём всех участников кто хочет первым узнать свои команды!"
+    },
+    {
+      "msg_id": 270,
+      "date": "2024-10-23T12:51:25",
+      "url": "https://t.me/gvardiolPlay/270",
+      "tournament_type": "main",
+      "tournament_number": 11,
+      "winner": {
+        "raw_name": null,
+        "username": "Drakelovc",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": "Abbosov96"
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "high",
+      "needs_review": false,
+      "raw_text": "Поздравляем с победой @Drakelovc 🔥🎉🕺 это был эпический финал - первого игрока который завоевал кубок Гвардиолыча  трижды❤️‍🔥💪🔥 \nС чем мы все его и поздравляем 😃🤝😎\n\nБлагодарим финалиста @Abbosov96 за отличную игру в финале👍🤝 Это был отличный путь до финала🙂‍↔️ желаем удачи в последующих турнирах😃🧑‍💻\n\nТакже, по традиции, благодарим всех участников, которые отыграли все свои игры и продемонстрировали уважение к соперникам🔥❤️‍🔥❤️‍🔥❤️‍🔥\n\nСегодня в 20:00 нас ожидает жреба уже #11 турнира Гвардиолыча (игры сборных) желаю всем хороших сборных, а тем кому упадут по слабее 🥲 продемонстрировать свой скил)"
+    },
+    {
+      "msg_id": 294,
+      "date": "2024-10-30T07:29:06",
+      "url": "https://t.me/gvardiolPlay/294",
+      "tournament_type": "main",
+      "tournament_number": 11,
+      "winner": {
+        "raw_name": null,
+        "username": "freshl66",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем @freshl66 нового двухкратного чемпиона 11 турнира Гвардиолыча 🔥🎉🎉🎉\n\nСпасибо всем участникам турнира, кто отыграл свои матчи 🤝💪 \n\nP.s: у нас теперь 3х двухкратных чемпиона турнира:\nDemidrol, Paqrez001 и FRESHL 🔥🔥🔥 \nУ двух из них будет возможность стать 3х кратным чемпионом уже на этом турнире))) или кто то другой сможет сделать это первым?))) зовите друзей которые хороши играют в РИ из ваших лиг что бы узнать кто же самый сильный в нашем турнире!🔥🔥🔥"
+    },
+    {
+      "msg_id": 312,
+      "date": "2024-11-06T00:46:53",
+      "url": "https://t.me/gvardiolPlay/312",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": null,
+        "username": "freshl66",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Вот и подошёл к финалу очередной наш турнир Гвардиолыча 😏🧑‍💻❤️‍🔥\n\nПоздравляем @freshl66 с завоеванием 3х наших кубков👍😅  и с появлением уже 2ого 3х кратного чемпа😱🥳\n\nНеужели у нас будет интрига кто первым станет 4х кратным победителем турнира?)😏\n\nНам остаётся поблагодарить всех участников, которые отыграли свои игры на турнире🫡🥳🤩\nИ пожелать удачи всем в следующем турнире Гвардиолыча 🧨🧨🧨"
+    },
+    {
+      "msg_id": 375,
+      "date": "2024-12-02T17:34:39",
+      "url": "https://t.me/gvardiolPlay/375",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": null,
+        "username": "rigelNsk",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Совсем поздно 🥲 но лучше поздно чем никогда 🤗\nПоздравляем с прекрасной победой @rigelNsk 🥳👍👋\nЭто была хорошая битва)\n\nБыл и есть занят, по этому заранее прошу простить за будущее возможные задержки (надеюсь без них)\n\nУже совсем скоро узнаем имя нынешнего победителя турнира Гвардиолыча и уже успели начать набор на некст (после него возможно будут недельная пауза, многие устали играть каждую неделю) но этот турик отыграем на все 💯😎🫡\n\nСпасибо всем кто отыгрывает все свои матчи 🧨🤝\n\nИ жаль тех кто не способен этого сделать🥹😮‍💨\n\nВсем удачи!"
+    },
+    {
+      "msg_id": 380,
+      "date": "2024-12-04T23:08:45",
+      "url": "https://t.me/gvardiolPlay/380",
+      "tournament_type": "main",
+      "tournament_number": 17,
+      "winner": {
+        "raw_name": null,
+        "username": "Drakelovc",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "И мы поздравляем победителя 17 турнира Гвардиолыча с отличной победой🥳🤝🔥 @Drakelovc так держать, клепает победы и создаёт конкуренцию некоторым \"убийцам\"😏🤗\n\nСпасибо всем кто отыграл, а уже завтра начнем 18 турнир Гвардиолыча, скоро будет список и группы)"
+    },
+    {
+      "msg_id": 426,
+      "date": "2024-12-24T12:54:18",
+      "url": "https://t.me/gvardiolPlay/426",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": null,
+        "username": "freshl66",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем с очередной победой доминатора турнира Гвардиолыча 🔥🔥❤️‍🔥🥳 \n@freshl66 снова veni, vidi, vici😁🤯\n\nВсе достойно боролись и спасибо всем кто отыграл турнир🤝🥰 \n\nНадежда что скоро появится новый чемпион))) возможно он среди действующих игроков🧐🤗 а может прийдёт новый игрок и покажет всю мощь👍😏\n\nВсем удачи в последующих турнирах Гвардиолыча 🔥🔥🎉"
+    },
+    {
+      "msg_id": 445,
+      "date": "2025-01-01T14:12:36",
+      "url": "https://t.me/gvardiolPlay/445",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": null,
+        "username": "r1f_zzz",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем с победой @r1f_zzz 🎉🎉🎉🎊\nНовый чемпион вышел на тропу побед?🤔🤗\n\nВсем спасибо кто отыграл свои игры от начала до конца👋🤗 вы настоящие чемпионы турнира😏😁\n\nСкоро определим победителя нашего розыгрыша среди участников🔥🧨\n\nВсем удачи в следующих турнирах Гвардиолыча 🔥🔥🎉"
+    },
+    {
+      "msg_id": 477,
+      "date": "2025-01-09T21:34:42",
+      "url": "https://t.me/gvardiolPlay/477",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": null,
+        "username": "Yurreeec",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": "rif_zzz"
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "high",
+      "needs_review": false,
+      "raw_text": "Хоть с опозданием, но поздравляем @Yurreeec с великим достижением! 🏆🎉\n\nЮра снова доказал, что он настоящий мастер игры, завоевав свой четвертый Кубок. Этот триумф стал не просто очередной победой, а эпохальным событием — он оформил квадрупл! ⚽🔥\n\nФинал против @rif_zzz, где он представлял Бельгию 🇧🇪, стал зрелищем, достойным мировых арен. Юра показал невероятную тактику, хладнокровие и точность, которые сделали его игру почти идеальной. Каждый его шаг был продуман, каждый момент — на вес золота. 🥇\n\nЭтот Кубок стал еще одним ярким подтверждением того, что Юра — не просто победитель, а живая легенда. Четыре Кубка. Квадрупл. И, кажется, его история еще далеко не закончена! 🚀👑\n\nЖелаем всем успехов в будущих турнирах Гвардиолыча! 🔥🔥🎉"
+    },
+    {
+      "msg_id": 489,
+      "date": "2025-01-15T17:04:48",
+      "url": "https://t.me/gvardiolPlay/489",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": null,
+        "username": "arnt035",
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": "rigelNsk"
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "high",
+      "needs_review": false,
+      "raw_text": "Поздравляем @arnt035 с невероятным достижением! 🏆🎉\n\nТри трофея в копилке — результат таланта и огромной работы. Особенно впечатляет победа в финале против @rigelNsk, где Антон показал свою лучшую игру! ⚽🔥\n\nЭтот требл — заслуженная награда за упорство и мастерство. Тоттенхэм снова остался без победы… то ли проклятие, то ли просто Антон был неподражаем! 😅\n\nУдачи всем участникам в будущих турнирах Гвардиолыча! 🔥🔥🎉"
+    },
+    {
+      "msg_id": 505,
+      "date": "2025-01-20T19:10:11",
+      "url": "https://t.me/gvardiolPlay/505",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "R1fldik",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 2,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "R1fldik — двукратный чемпион и мастер времени! ⏳🏆\n\nR1f вновь доказал, что время на его стороне. Вторая победа в турнире стала символом его умения контролировать не только мяч на поле ⚽, но и сам ход событий. Он — человек, который всегда появляется там, где это нужно, и делает это в самый важный момент.\n\nЕго титулы, хоть и не подряд, демонстрируют, что R1f умеет ждать своего часа 🕰️ и возвращаться на вершину, несмотря на любые обстоятельства. Настоящий властелин времени, он меняет ход матчей и диктует свою игру соперникам.\n\nПоздравляем R1f с этой исторической победой! Его путь — это напоминание всем: время принадлежит тому, кто умеет его использовать. 🔥⚽🏆\n\nУдачи всем в следующих турнирах!🍀"
+    },
+    {
+      "msg_id": 521,
+      "date": "2025-01-28T20:22:01",
+      "url": "https://t.me/gvardiolPlay/521",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Фрешл",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 6,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Фрешл вновь доказал своё величие! 🏆🔥 Шестикратный чемпион — это не просто титул, а символ высшего мастерства, хладнокровия и непобедимости 🎯⚡️. Его игра — это сочетание точности и силы, которое вписало его имя в историю 🚀👑.  \n\nЗа свою победу Фрешл получает на выбор: 2000 фк-поинтов 💰 или звёздный абонемент 🏅. Локомотив (Антон), занявший второе место, может выбрать — 1000 фк-поинтов 💵 или усилитель D 🥈.  \n\nИ не забывайте! Скоро пройдёт розыгрыш, где каждый сможет побороться за классные призы 🎁🔥. Победитель получит на выбор: усилитель D 🛠️ или 1000 фк-поинтов 💵. Не упустите свой шанс! 🎉⚽✨"
+    },
+    {
+      "msg_id": 541,
+      "date": "2025-02-03T21:50:46",
+      "url": "https://t.me/gvardiolPlay/541",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Рифлдик",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Романа",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Рифлдик в очередной раз доказал своё величие, став трёхкратным чемпионом времени 🏆⏳. Песочные часы символизируют его господство, где каждое зерно песка — это триумфальная победа и шаг к бессмертной славе 🕰️✨.\n\nФинал против Романа Графа стал настоящей драмой ⚔️🔥. Но, как и предсказывала судьба, \nГраф снова остался в шаге от заветного титула. Его борьба была достойна эпоса, но против Рифлдика — мастера времени и поля — этого оказалось недостаточно 👑🎯.\n\nТри титула. Три эпохи. Время подвластно Рифлдику, а песочные часы его побед станут вечным символом величия! 🌟🚀"
+    },
+    {
+      "msg_id": 561,
+      "date": "2025-02-12T13:30:57",
+      "url": "https://t.me/gvardiolPlay/561",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Carnage",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Carnage! 🏆🔥🎉\n\nСегодня синие 👕 взяли своё! Carnage, ведя за собой Челси, вышел на поле против Ливерпуля и доказал, что именно он достоин стать новым королём турнира! 👑⚽️\n\nЭтот финал стал испытанием на характер и мастерство. До последней секунды шла борьба, и в итоге Carnage триумфально поднимает кубок! 🏅\n\n🔥 Огромные поздравления чемпиону! 🔥\n💙 Синие празднуют эту победу! 💙\n⚡ Carnage вписал своё имя в историю, и никто не сможет это оспорить! ⚡\n\nНо история на этом не заканчивается! Впереди новые турниры, новые вызовы и новые чемпионы! 🔥💪 Приходите и покажите, на что вы способны! ⚽🏆"
+    },
+    {
+      "msg_id": 593,
+      "date": "2025-02-18T11:59:49",
+      "url": "https://t.me/gvardiolPlay/593",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Attiks",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Attiks! 🏆🔥\n\nЭтот финал войдёт в историю как один из самых невероятных камбеков! После первого матча, где Attiks уступал 2:4, он показал настоящую волю к победе и в ответной встрече устроил разгром 3:0! 💪⚽\n\nСлова чемпиона после триумфа:\n🎙️ Attiks♣️:\n\"Конате в свои забил… ну в свои.\"\n\"Везунчик.\"\n\nНо разве это только удача? Или всё-таки школа 666 воспитала настоящего бойца? 🏫🔥\nА может, секрет победы — в поддержке брата Димы и легендарного тренера Мурадоны? 🧠⚡\nНу и, конечно, нельзя забывать Тигра — кота, который любит спать и царапаться 🐈💤, но, возможно, именно он вдохновил чемпиона!\n\nПоздравляем Attiks с заслуженным трофеем! 🏆🎉\nКто следующий? Приходите на новые турниры и впишите своё имя в историю! ⚽🔥"
+    },
+    {
+      "msg_id": 623,
+      "date": "2025-02-26T19:01:26",
+      "url": "https://t.me/gvardiolPlay/623",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Антон",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 6,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Антон – четырёхкратный чемпион! 🏆🔥\n\nЕщё один шаг к бессмертной славе! Антон завоёвывает четвёртый трофей, приближаясь к вершине, где правит величайший чемпион с рекордом в 6 титулов. 🏅👑\n\nНо что ждёт дальше? Побьёт ли он этот легендарный рекорд? Или, как два других чемпиона, остановится на отметке четырёх титулов? ⏳⚔️\n\nИстория творится на наших глазах! Поздравляем Антона и ждём ответа на главный вопрос: станет ли он величайшим? 🚀🔥"
+    },
+    {
+      "msg_id": 659,
+      "date": "2025-03-11T18:38:58",
+      "url": "https://t.me/gvardiolPlay/659",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Антон",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 5,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Антон – пятикратный чемпион! 🏆🔥\n\nОн снова переписывает историю, завоёвывая свой пятый трофей и вставая в один ряд с легендарным Demidrol'ом! 🏅👑\n\nСлова второго в списке, Юры (Demidrol'а), говорят сами за себя:\n🎙 Yureeeec:\n\"Опять догнал… 🥴 Поздравляю! 😅\"\n\nДве легенды, два титана, и теперь у них по пять кубков! Но кто первым сделает следующий шаг? Сломает ли Антон рекорд и станет великим? Или Юра снова уйдёт вперёд? ⏳⚔️\n\nНовый турнир уже стартует! 🔥 Впереди великие битвы, и скоро мы узнаем, кто станет следующим чемпионом! ⚽🏆"
+    },
+    {
+      "msg_id": 672,
+      "date": "2025-03-19T16:17:30",
+      "url": "https://t.me/gvardiolPlay/672",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Юра",
+        "username": null,
+        "alias": "Demidrol"
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 6,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Юра (Demidrol) – шестикратный чемпион! 🏆🔥\n\nЛегенда продолжает творить историю! Demidrol догнал Freshl'а, сравнявшись с ним по числу титулов. Долгое время 6 трофеев казались недосягаемой вершиной, но Юра вновь доказал, что для него нет границ! 🏅👑\n\nВ этот раз на его пути встал Фоенильо, для которого это был дебютный финал. Новичок показал характер, но Demidrol не оставил шансов и поднял кубок в шестой раз! ⚔️🔥\n\nТеперь перед ним главный вызов – сможет ли он стать абсолютным рекордсменом и завоевать седьмой титул? ⏳🏆 Или останется наравне с Freshl'ом, поделив трон?\n\nОтвет узнаем в следующем турнире! История продолжается… ⚽🚀"
+    },
+    {
+      "msg_id": 699,
+      "date": "2025-03-25T15:25:07",
+      "url": "https://t.me/gvardiolPlay/699",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Антон",
+        "username": null,
+        "alias": "Locomotive"
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 6,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Антон (Locomotive) – шестикратный чемпион! 🏆🔥  \n\nЛегенда на рельсах несётся сквозь историю! LOKOMOTIV ворвался в элитный клуб, сравнявшись с титанами – Freshl'ом и Demidrol'ом! Шесть трофеев – казалось бы, предел, но Антон доказал: для настоящих чемпионов нет остановок! 🚂💨  \n\nВ решающем бою на его пути встал USA Граф, но LOKOMOTIV не сбавил ход и уверенно довёл матч до триумфа! ⚔️🔥 Теперь перед ним та же вершина, что и у великих соперников – седьмой титул, который сделает его единственным королём! 👑⏳  \n\nСможет ли он обойти легенд или останется в бессмертной тройке? Время покажет! История пишется прямо сейчас… 🚀🏆  \n\nПоздравляем, Антон! Ты – вечность! 🔥🎉"
+    },
+    {
+      "msg_id": 729,
+      "date": "2025-04-01T16:56:41",
+      "url": "https://t.me/gvardiolPlay/729",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Муся",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 2,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Муся – двукратный чемпион! 🏆🔥\n\nОн снова доказал, что его победа не была случайностью! Два титула – это уже заявка на величие, но остановится ли Муся на этом? ⏳⚔️\n\nВпереди новый турнир, новые соперники и новые испытания. Продолжит ли он свою серию и станет ли ещё ближе к легендам? Или на этот раз кто-то сумеет его остановить? 🏅👀\n\nСкоро узнаем! История пишется прямо сейчас… ⚽🔥"
+    },
+    {
+      "msg_id": 766,
+      "date": "2025-04-16T18:38:09",
+      "url": "https://t.me/gvardiolPlay/766",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Антон",
+        "username": null,
+        "alias": "Lokomotiv"
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 7,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Антон (Lokomotiv) – 7️⃣-кратный чемпион! 🚂👑\n\nОн сделал это! Абсолютный рекорд теперь принадлежит только ему — 7 титулов, и никто больше не может с ним сравниться.\n\nОн прошёл через битвы с сильнейшими, обошёл таких титанов, как Freshl и Demidrol, и уверенно взошёл на пьедестал великого единоличного чемпиона!\n\nLokomotive больше не едет — он мчит! И теперь весь турнир — это его путь, а все соперники — лишь остановки. 🚆🔥\n\nКто сможет бросить вызов истинному королю? Или это новая эра — эра Антона? ⏳👊\n\nПоздравляем с историческим достижением! Это не просто рекорд — это бессмертие. 🌟🏅\n\nРегистрируйтесь на новый турнир"
+    },
+    {
+      "msg_id": 790,
+      "date": "2025-04-23T19:12:34",
+      "url": "https://t.me/gvardiolPlay/790",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "r1f",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 4,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Драный чорт — он же r1f — четырёхкратный чемпион! ⚔️🔥\n\nЭтот человек не просто играет — он творит хаос на поле и легенды вне его.\nТеперь у него 4 титула, и он встаёт в один ряд с просто Дрейком.\n\nr1f — это не просто ник, это знак беды для соперников. Каждый его выход на поле — это буря, каждый финал — спектакль, где он всегда ближе к роли главного героя.\n\nЧетыре титула — но для него это лишь пролог. Вопрос не в том, догонит ли он лидеров, а в том, насколько быстро он их обгонит. ⏳🚀\n\nДраный чорт снова здесь — и он голоден до побед!\nБерегитесь."
+    },
+    {
+      "msg_id": 801,
+      "date": "2025-04-28T16:44:25",
+      "url": "https://t.me/gvardiolPlay/801",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Attiks",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 2,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Attiks — двукратный чемпион! 🏆🔥\n\nЮный, но уже грозный соперник — школьник Attiks уверенно вписывает своё имя в историю турнира! ✍️✨\nВ тяжелейшем финале против Антона (Lokomotive), одного из величайших игроков, он сумел показать характер, выдержку и настоящий спортивный азарт. ⚔️🚂\n\nДва титула — и это только начало пути.\nAttiks доказал всем, что возраст — не помеха для больших побед. 🏅⚡\n\nПоздравляем! Ждём продолжения этой яркой истории! 🚀👑\n\n\n\nНе забывайте! ⏳\nСовсем скоро стартует регистрация на новый турнир!⚡🏆"
+    },
+    {
+      "msg_id": 817,
+      "date": "2025-05-04T23:21:31",
+      "url": "https://t.me/gvardiolPlay/817",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Dron4ik",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Dron4ik! 🏆⚪️\n\nОн уверенно прошёл турнир и заслуженно забрал титул, продемонстрировав чемпионский характер и хладнокровие.\nОчередной мадридист, взошедший на вершину, и сделал это красиво и уверенно!\n\nТеперь имя Dron4ik звучит среди лучших, а его путь только начинается.\nПоздравляем с победой! Вперёд — к новым трофеям! ⚔️✨\n\n\nСовсем скоро регистрация на новый турнир!"
+    },
+    {
+      "msg_id": 832,
+      "date": "2025-05-12T22:33:07",
+      "url": "https://t.me/gvardiolPlay/832",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Dron4ik",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Dron4ik снова чемпион! 🏆🏆⚪️\n\nДва титула подряд — это уже не шутки. Он доказал, что его победа была не случайностью, а закономерностью.\nDron4ik становится четвёртым игроком в истории турнира, кто сумел выиграть дважды подряд и вписал своё имя в список элиты!\n\nСпокойствие, стабильность и чемпионская игра — всё это про него.\nПоздравляем с новой вершиной! И кто знает, быть может, серия только начинается? 🚀✨"
+    },
+    {
+      "msg_id": 849,
+      "date": "2025-05-19T23:03:49",
+      "url": "https://t.me/gvardiolPlay/849",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Вадим",
+        "username": null,
+        "alias": "Spa_msk"
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Вадим (Spa_msk)! 🏆🔥\n\nОн стал победителем особого турнира, в котором участвовали только те, кто ещё ни разу не поднимал кубок.\nТурнир античемпионов собрал бойцов, уставших ждать, но не утративших веру — и Вадим прошёл этот путь до конца!\n\nПосле долгой серии без титулов он ворвался в финал и заслуженно стал чемпионом.\nТеперь он не просто участник, а победитель. И впереди — ещё более жаркая схватка:\nСуперкубок против Нурса, Чемпиона чемпионов! ⚔️👑\n\nОдин только что взял свой первый трофей, другой властвует над вершинами.\nСкоро узнаем, кто станет истинным героем! 🥶🔥"
+    },
+    {
+      "msg_id": 878,
+      "date": "2025-06-03T20:51:36",
+      "url": "https://t.me/gvardiolPlay/878",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Freshl",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 7,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Он снова это сделал.\nFreshl — 7-кратный чемпион! 🏆🔥\n\nСпустя долгие турниры и паузы, легенда возвращается на вершину.\nТот, кого давно не видели в финале… снова поднимает кубок.\n\nИмя, которое не нуждается в представлении.\nFreshl вернулся — и снова первый. 💥👑"
+    },
+    {
+      "msg_id": 959,
+      "date": "2025-06-25T12:01:01",
+      "url": "https://t.me/gvardiolPlay/959",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Антон",
+        "username": null,
+        "alias": "Lokomotive"
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 9,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Антон (Lokomotive) — 9-кратный чемпион! 🚂🏆×9 \nПоздравляем с новой вершиной! 🎉🔥\n\nТеперь он в одиночестве на первом месте,\nоставив позади всех, включая самого Freshl’а.\nОстался последний шаг — легендарная десятка. 💫👑\n\nИ когда пройдут годы, десятилетия…\nАнтон сможет сказать:\nИстория помнит только тех, кто не боялся идти до конца.\n\nD14"
+    },
+    {
+      "msg_id": 1008,
+      "date": "2025-07-07T23:25:09",
+      "url": "https://t.me/gvardiolPlay/1008",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Freshl",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Мусю",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 9,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Freshl — снова чемпион! 9-й титул! 🏆×9 👑\n\nВ решающем матче он одолел Мусю, лондонского бойца, который был всего в одном шаге от своей заветной победы.\nНо судьба решила иначе…\n\nFreshl вернул себе лидерство в гонке титанов и вновь напомнил всем, почему его имя — синоним величия.\nА в этот день… весь Лондон погрузился в траур. 🌫️⚰️🇬🇧\n\nПоздравляем чемпиона! И сочувствуем тем, кто был так близко."
+    },
+    {
+      "msg_id": 1078,
+      "date": "2025-07-23T19:44:03",
+      "url": "https://t.me/gvardiolPlay/1078",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Demidrol",
+        "username": null,
+        "alias": "Юра"
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 7,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Легенда вернулась — Demidrol (Юра) снова чемпион! 🏆👑\n\nСпустя столько турниров, лет ожидания и борьбы, он вновь поднимает трофей над головой.\nИ теперь он — семикратный чемпион! 🔥7️⃣\n\nЮра доказал, что настоящее величие не тускнеет со временем.\nDemidrol жив, Demidrol сияет, Demidrol побеждает. ✨⏳\n\nПоздравляем с новой страницей в легендарной карьере!\nИстория запомнит это возвращение."
+    },
+    {
+      "msg_id": 1125,
+      "date": "2025-07-31T13:00:28",
+      "url": "https://t.me/gvardiolPlay/1125",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Freshl",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 11,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Freshl — теперь уже 11-кратный чемпион! 🏆🔟➕1️⃣ 👑\n\nВозможно, вы устали от постов про него...\nНо что поделать, если он не устаёт побеждать?\n\nОдиннадцать титулов. Это уже не просто рекорд —\nэто эпоха, которую никто не забудет. 📜🔥\n\nА ведь финал был на грани...\nМуся, мадриский воин, был всего в одном голе от великой победы.\nОн сражался до конца, и его путь — это история силы и стойкости. ⚔️❤️‍🔥\n\nНо пока Freshl продолжает своё шествие,\nимя которого уже стало легендой.\n\nПоздравляем чемпиона. И честь финалисту. ⏳🌟"
+    },
+    {
+      "msg_id": 1156,
+      "date": "2025-08-08T22:35:32",
+      "url": "https://t.me/gvardiolPlay/1156",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Freshl",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем Freshl! 🏆🌸\n\nОн забрал трофей \"1 сезон — весенний этап\" — пусть само название и звучит немного загадочно 🤷‍♂️✨,\nно суть ясна: победил сильнейший среди чемпионов. 👑🔥\n\n\n⚡ И да, не забудем\nFreshl — самый быстрый чемпион турнира.\nОн берёт титулы быстрее, чем кто-то успеет моргнуть! 👀💨"
+    },
+    {
+      "msg_id": 1178,
+      "date": "2025-08-20T20:19:09",
+      "url": "https://t.me/gvardiolPlay/1178",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Баграт",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 2,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Баграт — двукратный чемпион! 🏆🔥\n\nВ финале он вновь доказал свою силу и характер,\nоднако на пути к титулу его остановил соперник с неожиданным прозвищем — Енот 🦝⚔️.\n\nНаверняка вы слышали ту самую легендарную песню про енота 🎶 —\nи теперь она будто стала гимном этого финала.\n\nНа этот раз титул уходит к Баграту, а Енот остаётся в роли достойного финалиста 👏✨."
+    },
+    {
+      "msg_id": 1199,
+      "date": "2025-08-27T12:04:21",
+      "url": "https://t.me/gvardiolPlay/1199",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Нуралы",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Нуралы! 🏆🔥\n\nКазахский мафиози из Ливерпуля выходит на вершину турнира, доказав, что его путь к славе был неизбежен 🚀🔴.\nМафиозный стиль, холодный расчёт и железные нервы — вот секрет его победы ⚔️👊.\n\nПоздравляем чемпиона! 🥳"
+    },
+    {
+      "msg_id": 1215,
+      "date": "2025-09-02T13:02:53",
+      "url": "https://t.me/gvardiolPlay/1215",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Нурс",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Нуралы",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 3,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Нурс — трёхкратный чемпион! 👑🔥\n\nФинал против Нуралы стал настоящей драмой ⚔️.\nКумысные братья сошлись лицом к лицу,\nно лишь один поднял кубок над головой 🏆.\n\nПоздравляем\n\nДля Нурса — это путь к величию ✨,\nдля Нуралы — второе горькое поражение в решающем матче 💔.\n\nСудьба снова сделала свой выбор ⏳."
+    },
+    {
+      "msg_id": 1236,
+      "date": "2025-09-09T17:02:00",
+      "url": "https://t.me/gvardiolPlay/1236",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Salieva",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Salieva! 🏆✨\n\nФанат парижского клуба, возможно, полюбивший их после победы в ЛЧ 😉🇫🇷.\nНо это уже не имеет значения — главное, что в своём первом турнире он сразу взял чемпионство! 🚀👑\n\nОчень грустно был обыгран Виталя Whitesoho 💔,\nкоторый так и не смог приблизиться к настоящему кубку… 🏆⏳\n\nХороший старт для Salieva — или в следующий раз нас ждёт громкий провал?"
+    },
+    {
+      "msg_id": 1262,
+      "date": "2025-09-19T21:20:30",
+      "url": "https://t.me/gvardiolPlay/1262",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Zenoks",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Zenoks! 🏆🔥\nПоздравляем с заслуженной победой 👏🎉\n\nIt's not just a boy — it's a Chelsea man! 💙⚡\n\nВ финале он одолел, как всем казалось, всемогущего Freshl'a 👑,\nа оказалось, что он просто… человек ⚔️.\n\nСегодня Zenoks вписал своё имя в историю турнира,\nи теперь каждый будет помнить: это не просто игрок — это один из великих 👑💙"
+    },
+    {
+      "msg_id": 1282,
+      "date": "2025-09-30T18:00:03",
+      "url": "https://t.me/gvardiolPlay/1282",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Zenoks",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "NSCODER",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 2,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем Zenoks! 🏆💙\nТеперь уже двухкратный чемпион.\n\nСнова доказал, что его победа — не случайность.\nЕго холодный расчёт и вера в цвет клуба делают его имя всё громче среди чемпионов. 👑\n\nВ финале был обыгран NSCODER 💔\nПусть его старания ещё не вознаграждены, но он уже впереди тех, кто так и не решился сделать первый шаг. 🌟"
+    },
+    {
+      "msg_id": 1297,
+      "date": "2025-10-07T19:44:45",
+      "url": "https://t.me/gvardiolPlay/1297",
+      "tournament_type": "vsa",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Вадим Spa_Msk",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Феникс",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": null,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "🔥 Турнир по VSA — место, где обитают уникальные люди 🎲\n\nИ первый обладатель уникального кубка — никто иной, как Вадим Spa_Msk 🏆\nОсобенный трофей для особенного игрока — вот так создаются легенды!\n\nПоздравляем победителя! 🎉👏 \n\nВ финале был повержен Феникс — человек, который изо всех сил стремился завоевать хотя бы обычный кубок… но судьба распорядилась иначе. Даже фальш ему не покорился 😅\n\n\nИ кто знает… может, скоро мы снова соберём всех на VSA или eFootball! Главное — верить! 💪⚡"
+    },
+    {
+      "msg_id": 1312,
+      "date": "2025-10-14T23:00:31",
+      "url": "https://t.me/gvardiolPlay/1312",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Muraking",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Вадима",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Muraking! 👑🔥\n\nВ финале он одолел хорошо знакомого всем Вадима (Spa_MSK) ⚔️.\nПосле матча Вадим задал пару вопросов о “неуважении”, но история запомнит лишь одно — победителя. 🏆\n\nГлавную роль в этой победе сыграл настоящий герой команды — Элдор Шомуродов ⚡⚽\nОн был движущей силой, мотором и вдохновением Muraking’a на пути к титулу! 💥\n\nПобедить может каждый — и сегодня это доказал Muraking! 💪🎉"
+    },
+    {
+      "msg_id": 1331,
+      "date": "2025-10-23T23:52:32",
+      "url": "https://t.me/gvardiolPlay/1331",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Нурс",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Антона",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 3,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Нурс — трёхкратный чемпион! 🏆🔥\n\nВ финале он уничтожил самого Антона — человека, имя которого стало синонимом трофеев и рекордов. ⚔️\n\nНо в этот раз всё было иначе: Нурс вышел, как будто с кумысом в венах и огнём в глазах! 🐎💥\nОн не оставил шансов легенде, доказав, что новая эра уже наступила.\n\nСлава кумысу! 🥛👑"
+    },
+    {
+      "msg_id": 1341,
+      "date": "2025-10-29T21:32:26",
+      "url": "https://t.me/gvardiolPlay/1341",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Артурито",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Феникс",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Артурито! 🏆🔥\nЧеловек, чьё сердце бьётся за МЮ, а разум служит Реалу, наконец-то поднял свой первый трофей! ❤️🤍\n\nВ финале был обыгран не безызвестный Феникс — человек, чей менталитет лишь немного превосходит менталитет Графа. ⚔️\nОн снова был близок, но шанс ускользнул… 💔\n\nА ртурито теперь вписан в историю турнира — с трофеем и улыбкой победителя. 👑"
+    },
+    {
+      "msg_id": 1355,
+      "date": "2025-11-05T21:05:14",
+      "url": "https://t.me/gvardiolPlay/1355",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Вадим",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 3,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Вадим — трёхкратный чемпион! 🏆🔥\nЕдинственный игрок, у которого сейчас ровно три трофея — баланс и стабильность, достойные легенды ⚖️👑\n\nФанат забросов, мастер длинных передач и неожиданных решений 🎯⚡\nОн снова доказал, что стиль не важен, когда на кону — победа.\n\nИ да, это тот самый человек, который выиграл турнир по VSA —\nуникальный игрок с уникальной историей. 💥"
+    },
+    {
+      "msg_id": 1367,
+      "date": "2025-11-12T21:00:01",
+      "url": "https://t.me/gvardiolPlay/1367",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Nscoder",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Nscoder! 🏆🔥\nСпустя столько лет ожиданий и испытаний — он смог. 💪\n\nЕму прочили судьбу Марко Ройса — вечного бойца без титула,\nно Nscoder не знает границ. 🌍⚔️\nИ вот он — здесь и сейчас, среди лучших,\nтам, где ему всегда было место. 👑⚡\n\nБойтесь не поражений — \nБойтесь бездействия"
+    },
+    {
+      "msg_id": 1380,
+      "date": "2025-11-20T12:03:00",
+      "url": "https://t.me/gvardiolPlay/1380",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Muraking",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Нскодера",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 2,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Двухкратный чемпион — Muraking! 🏆🔥\nВ тяжёлой, упорной борьбе он одолел Нскодера, для которого это был уже второй финал подряд.\n\nОдному — соболезнуем.\nДругого — поздравляем.\n\nТаков закон жизни турниров: кто-то снова встаёт, кто-то снова падает — но чемпионом становится только один. 👑✨"
+    },
+    {
+      "msg_id": 1388,
+      "date": "2025-11-27T11:03:33",
+      "url": "https://t.me/gvardiolPlay/1388",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Антона",
+        "username": null,
+        "alias": "Lokomotive"
+      },
+      "runner_up": {
+        "raw_name": "Дрончик",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 10,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Десятая, юбилейная победа Антона (Lokomotive)! 🏆🔥\nПоздравляем с великим достижением! 👑✨\n\nПосле долгой засухи — целых 122 дня без титула — он снова поднял трофей.\nВ финале его соперником был Дрончик, но опыт, характер и железная выдержка Lokomotive сделали своё дело. 🚂⚔️\n\n\nПоздравляем чемпиона! 🎉"
+    },
+    {
+      "msg_id": 1399,
+      "date": "2025-12-03T21:01:21",
+      "url": "https://t.me/gvardiolPlay/1399",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Баграт",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Зенокса",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 3,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый трёхкратный чемпион — Баграт! 🏆🔥\n\nВ финале он обыграл Зенокса, для которого это тоже могло стать третьим титулом… но судьба решила иначе.\nИ это уже не важно.\n\nВажно то, что, по мнению «известного критика», Баграт не стал бы чемпионом без удачи.\nНо удача — часть футбола или всего лишь иллюзия проигравших?\nКаждый решит сам. ⚡⚽\n\nПоздравляем чемпиона! 🎉"
+    },
+    {
+      "msg_id": 1417,
+      "date": "2025-12-12T12:02:22",
+      "url": "https://t.me/gvardiolPlay/1417",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Zenoks",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 3,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Трёхкратный чемпион — Zenoks! 🏆🔥\nОн сделал то, чего сборной Португалии в реальной жизни, возможно, уже не суждено: взял не дешманский кубок! 🇵🇹✨\nПоздравляем его с этим легендарным достижением! 👏🔥\n\nИнтересный факт: уже второй турнир подряд финал решает, кто станет трёхкратным чемпионом.\nИ в этот раз удача оказалась жестока к Нуралы — он снова остановился в шаге от истории.\n\nПоздравляем чемпиона! 🎉"
+    },
+    {
+      "msg_id": 1422,
+      "date": "2025-12-17T11:00:13",
+      "url": "https://t.me/gvardiolPlay/1422",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Demidrol",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Антона",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 8,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "8-кратный чемпион — Demidrol! 🏆🔥\n\nНаконец-то Юра, спустя 146 дней, снова взял свой очередной трофей. ⏳💪\nВ финале он обыграл Антона, сократив отставание от него на один кубок — интрига в гонке живёт. ⚔️👑\n\nИли это последний трофей перед уходом на пенсию? 👀\nВремя покажет.\n\nПоздравляем чемпиона! 🎉"
+    },
+    {
+      "msg_id": 1470,
+      "date": "2026-01-23T19:37:33",
+      "url": "https://t.me/gvardiolPlay/1470",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Zenoks",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Вадим",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 4,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "4-кратный чемпион — Zenoks! 🏆🔥\nКто знает, сколько у него чемпионств на самом деле?\nОтвет прост — ровно чотыре. И каждое взято не случайно.\n\nВ финале пал Вадим.\nТот самый соперник, который не прощает ошибок.\nНо в этот день ошибок не было у Zenoks’а.\nПобеждают не всегда самые громкие.\nПобеждают те, кто остаётся. 👑"
+    },
+    {
+      "msg_id": 1481,
+      "date": "2026-02-05T12:59:01",
+      "url": "https://t.me/gvardiolPlay/1481",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Demidrol",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 9,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем — 9-кратный чемпион Demidrol! 🏆🔥\nВ этот раз в финале он вкусил яблочный фрэш 🍏💥 — без шансов и сомнений.\n\nТеперь у Юры впереди всё самое интересное:\nчтобы стать первым и обогнать того самого Димку,\nне хватает всего двух кубков.\n\nГонка продолжается?! 👑🔥"
+    },
+    {
+      "msg_id": 1521,
+      "date": "2026-05-03T22:35:48",
+      "url": "https://t.me/gvardiolPlay/1521",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Антон",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Назарий",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 11,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Поздравляем победителя с идеальным кубком! 🏆✨\n\nВозможно, кто-то уже давно сбился со счёта,\nно мы продолжаем считать… и сейчас это 11 трофеев.\n\nИ мы даже надеемся, что он остановится на двузначном числе… хотя верится с трудом \n\nВ финале был обыгран Назарий 💔 —\nи без лишних слов стало ясно, кто здесь на вершине.\n\nЕго зовут Антон.\nОн же Lokomotive. 🚂👑"
+    },
+    {
+      "msg_id": 1535,
+      "date": "2026-05-16T21:36:01",
+      "url": "https://t.me/gvardiolPlay/1535",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Miqo",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "N1s'a",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Miqo! 🏆🔥\nВ финале он обыграл N1s'a ⚔️,\nуверенно закрыв главный матч турнира.\nПервый турнир — и сразу титул.\nИ, похоже, последний…\nОн пришёл за деньгами 💰 — и взял всё, что хотел, без лишних эмоций.\nБез долгой истории, без громких заявлений \nпросто зашёл, забрал своё и ушёл.\nНу красава, чё. 👑"
+    },
+    {
+      "msg_id": 1540,
+      "date": "2026-05-21T22:29:50",
+      "url": "https://t.me/gvardiolPlay/1540",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Назарий",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": "Каефа",
+        "username": null
+      },
+      "final_score": null,
+      "championship_count": 1,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Новый чемпион — Назарий! 🏆🔥\nВ финале он обыграл Каефа ⚔️ —\nгде всё сошлось: удача и скилл. 🍀💪\nПинг 300 сделал своё дело, но и момент был на его стороне.\nИменно так берутся трофеи.\nДля Каефа это только начало —\nв следующий раз он вернётся сильнее. ✨\nПоздравляем чемпиона! 👑🎉"
+    },
+    {
+      "msg_id": 1545,
+      "date": "2026-05-30T13:34:04",
+      "url": "https://t.me/gvardiolPlay/1545",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Miqo",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": "Zhbrrrr"
+      },
+      "final_score": "8:3",
+      "championship_count": 2,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "Miqo — двухкратный чемпион! 🏆🏆🔥\nВ финале он не оставил шансов @Zhbrrrr, уверенно победив со счётом 8:3 ⚔️💥\nПохоже, в основах ему искренне сіпе сама игра…\nили дело всё-таки в его скилле? 🤔⚽\nКак бы там ни было, второй трофей уже в коллекции,\nа значит случайностью это точно не назовёшь. 👑✨\nПоздравляем! 🎉👏"
+    },
+    {
+      "msg_id": 1546,
+      "date": "2026-05-30T16:01:03",
+      "url": "https://t.me/gvardiolPlay/1546",
+      "tournament_type": "fantasy",
+      "podium": {
+        "winner": {
+          "raw_name": null,
+          "username": "NurStw"
+        },
+        "silver": {
+          "raw_name": null,
+          "username": "Phoenileo"
+        },
+        "bronze": {
+          "raw_name": null,
+          "username": "Yurreeec"
+        },
+        "cup_winner": {
+          "raw_name": null,
+          "username": "OliverBax"
+        }
+      },
+      "confidence": "high",
+      "needs_review": false,
+      "raw_text": "Сезон АПЛ завершился уже 5 дней назад, а итоги нашей фэнтези-лиги всё ещё не подведены. Исправляемся!\n\n🏆 Поздравляем победителя — @NurStw!\n\n🥈 Серебряный мальчик — @Phoenileo\n\n🥉 Бронзовый призёр — @Yurreeec\n\n🏅 Отдельно поздравляем @OliverBax с победой в Кубке Фэнтези! 👏\n\nСпасибо всем участникам Фэнтези Премьер-лиги в лиге Гвардиолыча! ❤️\n\nСостав участников:\n\n🏆 Batya Madueke — @NurStw\n🥈 Phoenix Team — @Phoenileo\n🥉 Verit Amorimu — @Yurreeec\n4️⃣ Drakebog — @drakelox\n5️⃣ Sosedi — @sosedi\n6️⃣ Sedemak — @sedemak (великий создатель лиги)\n7️⃣ Definitelyctzn — @ggmarquezz\n8️⃣ Enzo Maresca Best — @flipperpepe1\n9️⃣ Irtysh Omsk — @OliverBax\n🔟 Nineteen — @xzkto\n1️⃣1️⃣ Fchillman — @xzkto\n1️⃣2️⃣ Sepchick — @Sepchick\n1️⃣3️⃣ The Extraordinaries 😍 — @sergfh20\n\nТакже хотим искренне поздравить «Арсенал» с победой в Премьер-лиге и пожелать удачи в сегодняшнем финале Лиги чемпионов. 😌\n\nСпасибо за борьбу и эмоции на протяжении сезона! До встречи в следующем розыгрыше. ⚽🔥"
+    },
+    {
+      "msg_id": 1557,
+      "date": "2026-06-01T13:04:04",
+      "url": "https://t.me/gvardiolPlay/1557",
+      "tournament_type": "fantasy",
+      "podium": {
+        "winner": {
+          "raw_name": "SeDeMak",
+          "username": null
+        },
+        "silver": {
+          "raw_name": "Phoenileo",
+          "username": null
+        },
+        "bronze": {
+          "raw_name": "Yurreeec",
+          "username": null
+        },
+        "cup_winner": null
+      },
+      "confidence": "high",
+      "needs_review": false,
+      "raw_text": "Сезон Фэнтези Лиги чемпионов подошёл к концу!\n\nДо самого финиша за первые места боролись лишь четверо участников, но мы всё равно благодарим каждого, кто принял участие в нашем розыгрыше. ❤️\n\n🏆 Поздравляем победителя — SeDeMak!\n\n🥈 Серебряный мальчик — Phoenileo\n\n🥉 Бронзовый призёр — Yurreeec\n\n👏 Также отдельное уважение FCHILMAN, который до последнего сохранял шансы на попадание в тройку.\n\nИтоговая таблица:\n\n🏆 SeDeMak\n🥈 Phoenileo\n🥉 Yurreeec\n4️⃣ FCHILMAN\n5️⃣ CHELSEA CHAM...\n6️⃣ Citizen\n7️⃣ Drake and Chelse...\n8️⃣ табуреточкатим\n9️⃣ Златан ФК\n🔟 GreenArrow\n﻿\nСпасибо всем за борьбу, прогнозы, удачные пики и неожиданные провалы капитанов. Надеемся увидеть вас в следующем сезоне Фэнтези Лиги чемпионов! ⚽🏆🔥"
+    },
+    {
+      "msg_id": 1569,
+      "date": "2026-06-08T19:10:24",
+      "url": "https://t.me/gvardiolPlay/1569",
+      "tournament_type": "main",
+      "tournament_number": null,
+      "winner": {
+        "raw_name": "Miqo",
+        "username": null,
+        "alias": null
+      },
+      "runner_up": {
+        "raw_name": null,
+        "username": "kaeftgk"
+      },
+      "final_score": "6:1",
+      "championship_count": 3,
+      "confidence": "medium",
+      "needs_review": true,
+      "raw_text": "И снова он — Miqo! 🏆🔥\nТеперь уже трёхкратный чемпион. 👑\n\nВ финале был обыгран @kaeftgk со счётом 6:1 ⚔️💥.\nБез интриги, без лишних вопросов — просто очередной трофей в коллекцию.\nНу реально, сiпе ему игра 😄\n\nПотому что иначе объяснить такие результаты становится всё сложнее.\n\nНадеюсь, вы, как и я, поздравляете его от всей души! 🎉👏🏆"
+    }
+  ]
+}

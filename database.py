@@ -126,6 +126,18 @@ __all__ = [
     "set_chat_quote_quiet_hours",
     "mark_chat_quote_sent",
     "list_chats_with_quote_interval",
+    # Champions / Hall of Fame
+    "TOURNAMENT_WINNER_TYPES",
+    "add_player_alias",
+    "remove_player_alias",
+    "list_player_aliases",
+    "resolve_alias_to_player_id",
+    "add_tournament_winner",
+    "list_tournament_winners",
+    "count_titles_by_type",
+    "get_titles_for_player",
+    "get_finals_for_player",
+    "count_tournament_winner_records",
 ]
 
 
@@ -968,6 +980,77 @@ def init_db():
             "ALTER TABLE matches "
             "ADD COLUMN tour_number INTEGER DEFAULT 0"
         )
+
+    # ── Champions / Hall of Fame (added 2026-06) ─────────────────────────
+    #
+    # Records winners of past tournaments (parsed from the @gvardiolPlay
+    # Telegram channel via ``scripts/parse_gvardiol_dump.py`` →
+    # ``data/champions_parsed.json`` → ``/import_champions``). One row per
+    # tournament-final post in the channel. Three tournament types:
+    #   - 'main'    — Турнир Гвардиолыча (the regular tournament)
+    #   - 'fantasy' — Фэнтези Лиги Чемпионов / АПЛ (podium: winner+silver+bronze)
+    #   - 'vsa'     — Турнир по VSA
+    # The ``source_message_id`` is the Telegram channel post id, used both
+    # for de-duplication on re-import and to build deep-links back to the
+    # original post (``https://t.me/gvardiolPlay/<msg_id>``) shown in the
+    # ``/champions`` UI.
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tournament_winners (
+            id                            INTEGER PRIMARY KEY AUTOINCREMENT,
+            tournament_type               TEXT    NOT NULL,
+            tournament_date               TEXT,
+            tournament_number             INTEGER,
+            winner_player_id              INTEGER NOT NULL,
+            runner_up_player_id           INTEGER,
+            fantasy_silver_player_id      INTEGER,
+            fantasy_bronze_player_id      INTEGER,
+            fantasy_cup_winner_player_id  INTEGER,
+            final_score                   TEXT,
+            championship_count            INTEGER,
+            source_message_id             INTEGER NOT NULL,
+            source_url                    TEXT    NOT NULL,
+            notes                         TEXT,
+            imported_at                   DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (winner_player_id)             REFERENCES players(id),
+            FOREIGN KEY (runner_up_player_id)          REFERENCES players(id),
+            FOREIGN KEY (fantasy_silver_player_id)     REFERENCES players(id),
+            FOREIGN KEY (fantasy_bronze_player_id)     REFERENCES players(id),
+            FOREIGN KEY (fantasy_cup_winner_player_id) REFERENCES players(id),
+            UNIQUE (tournament_type, source_message_id)
+        )
+        """
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_twin_type_date "
+        "ON tournament_winners(tournament_type, tournament_date)"
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_twin_winner "
+        "ON tournament_winners(winner_player_id)"
+    )
+
+    # Free-form alias → player mapping. Lets admins map channel-post
+    # nicknames (cyrillic display names, declensions, jokey aliases like
+    # "Феникс") to a registered ``players`` row, so the importer and any
+    # future free-form lookup can resolve them. Stored lower-cased so
+    # lookups are trivially case-insensitive.
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS player_aliases (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            alias        TEXT    NOT NULL UNIQUE,
+            player_id    INTEGER NOT NULL,
+            granted_by   INTEGER,
+            granted_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE
+        )
+        """
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_aliases_player "
+        "ON player_aliases(player_id)"
+    )
 
     conn.commit()
     conn.close()
@@ -3593,3 +3676,343 @@ def list_chats_with_quote_interval() -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+
+# ── Champions / Hall of Fame helpers ────────────────────────────────────────
+#
+# Schema lives in ``init_db`` above. These helpers back the ``/champions``
+# user command, the ``/alias`` admin command, and ``/import_champions``.
+
+# Tournament types we recognise. Anything else is rejected at insert time so
+# typos in the importer can't pollute the leaderboard.
+TOURNAMENT_WINNER_TYPES = ("main", "fantasy", "vsa")
+
+
+def _norm_alias(alias: str) -> str:
+    """Canonical form for an alias key — lowercase + collapsed whitespace.
+    Empty input → ``""`` (callers should treat this as ``None``).
+    """
+    if not alias:
+        return ""
+    return " ".join(str(alias).strip().lower().split())
+
+
+def add_player_alias(alias: str, player_id: int, granted_by: int | None = None) -> bool:
+    """Register an alias for a player. Returns True if a new row was
+    inserted, False if the alias already pointed at this same player
+    (idempotent). Raises ``ValueError`` if the alias is already taken
+    by a *different* player.
+    """
+    key = _norm_alias(alias)
+    if not key:
+        raise ValueError("alias must not be empty")
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT player_id FROM player_aliases WHERE alias=?", (key,),
+    ).fetchone()
+    if existing:
+        existing_pid = (
+            existing["player_id"] if isinstance(existing, dict) or hasattr(existing, "keys")
+            else existing[0]
+        )
+        if int(existing_pid) == int(player_id):
+            conn.close()
+            return False
+        conn.close()
+        raise ValueError(
+            f"alias {alias!r} already maps to player_id={existing_pid}"
+        )
+    conn.execute(
+        "INSERT INTO player_aliases (alias, player_id, granted_by) VALUES (?, ?, ?)",
+        (key, int(player_id), granted_by),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def remove_player_alias(alias: str) -> bool:
+    """Drop an alias by name (case-insensitive). Returns True if a row
+    was deleted, False if no such alias exists.
+    """
+    key = _norm_alias(alias)
+    if not key:
+        return False
+    conn = get_conn()
+    cur = conn.execute("DELETE FROM player_aliases WHERE alias=?", (key,))
+    conn.commit()
+    affected = bool(getattr(cur, "rowcount", 0))
+    conn.close()
+    return affected
+
+
+def list_player_aliases(player_id: int | None = None) -> list[dict]:
+    """List all aliases (or just one player's aliases, if ``player_id``
+    is given). Each row joins ``players.username`` so the caller can
+    render ``alias → @username`` in one pass.
+    """
+    conn = get_conn()
+    if player_id is None:
+        rows = conn.execute(
+            "SELECT a.id, a.alias, a.player_id, a.granted_by, a.granted_at, "
+            "       p.username, p.game_nickname "
+            "FROM player_aliases a "
+            "JOIN players p ON p.id = a.player_id "
+            "ORDER BY LOWER(p.username), a.alias"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT a.id, a.alias, a.player_id, a.granted_by, a.granted_at, "
+            "       p.username, p.game_nickname "
+            "FROM player_aliases a "
+            "JOIN players p ON p.id = a.player_id "
+            "WHERE a.player_id=? "
+            "ORDER BY a.alias",
+            (int(player_id),),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def resolve_alias_to_player_id(alias: str) -> int | None:
+    """Return the player_id mapped to ``alias`` (case-insensitive), or None."""
+    key = _norm_alias(alias)
+    if not key:
+        return None
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT player_id FROM player_aliases WHERE alias=?", (key,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return int(row["player_id"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
+
+
+def add_tournament_winner(
+    *,
+    tournament_type: str,
+    winner_player_id: int,
+    source_message_id: int,
+    source_url: str,
+    tournament_date: str | None = None,
+    tournament_number: int | None = None,
+    runner_up_player_id: int | None = None,
+    fantasy_silver_player_id: int | None = None,
+    fantasy_bronze_player_id: int | None = None,
+    fantasy_cup_winner_player_id: int | None = None,
+    final_score: str | None = None,
+    championship_count: int | None = None,
+    notes: str | None = None,
+) -> int | None:
+    """Insert (or update) one tournament-winner record.
+
+    De-duplicates on ``(tournament_type, source_message_id)``: if the same
+    channel post is imported twice the second call updates the existing
+    row instead of failing. Returns the row id, or ``None`` if nothing
+    was inserted/updated for some unexpected reason.
+    """
+    if tournament_type not in TOURNAMENT_WINNER_TYPES:
+        raise ValueError(
+            f"tournament_type must be one of {TOURNAMENT_WINNER_TYPES}, "
+            f"got {tournament_type!r}"
+        )
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT id FROM tournament_winners "
+        "WHERE tournament_type=? AND source_message_id=?",
+        (tournament_type, int(source_message_id)),
+    ).fetchone()
+    if existing:
+        row_id = int(
+            existing["id"] if isinstance(existing, dict) or hasattr(existing, "keys")
+            else existing[0]
+        )
+        conn.execute(
+            """UPDATE tournament_winners SET
+                tournament_date              = ?,
+                tournament_number            = ?,
+                winner_player_id             = ?,
+                runner_up_player_id          = ?,
+                fantasy_silver_player_id     = ?,
+                fantasy_bronze_player_id     = ?,
+                fantasy_cup_winner_player_id = ?,
+                final_score                  = ?,
+                championship_count           = ?,
+                source_url                   = ?,
+                notes                        = ?
+              WHERE id = ?""",
+            (
+                tournament_date, tournament_number,
+                int(winner_player_id),
+                runner_up_player_id,
+                fantasy_silver_player_id, fantasy_bronze_player_id,
+                fantasy_cup_winner_player_id,
+                final_score, championship_count,
+                source_url, notes,
+                row_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return row_id
+    # Fresh insert. ``insert_returning_id`` is the backend wrapper that
+    # works on both SQLite (lastrowid) and Postgres (RETURNING id).
+    new_id = conn.insert_returning_id(
+        """INSERT INTO tournament_winners (
+            tournament_type, tournament_date, tournament_number,
+            winner_player_id, runner_up_player_id,
+            fantasy_silver_player_id, fantasy_bronze_player_id,
+            fantasy_cup_winner_player_id,
+            final_score, championship_count,
+            source_message_id, source_url, notes
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            tournament_type, tournament_date, tournament_number,
+            int(winner_player_id),
+            runner_up_player_id,
+            fantasy_silver_player_id, fantasy_bronze_player_id,
+            fantasy_cup_winner_player_id,
+            final_score, championship_count,
+            int(source_message_id), source_url, notes,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return int(new_id) if new_id is not None else None
+
+
+def list_tournament_winners(tournament_type: str | None = None) -> list[dict]:
+    """All winner rows, optionally filtered by type. Returned in
+    chronological order (oldest first) by ``tournament_date``, falling
+    back to ``source_message_id`` when the date is missing.
+    """
+    conn = get_conn()
+    if tournament_type is None:
+        rows = conn.execute(
+            "SELECT * FROM tournament_winners "
+            "ORDER BY COALESCE(tournament_date, '9999-99-99'), source_message_id"
+        ).fetchall()
+    else:
+        if tournament_type not in TOURNAMENT_WINNER_TYPES:
+            raise ValueError(
+                f"tournament_type must be one of {TOURNAMENT_WINNER_TYPES}"
+            )
+        rows = conn.execute(
+            "SELECT * FROM tournament_winners "
+            "WHERE tournament_type=? "
+            "ORDER BY COALESCE(tournament_date, '9999-99-99'), source_message_id",
+            (tournament_type,),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_titles_by_type(tournament_type: str) -> list[dict]:
+    """``[{player_id, username, game_nickname, titles}, …]`` ordered by
+    title count desc. Used by the ``/champions`` "top" view. For
+    fantasy, only first-place finishes count as titles (silver / bronze
+    / cup-winner go to dedicated breakdowns).
+    """
+    if tournament_type not in TOURNAMENT_WINNER_TYPES:
+        raise ValueError(
+            f"tournament_type must be one of {TOURNAMENT_WINNER_TYPES}"
+        )
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT w.winner_player_id AS player_id, "
+        "       p.username, p.game_nickname, "
+        "       COUNT(*) AS titles "
+        "FROM tournament_winners w "
+        "JOIN players p ON p.id = w.winner_player_id "
+        "WHERE w.tournament_type=? "
+        "GROUP BY w.winner_player_id, p.username, p.game_nickname "
+        "ORDER BY titles DESC, LOWER(p.username) ASC",
+        (tournament_type,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_titles_for_player(player_id: int, tournament_type: str | None = None) -> list[dict]:
+    """All winner rows where this player is the **winner**, ordered
+    chronologically. If ``tournament_type`` is given, restrict to it.
+    """
+    conn = get_conn()
+    if tournament_type is None:
+        rows = conn.execute(
+            "SELECT * FROM tournament_winners "
+            "WHERE winner_player_id=? "
+            "ORDER BY COALESCE(tournament_date, '9999-99-99'), source_message_id",
+            (int(player_id),),
+        ).fetchall()
+    else:
+        if tournament_type not in TOURNAMENT_WINNER_TYPES:
+            raise ValueError(
+                f"tournament_type must be one of {TOURNAMENT_WINNER_TYPES}"
+            )
+        rows = conn.execute(
+            "SELECT * FROM tournament_winners "
+            "WHERE winner_player_id=? AND tournament_type=? "
+            "ORDER BY COALESCE(tournament_date, '9999-99-99'), source_message_id",
+            (int(player_id), tournament_type),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_finals_for_player(player_id: int, tournament_type: str | None = None) -> list[dict]:
+    """Every winner row where the player appears in any role
+    (winner / runner-up / fantasy podium / cup winner). Used by the
+    "by player" detail card so silver/bronze/runner-up finishes show
+    up alongside outright wins.
+    """
+    where_pid = (
+        "winner_player_id=? OR runner_up_player_id=? "
+        "OR fantasy_silver_player_id=? OR fantasy_bronze_player_id=? "
+        "OR fantasy_cup_winner_player_id=?"
+    )
+    pid = int(player_id)
+    params: tuple = (pid, pid, pid, pid, pid)
+    conn = get_conn()
+    if tournament_type is None:
+        rows = conn.execute(
+            f"SELECT * FROM tournament_winners WHERE {where_pid} "
+            "ORDER BY COALESCE(tournament_date, '9999-99-99'), source_message_id",
+            params,
+        ).fetchall()
+    else:
+        if tournament_type not in TOURNAMENT_WINNER_TYPES:
+            raise ValueError(
+                f"tournament_type must be one of {TOURNAMENT_WINNER_TYPES}"
+            )
+        rows = conn.execute(
+            f"SELECT * FROM tournament_winners "
+            f"WHERE ({where_pid}) AND tournament_type=? "
+            "ORDER BY COALESCE(tournament_date, '9999-99-99'), source_message_id",
+            params + (tournament_type,),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_tournament_winner_records(tournament_type: str | None = None) -> int:
+    """How many winner rows are in the DB right now. Used by the
+    ``/champions`` empty-state message and by ``/import_champions`` to
+    print a before/after delta.
+    """
+    conn = get_conn()
+    if tournament_type is None:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM tournament_winners"
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM tournament_winners WHERE tournament_type=?",
+            (tournament_type,),
+        ).fetchone()
+    conn.close()
+    if row is None:
+        return 0
+    return int(row["n"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
