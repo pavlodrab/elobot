@@ -502,12 +502,41 @@ async def cmd_alias(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except ValueError as e:
             await send(update, f"❌ {html.escape(str(e))}")
             return
+        # Retroactively repoint already-imported tournament_winners rows.
+        # When the user added the alias *after* /import_champions had
+        # auto-created a placeholder player, the existing records still
+        # pointed at that placeholder — leaving the leaderboard split
+        # ('Freshl 6' + '@freshl66 4' instead of '@freshl66 10').
+        # Consolidate them now so the merge is visible immediately.
+        try:
+            moved, orphan_ids = db.consolidate_winner_records_for_alias(
+                alias_text, target["id"],
+            )
+        except Exception as e:
+            log.warning("alias consolidate failed: %s", e)
+            moved, orphan_ids = 0, []
+
         verb = "добавлен" if inserted else "уже был назначен"
-        await send(
-            update,
+        lines = [
             f"✅ Алиас <b>{html.escape(alias_text)}</b> {verb} → "
             f"{mention(target['username'])} (id={target['id']}).",
-        )
+        ]
+        if moved:
+            lines.append("")
+            lines.append(
+                f"🔁 Переподвязал <b>{moved}</b> запис"
+                + ("ь" if moved == 1 else ("и" if 2 <= moved <= 4 else "ей"))
+                + f" с плейсхолдер-игрока"
+                + ("а" if len(orphan_ids) == 1 else "ов")
+                + f" (id="
+                + ", ".join(str(i) for i in orphan_ids)
+                + f") на {mention(target['username'])}."
+            )
+            lines.append(
+                "ℹ️ Плейсхолдер-игрок остался в БД с 0 трофеями. "
+                "Если хочешь полностью слить — <code>/relink_player</code>."
+            )
+        await send(update, "\n".join(lines))
         return
 
     if sub in ("remove", "rm", "del", "delete", "-"):

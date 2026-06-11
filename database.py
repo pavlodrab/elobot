@@ -132,6 +132,7 @@ __all__ = [
     "remove_player_alias",
     "list_player_aliases",
     "resolve_alias_to_player_id",
+    "consolidate_winner_records_for_alias",
     "add_tournament_winner",
     "list_tournament_winners",
     "count_titles_by_type",
@@ -3792,6 +3793,66 @@ def resolve_alias_to_player_id(alias: str) -> int | None:
     if not row:
         return None
     return int(row["player_id"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
+
+
+def consolidate_winner_records_for_alias(
+    alias: str, target_player_id: int,
+) -> tuple[int, list[int]]:
+    """Repoint existing ``tournament_winners`` references away from any
+    placeholder player matching ``alias`` and onto ``target_player_id``.
+
+    Used right after :func:`add_player_alias` so a freshly registered
+    alias immediately retroactively merges any already-imported winner
+    / runner-up / podium / cup-winner references onto the real player
+    — without requiring the admin to re-run ``/import_champions``.
+
+    Match rule for "placeholder player": its ``username`` (case-folded)
+    or ``game_nickname`` (case-folded) equals the alias. The target
+    player itself is never matched, so calling this on an alias whose
+    target already happens to share the alias as a nickname is a
+    safe no-op.
+
+    Returns ``(records_changed, placeholder_player_ids)``. ``records_changed``
+    is the total count of column-cells repointed across the five
+    player-id columns of ``tournament_winners``; ``placeholder_player_ids``
+    are the orphan rows the admin may want to clean up via
+    ``/relink_player``.
+    """
+    key = _norm_alias(alias)
+    if not key:
+        return 0, []
+    target_id = int(target_player_id)
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id FROM players "
+        "WHERE LOWER(username) = ? OR LOWER(game_nickname) = ?",
+        (key, key),
+    ).fetchall()
+    placeholder_ids: list[int] = []
+    for r in rows:
+        pid = int(r["id"] if isinstance(r, dict) or hasattr(r, "keys") else r[0])
+        if pid != target_id:
+            placeholder_ids.append(pid)
+    if not placeholder_ids:
+        conn.close()
+        return 0, []
+    moved = 0
+    for col in (
+        "winner_player_id",
+        "runner_up_player_id",
+        "fantasy_silver_player_id",
+        "fantasy_bronze_player_id",
+        "fantasy_cup_winner_player_id",
+    ):
+        for pid in placeholder_ids:
+            cur = conn.execute(
+                f"UPDATE tournament_winners SET {col}=? WHERE {col}=?",
+                (target_id, pid),
+            )
+            moved += int(getattr(cur, "rowcount", 0) or 0)
+    conn.commit()
+    conn.close()
+    return moved, placeholder_ids
 
 
 def add_tournament_winner(
