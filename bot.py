@@ -5250,6 +5250,17 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await cb_jokes_menu(update, ctx)
         return
 
+    # ── AI-analyze inline menu ───────────────────────────────────────────
+    # Single dispatcher for the whole ``ai:*`` namespace — preset
+    # picker, "change N" submenu, and run trigger. See
+    # ``handlers.ai_analysis.cb_ai_menu`` for the full callback_data
+    # schema. Per-user-per-chat 1h rate limit + admin bypass live
+    # inside the dispatcher itself.
+    if data.startswith("ai:"):
+        from handlers.ai_analysis import cb_ai_menu
+        await cb_ai_menu(update, ctx)
+        return
+
     # ── Top submenu ───────────────────────────────────────────────────────
     if data == "top:elo":
         await cmd_top(update, ctx)
@@ -7352,6 +7363,27 @@ def main():
     app.add_handler(CommandHandler("jokesmenu", _cmd_jokes_menu))
     app.add_handler(CommandHandler("jokes_history", _cmd_jokes_history))
     app.add_handler(CommandHandler("jokeshistory", _cmd_jokes_history))
+
+    # ── AI chat-analysis (/analyze [N]) ──────────────────────────────
+    # Reuses the same chat_messages buffer as auto-jokes — the
+    # message logger above already persists rows when
+    # ``analyze_enabled=true`` for the chat (independent of
+    # jokes_enabled). UX: ``/analyze`` opens an inline preset-picker
+    # (Сводка / Планы / Темы / Настроение); a click runs the LLM
+    # over the last N messages and posts a ≤300-char result inside
+    # an expandable blockquote. Per-user-per-chat 1h rate limit
+    # (admins bypass) lives inside the callback dispatcher.
+    from handlers.ai_analysis import (
+        cmd_analyze as _cmd_analyze,
+        cmd_analyze_on as _cmd_analyze_on,
+        cmd_analyze_off as _cmd_analyze_off,
+    )
+    app.add_handler(CommandHandler("analyze", _cmd_analyze))
+    app.add_handler(CommandHandler("analyse", _cmd_analyze))  # BR-EN alias
+    app.add_handler(CommandHandler("analyze_on", _cmd_analyze_on))
+    app.add_handler(CommandHandler("analyzeon", _cmd_analyze_on))
+    app.add_handler(CommandHandler("analyze_off", _cmd_analyze_off))
+    app.add_handler(CommandHandler("analyzeoff", _cmd_analyze_off))
     # NB: Telegram only allows ASCII / digits / underscore in command
     # names, so the Russian-only aliases (/цитаты, /баг) had to go —
     # ``CommandHandler('цитаты', ...)`` raises at startup. Users
