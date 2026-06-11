@@ -7859,17 +7859,24 @@ async def on_db_import_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """``/tours [ID] [range]`` — show tour matches as PNG image.
+    """``/tours [ID] [range]`` — show tour matches as PNG image(s).
 
     Argument shapes (mirror ``/tourstext``):
       • ``/tours``           — current tour of the chat-bound / active tournament
       • ``/tours 14``        — current tour of tournament 14
       • ``/tours 14 1``      — tour 1 of tournament 14
-      • ``/tours 14 1-5``    — tours 1..5 of tournament 14
+      • ``/tours 14 1-5``    — tours 1..5 of tournament 14 (sent as an album,
+                                 one photo per tour, in a single Telegram message)
       • ``/tours 1-5``       — tours 1..5 of the chat-bound / active tournament
       • ``/tours 14 1,3,5``  — specific tours
 
     Range examples: ``1``, ``1-4``, ``1,3,5``. Default: current tour.
+
+    For multi-tour ranges the tours are rendered as **separate** PNGs and
+    sent as a Telegram media group (album) — easier to swipe through tour
+    by tour than scrolling through one tall stacked image. Telegram caps
+    a single album at 10 photos, so longer ranges are auto-chunked into
+    multiple consecutive albums.
     """
     args = list(ctx.args or [])
     t, err = _resolve_tournament_from_args(update, ctx, args=args)
@@ -7907,14 +7914,76 @@ async def cmd_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     try:
         from tour_image import render_tour_png
-        tour_numbers = _parse_tour_range(range_arg, t) if range_arg else _current_tour_range(t)
-        png = render_tour_png(t["id"], tour_numbers)
-        bio = io.BytesIO(png)
-        bio.name = f"tours_{t['id']}.png"
-        await update.effective_message.reply_photo(
-            photo=bio,
-            parse_mode="HTML",
+        tour_numbers = (
+            _parse_tour_range(range_arg, t) if range_arg else _current_tour_range(t)
         )
+        if not tour_numbers:
+            await send(update, "❌ Не понял диапазон туров.")
+            return
+        msg = update.effective_message
+
+        # ── Single-tour: classic single-photo reply. ─────────────────
+        if len(tour_numbers) == 1:
+            png = await asyncio.to_thread(render_tour_png, t["id"], tour_numbers)
+            bio = io.BytesIO(png)
+            bio.name = f"tour_{t['id']}_{tour_numbers[0]}.png"
+            await msg.reply_photo(photo=bio, parse_mode="HTML")
+            return
+
+        # ── Multi-tour: render each tour as its own PNG and send as a
+        #    single Telegram media group (album).
+        from telegram import InputMediaPhoto
+
+        # Render each tour into its own bytes-buffer. Sequential — PIL
+        # holds the GIL most of the time so threading wouldn't help, and
+        # keeping it sequential keeps memory predictable for large ranges.
+        per_tour_bytes: list[tuple[int, bytes]] = []
+        for tn in tour_numbers:
+            png = await asyncio.to_thread(render_tour_png, t["id"], [tn])
+            per_tour_bytes.append((tn, png))
+
+        # Build InputMediaPhoto objects. The first photo of each chunk
+        # carries a caption so the album has a header in the chat;
+        # everything else stays uncaptioned (the title bar of the
+        # rendered PNG already shows ``Тур N``).
+        TG_ALBUM_LIMIT = 10
+        first, last = tour_numbers[0], tour_numbers[-1]
+        head = (
+            f"📅 <b>{html.escape(t['name'])}</b> · туры "
+            f"{first}–{last}"
+            if first != last
+            else f"📅 <b>{html.escape(t['name'])}</b> · тур {first}"
+        )
+
+        chunks: list[list[InputMediaPhoto]] = []
+        cur: list[InputMediaPhoto] = []
+        for idx, (tn, png) in enumerate(per_tour_bytes):
+            bio = io.BytesIO(png)
+            bio.name = f"tour_{t['id']}_{tn}.png"
+            # Caption goes on the first photo of each chunk only —
+            # Telegram only renders the leading photo's caption as the
+            # album header and ignores subsequent ones in chat lists.
+            caption: str | None = None
+            if not cur:
+                caption = (
+                    head if not chunks
+                    else f"{head} (продолжение)"
+                )
+            cur.append(
+                InputMediaPhoto(
+                    media=bio,
+                    caption=caption,
+                    parse_mode="HTML" if caption else None,
+                )
+            )
+            if len(cur) == TG_ALBUM_LIMIT:
+                chunks.append(cur)
+                cur = []
+        if cur:
+            chunks.append(cur)
+
+        for chunk in chunks:
+            await msg.reply_media_group(media=chunk, write_timeout=180)
     except Exception as e:
         log.exception("cmd_tours failed")
         await send(update, f"❌ Ошибка рендера: {e}")
