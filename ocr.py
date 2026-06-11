@@ -49,15 +49,39 @@ except ImportError:                        # pragma: no cover
     _OCR_AVAILABLE = False
 
 
-# ── AI Vision OCR (Gemini + OpenRouter fallback) ─────────────────────────────
+# ── AI Vision OCR (Groq + Gemini + OpenRouter + OCR.space fallback) ──────────
 # Inlined here (instead of a separate ai_ocr.py module) to avoid any chance
 # of the bot ending up on a host where the auxiliary module isn't on
 # sys.path. Everything is pure stdlib; no extra dependencies.
+#
+# Provider chain (top to bottom):
+#   1. Groq        — Llama-4-Scout, ~LPU speed (sub-second), 30 RPM free.
+#   2. Gemini      — 2.5-flash (250 RPD) → 2.5-flash-lite (1000 RPD).
+#   3. OpenRouter  — multi-model free chain with key rotation on 429.
+#   4. OCR.space   — last-resort plain OCR (score-only, no team/league/goals).
 
-# Google Gemini (primary — 1500 req/day free, no rate-limit 429s)
+# Google Gemini (primary cloud LLM).
+# Free-tier quotas as of 2026-06 (per Google AI Studio):
+#   • gemini-2.5-flash       — 10 RPM /  250 RPD
+#   • gemini-2.5-flash-lite  — 15 RPM / 1000 RPD  (4× the daily quota,
+#                                                  same vision capability)
+# We try the higher-quality `flash` first, then fall through to `flash-lite`
+# when the primary 429s on RPD.
 _GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-lite")
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# Groq (primary fast-path). Reinstated 2026-06 — the previous removal
+# comment was incorrect; the free tier is still alive (30 RPM, no card,
+# no daily request cap on the free tier — only RPM/TPM). The Llama-4
+# Scout model is multimodal (text+image input) and runs on LPUs, which
+# means we typically get sub-second responses for screenshot OCR.
+# https://console.groq.com/docs/vision
+# https://console.groq.com/docs/rate-limits
+_GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+_GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # OpenRouter (fallback) — keys rotated on 429.
 # Primary key: env OPENROUTER_API_KEY (with hardcoded fallback below).
@@ -72,8 +96,14 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Bump this if you ever need more than 20 keys (very unlikely).
 _MAX_OPENROUTER_KEYS = 20
 
-# Groq support removed (2026-06): their free tier was discontinued and
-# the keys stopped working. Fallback chain is now Gemini → OpenRouter.
+# OCR.space (last-resort plain OCR). Used ONLY when every vision-LLM
+# above has failed — recovers the match score (best-effort) so the
+# user gets something rather than ``None``. Does NOT extract team
+# names, league plate, or goal events — those require a real VLM.
+# Free key: 25 000 req/month, no card.
+# https://ocr.space/ocrapi
+_OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "").strip()
+_OCR_SPACE_URL = "https://api.ocr.space/parse/image"
 
 AI_DEFAULT_MODEL = os.getenv(
     "OPENROUTER_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free"
@@ -84,19 +114,36 @@ AI_DEFAULT_MODEL = os.getenv(
 # rotates through this list, skipping models the user has already
 # seen for this screenshot.
 #
-# Live-tested order (2026-05-07, run #2 — after Baidu was caught
-# putting the small-font league line into team1/team2):
-#   - nvidia/nemotron-nano-12b-v2-vl:free  — primary (~8s), strong OCR
-#                                            accuracy on FC Mobile screens.
+# Live-tested order (2026-06 refresh — added Llama-4-Scout, Kimi-VL,
+# Mistral-Small-3.2, Nex-N2-Pro after Groq reinstated as primary):
+#   - nvidia/nemotron-nano-12b-v2-vl:free          — strong OCR accuracy
+#                                                    on FC Mobile screens.
+#   - meta-llama/llama-4-scout-17b-16e-instruct:free
+#                                                  — Meta Llama-4 Scout
+#                                                    via OpenRouter (same
+#                                                    model as the Groq path,
+#                                                    used when Groq is down).
+#   - moonshotai/kimi-vl-a3b-thinking:free         — MoE thinking VLM with
+#                                                    MoonViT, 128K context,
+#                                                    strong on math/visual.
+#   - mistralai/mistral-small-3.2-24b-instruct:free
+#                                                  — Mistral 24B vision,
+#                                                    handles Cyrillic text
+#                                                    very well.
 #   - nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
-#                                          — hybrid MoE+Mamba reasoning
-#                                            model, ~2× throughput, can
-#                                            sometimes emit prose (handled
-#                                            by _ai_extract_json_block).
-#   - moonshotai/kimi-k2.6:free            — large 1T MoE with vision,
-#                                            262K context, useful as
-#                                            fresh fallback when NVIDIA
-#                                            is rate-limited.
+#                                                  — hybrid MoE+Mamba
+#                                                    reasoning, ~2× faster
+#                                                    throughput.
+#   - moonshotai/kimi-k2.6:free                    — large 1T MoE with
+#                                                    vision, 262K context.
+#   - nex-agi/nex-n2-pro:free                      — 397B MoE (Qwen3.5
+#                                                    base) reasoning model
+#                                                    with image input. Last
+#                                                    in the chain because
+#                                                    it spends a lot of
+#                                                    tokens "thinking" and
+#                                                    is slower than VL-first
+#                                                    models on pure OCR.
 #
 # Removed (404 / discontinued / auth-failing):
 #   - google/gemma-4-31b-it:free            — started returning 401
@@ -108,20 +155,25 @@ AI_DEFAULT_MODEL = os.getenv(
 #   - meta-llama/llama-3.2-90b-vision-instruct:free
 #                                          — 404 (May 2026)
 #   - baidu/qianfan-ocr-fast:free          — 404 (May 2026)
-#   - groq/* models (scout, maverick)      — free tier discontinued
-#                                             (June 2026); entire provider
-#                                             removed from fallback chain.
 # Note: non-VL models (text-only) are NOT suitable for screenshot OCR —
 #   they can't accept images. Only include models with vision capability.
 AI_FALLBACK_MODELS = (
     "nvidia/nemotron-nano-12b-v2-vl:free",
+    "meta-llama/llama-4-scout-17b-16e-instruct:free",
+    "moonshotai/kimi-vl-a3b-thinking:free",
+    "mistralai/mistral-small-3.2-24b-instruct:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "moonshotai/kimi-k2.6:free",
+    "nex-agi/nex-n2-pro:free",
 )
 AI_COMPARE_MODELS = (
     "nvidia/nemotron-nano-12b-v2-vl:free",
+    "meta-llama/llama-4-scout-17b-16e-instruct:free",
+    "moonshotai/kimi-vl-a3b-thinking:free",
+    "mistralai/mistral-small-3.2-24b-instruct:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "moonshotai/kimi-k2.6:free",
+    "nex-agi/nex-n2-pro:free",
 )
 
 _AI_PROMPT = """You are reading a football game end-screen.
@@ -266,7 +318,20 @@ def _openrouter_keys() -> list[str]:
 
 
 def ai_is_available() -> bool:
-    return bool(_GEMINI_API_KEY or _ai_key())
+    """True if at least one vision/OCR provider is configured.
+
+    Order of preference (also reflected in ``ai_read_screenshot``):
+      Groq → Gemini → OpenRouter → OCR.space.
+    OpenRouter is always available because the module ships with
+    hardcoded fallback keys, so this primarily gates the optional
+    cloud providers.
+    """
+    return bool(
+        _GROQ_API_KEY
+        or _GEMINI_API_KEY
+        or _ai_key()
+        or _OCR_SPACE_API_KEY
+    )
 
 
 def _ai_strip_fences(text: str) -> str:
@@ -569,9 +634,16 @@ def _ai_post_process(parsed: dict) -> None:
         parsed["pen2"] = None
 
 
-def _gemini_call_one(image_b64: str, timeout: float = 30.0):
-    """Call Google Gemini Vision API. Returns (parsed, raw, elapsed)."""
-    url = (f"{_GEMINI_URL}/{_GEMINI_MODEL}:generateContent"
+def _gemini_call_one(image_b64: str, model: str | None = None,
+                     timeout: float = 30.0):
+    """Call Google Gemini Vision API. Returns (parsed, raw, elapsed).
+
+    ``model`` defaults to ``_GEMINI_MODEL`` (gemini-2.5-flash). Pass
+    ``_GEMINI_FALLBACK_MODEL`` to use the higher-quota Flash-Lite
+    variant on RPD exhaustion.
+    """
+    chosen = (model or _GEMINI_MODEL).strip()
+    url = (f"{_GEMINI_URL}/{chosen}:generateContent"
            f"?key={_GEMINI_API_KEY}")
     body = json.dumps({
         "contents": [{"parts": [
@@ -600,42 +672,241 @@ def _gemini_call_one(image_b64: str, timeout: float = 30.0):
     return parsed, text, dt
 
 
+def _groq_call_one(image_b64: str, model: str | None = None,
+                   timeout: float = 30.0):
+    """Run a single Groq vision call. Returns (parsed, raw, elapsed).
+
+    Groq's API is OpenAI-compatible (same /chat/completions schema as
+    OpenRouter), so the body format is identical to ``_ai_call_one``.
+    The differences are the URL, the auth header, and the model id —
+    Groq exposes Llama-4 multimodal directly without any vendor prefix.
+
+    Free-tier limits (no card required as of 2026-06):
+      • 30 RPM, ~14 400 RPD on Llama-4-Scout
+      • Sub-second latency thanks to LPU inference
+    """
+    chosen = (model or _GROQ_MODEL).strip()
+    body = json.dumps({
+        "model": chosen,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _AI_PROMPT},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+            ],
+        }],
+        "max_tokens": 2000,
+        "temperature": 0.1,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        _GROQ_URL,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {_GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        body_b = r.read()
+    dt = time.time() - t0
+    try:
+        data = json.loads(body_b)
+    except Exception as e:
+        raise ValueError(f"Groq non-JSON response: {body_b[:200]!r}") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"Groq non-object response: {str(data)[:200]!r}")
+    if data.get("error"):
+        raise ValueError(f"Groq API error: {str(data.get('error'))[:200]!r}")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError(f"Groq returned no choices: {str(data)[:200]!r}")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise ValueError(f"Groq choice[0] not a dict: {str(first)[:200]!r}")
+    message = first.get("message") or {}
+    msg = message.get("content") if isinstance(message, dict) else ""
+    if isinstance(msg, list):
+        msg = " ".join(
+            str(p.get("text", "")) for p in msg
+            if isinstance(p, dict)
+        )
+    elif not isinstance(msg, str):
+        msg = str(msg) if msg is not None else ""
+    parsed = _ai_parse_response(msg)
+    return parsed, msg, dt
+
+
+# ── OCR.space last-resort score-only OCR ────────────────────────────────────
+# When every vision-LLM has failed (network outage, all keys 429'd, etc.)
+# we fall back to a plain OCR provider. This ONLY recovers the match
+# score — team names, league plate, and goal events all require a real
+# vision model to interpret correctly. Returning at least a score gives
+# the user something to work with rather than a blank "—" panel.
+_OCR_SPACE_SCORE_RE = re.compile(r"(\d{1,2})\s*(?:[-:—–]|\s)\s*(\d{1,2})")
+
+
+def _ocr_space_call_one(image_bytes: bytes, timeout: float = 30.0):
+    """Run a single OCR.space request. Returns (parsed, raw, elapsed).
+
+    The response is plain text (concatenated lines). We extract the
+    most plausible score pair — preferring dash-separated (the in-game
+    timer never uses a dash) and rejecting clock-shaped readings via
+    ``_is_match_score_pair``. Other fields are left ``None`` so the
+    caller can still surface a partial result.
+    """
+    boundary = "----ocrspaceformboundary"
+    parts: list[bytes] = []
+
+    def _add_field(name: str, value: str) -> None:
+        parts.append(f"--{boundary}\r\n".encode("ascii"))
+        parts.append(
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("ascii")
+        )
+        parts.append(value.encode("utf-8"))
+        parts.append(b"\r\n")
+
+    _add_field("apikey", _OCR_SPACE_API_KEY)
+    # ocr.space supports a single base64 image via the "base64Image" field.
+    # The data: prefix is required for them to detect the mime type.
+    _add_field("language", "eng")
+    _add_field("OCREngine", "2")           # engine 2 = better for game UIs
+    _add_field("scale", "true")            # upscale small text
+    _add_field("isTable", "false")
+    _add_field(
+        "base64Image",
+        "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii"),
+    )
+    parts.append(f"--{boundary}--\r\n".encode("ascii"))
+    body = b"".join(parts)
+
+    req = urllib.request.Request(
+        _OCR_SPACE_URL,
+        data=body,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "apikey": _OCR_SPACE_API_KEY,
+        },
+    )
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        resp_b = r.read()
+    dt = time.time() - t0
+    try:
+        data = json.loads(resp_b)
+    except Exception as e:
+        raise ValueError(f"OCR.space non-JSON response: {resp_b[:200]!r}") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"OCR.space non-object response: {str(data)[:200]!r}")
+    if data.get("IsErroredOnProcessing"):
+        msg = data.get("ErrorMessage") or data.get("ErrorDetails") or "unknown"
+        raise ValueError(f"OCR.space error: {str(msg)[:200]!r}")
+    results = data.get("ParsedResults") or []
+    text = ""
+    if isinstance(results, list) and results:
+        first = results[0]
+        if isinstance(first, dict):
+            text = str(first.get("ParsedText") or "")
+
+    score1: int | None = None
+    score2: int | None = None
+    for s1s, s2s in _OCR_SPACE_SCORE_RE.findall(text):
+        s1, s2 = int(s1s), int(s2s)
+        # Prefer the first plausible match-score pair (rejects clocks
+        # like "90 00" / "1:17" via the same heuristic as _parse_score).
+        if _is_match_score_pair(s1, s2, "-"):
+            score1, score2 = s1, s2
+            break
+
+    parsed = {
+        "score1":       score1,
+        "score2":       score2,
+        "pen1":         None,
+        "pen2":         None,
+        "team1":        None,
+        "team2":        None,
+        "league_plate": None,
+        "goals":        [],
+    }
+    return parsed, text, dt
+
+
 def ai_read_screenshot(image_bytes: bytes, model: str | None = None,
                        timeout: float = 30.0,
                        models_override: tuple[str, ...] | list[str] | None = None):
-    """Run AI OCR on a screenshot. None if all configured models fail.
+    """Run AI OCR on a screenshot. None if all configured providers fail.
 
-    Tries Google Gemini first (if GEMINI_API_KEY is set), then falls
-    through to OpenRouter models.
+    Provider order (when ``models_override`` is NOT given):
+      1. Groq Llama-4-Scout (fastest, sub-second on LPU).
+      2. Google Gemini  — `gemini-2.5-flash` (250 RPD) →
+                          `gemini-2.5-flash-lite` (1000 RPD).
+      3. OpenRouter free-models chain with key rotation on 429.
+      4. OCR.space (last resort — score only, no team/league/goals).
 
-    If ``models_override`` is given, it replaces the default candidate
-    chain entirely (used by the «Другой моделью» retry button so we
-    pin a specific model rather than falling through the whole list).
+    When ``models_override`` is given, only the OpenRouter chain is
+    used and it's pinned to that exact list. This is what the
+    🔄 «Другой моделью» button uses to retry with a specific model
+    chosen by the user, without falling back to faster providers.
     """
     if not ai_is_available():
         return None
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
 
-    # ── Try Gemini first (1500 req/day free, no 429s) ──
-    if _GEMINI_API_KEY and not models_override:
+    # ── 1. Groq Llama-4-Scout (LPU, sub-second, 30 RPM free) ──
+    if _GROQ_API_KEY and not models_override:
         for attempt in range(2):
             try:
-                parsed, raw, dt = _gemini_call_one(image_b64, timeout=timeout)
-                parsed["model"] = f"gemini/{_GEMINI_MODEL}"
+                parsed, raw, dt = _groq_call_one(image_b64, timeout=timeout)
+                parsed["model"] = f"groq/{_GROQ_MODEL}"
                 parsed["raw"] = raw
                 parsed["elapsed_s"] = dt
                 _ai_post_process(parsed)
-                log.info("Gemini OCR ok via %s in %.1fs", _GEMINI_MODEL, dt)
+                log.info("Groq OCR ok via %s in %.1fs", _GROQ_MODEL, dt)
                 return parsed
-            except Exception as e:
-                log.warning("gemini %s -> %r", _GEMINI_MODEL, e)
-                if attempt == 0 and "429" in str(e):
+            except urllib.error.HTTPError as e:
+                try:
+                    err_body = e.read()[:200]
+                except Exception:
+                    err_body = b""
+                log.warning("groq %s -> HTTP %s: %.200s",
+                            _GROQ_MODEL, e.code, err_body)
+                if attempt == 0 and e.code == 429:
                     time.sleep(2)
                     continue
-                # 502/503 — don't retry, fall through to OpenRouter
+                break  # non-retryable, fall through to Gemini
+            except Exception as e:
+                log.warning("groq %s -> %r", _GROQ_MODEL, e)
                 break
 
-    # ── OpenRouter fallback chain ──
+    # ── 2. Gemini (flash → flash-lite) ──
+    if _GEMINI_API_KEY and not models_override:
+        gemini_chain: list[str] = []
+        for m in (_GEMINI_MODEL, _GEMINI_FALLBACK_MODEL):
+            if m and m not in gemini_chain:
+                gemini_chain.append(m)
+        for gmodel in gemini_chain:
+            for attempt in range(2):
+                try:
+                    parsed, raw, dt = _gemini_call_one(
+                        image_b64, model=gmodel, timeout=timeout,
+                    )
+                    parsed["model"] = f"gemini/{gmodel}"
+                    parsed["raw"] = raw
+                    parsed["elapsed_s"] = dt
+                    _ai_post_process(parsed)
+                    log.info("Gemini OCR ok via %s in %.1fs", gmodel, dt)
+                    return parsed
+                except Exception as e:
+                    log.warning("gemini %s -> %r", gmodel, e)
+                    if attempt == 0 and "429" in str(e):
+                        time.sleep(2)
+                        continue
+                    # 502/503 / RPD exhausted — try next Gemini model
+                    # (flash → flash-lite) before falling through.
+                    break
+
+    # ── 3. OpenRouter fallback chain ──
     seen: set[str] = set()
     candidates: list[str] = []
     if models_override:
@@ -676,6 +947,26 @@ def ai_read_screenshot(image_bytes: bytes, model: str | None = None,
                 break
     if last_err:
         log.error("all OpenRouter models failed: %r", last_err)
+
+    # ── 4. OCR.space last-resort score-only fallback ──
+    # Only used when (a) every vision-LLM above has failed AND (b) the
+    # caller is NOT a retry-with-specific-model click (models_override
+    # implies the user is specifically asking for an OpenRouter model,
+    # not a "any signal at all" scrape).
+    if _OCR_SPACE_API_KEY and not models_override:
+        try:
+            parsed, raw, dt = _ocr_space_call_one(image_bytes, timeout=timeout)
+            parsed["model"] = "ocr.space"
+            parsed["raw"] = raw
+            parsed["elapsed_s"] = dt
+            _ai_post_process(parsed)
+            if parsed.get("score1") is not None and parsed.get("score2") is not None:
+                log.info("OCR.space score-only fallback ok in %.1fs", dt)
+                return parsed
+            log.warning("OCR.space returned no usable score; raw=%.120s", raw)
+        except Exception as e:
+            log.warning("ocr.space -> %r", e)
+
     return None
 
 
