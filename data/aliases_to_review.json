@@ -1,7 +1,7 @@
 [
   {
     "name": "Антон",
-    "occurrences": 6,
+    "occurrences": 7,
     "suggested_username": null,
     "examples": [
       {
@@ -29,18 +29,61 @@
         "role": "winner"
       },
       {
-        "msg_id": 959,
-        "url": "https://t.me/gvardiolPlay/959",
-        "date": "2025-06-25",
+        "msg_id": 915,
+        "url": "https://t.me/gvardiolPlay/915",
+        "date": "2025-06-17",
+        "role": "winner"
+      }
+    ]
+  },
+  {
+    "name": "Freshl",
+    "occurrences": 6,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 878,
+        "url": "https://t.me/gvardiolPlay/878",
+        "date": "2025-06-03",
+        "role": "winner"
+      },
+      {
+        "msg_id": 897,
+        "url": "https://t.me/gvardiolPlay/897",
+        "date": "2025-06-11",
+        "role": "winner"
+      },
+      {
+        "msg_id": 1008,
+        "url": "https://t.me/gvardiolPlay/1008",
+        "date": "2025-07-07",
+        "role": "winner"
+      },
+      {
+        "msg_id": 1043,
+        "url": "https://t.me/gvardiolPlay/1043",
+        "date": "2025-07-16",
+        "role": "winner"
+      },
+      {
+        "msg_id": 1125,
+        "url": "https://t.me/gvardiolPlay/1125",
+        "date": "2025-07-31",
         "role": "winner"
       }
     ]
   },
   {
     "name": "Demidrol",
-    "occurrences": 4,
+    "occurrences": 5,
     "suggested_username": null,
     "examples": [
+      {
+        "msg_id": 640,
+        "url": "https://t.me/gvardiolPlay/640",
+        "date": "2025-03-04",
+        "role": "winner"
+      },
       {
         "msg_id": 672,
         "url": "https://t.me/gvardiolPlay/672",
@@ -68,32 +111,32 @@
     ]
   },
   {
-    "name": "Freshl",
+    "name": "Нурс",
     "occurrences": 4,
     "suggested_username": null,
     "examples": [
       {
-        "msg_id": 878,
-        "url": "https://t.me/gvardiolPlay/878",
-        "date": "2025-06-03",
+        "msg_id": 749,
+        "url": "https://t.me/gvardiolPlay/749",
+        "date": "2025-04-09",
         "role": "winner"
       },
       {
-        "msg_id": 1008,
-        "url": "https://t.me/gvardiolPlay/1008",
-        "date": "2025-07-07",
+        "msg_id": 848,
+        "url": "https://t.me/gvardiolPlay/848",
+        "date": "2025-05-19",
         "role": "winner"
       },
       {
-        "msg_id": 1125,
-        "url": "https://t.me/gvardiolPlay/1125",
-        "date": "2025-07-31",
+        "msg_id": 1215,
+        "url": "https://t.me/gvardiolPlay/1215",
+        "date": "2025-09-02",
         "role": "winner"
       },
       {
-        "msg_id": 1156,
-        "url": "https://t.me/gvardiolPlay/1156",
-        "date": "2025-08-08",
+        "msg_id": 1331,
+        "url": "https://t.me/gvardiolPlay/1331",
+        "date": "2025-10-23",
         "role": "winner"
       }
     ]
@@ -130,6 +173,31 @@
     ]
   },
   {
+    "name": "Юра",
+    "occurrences": 3,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 640,
+        "url": "https://t.me/gvardiolPlay/640",
+        "date": "2025-03-04",
+        "role": "winner_alias"
+      },
+      {
+        "msg_id": 672,
+        "url": "https://t.me/gvardiolPlay/672",
+        "date": "2025-03-19",
+        "role": "winner"
+      },
+      {
+        "msg_id": 1078,
+        "url": "https://t.me/gvardiolPlay/1078",
+        "date": "2025-07-23",
+        "role": "winner_alias"
+      }
+    ]
+  },
+  {
     "name": "Вадим",
     "occurrences": 3,
     "suggested_username": null,
@@ -151,6 +219,56 @@
         "url": "https://t.me/gvardiolPlay/1470",
         "date": "2026-01-23",
         "role": "runner_up"
+      }
+    ]
+  },
+  {
+    "name": "Lokomotive",
+    "occurrences": 3,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 915,
+        "url": "https://t.me/gvardiolPlay/915",
+        "date": "2025-06-17",
+        "role": "winner_alias"
+      },
+      {
+        "msg_id": 959,
+        "url": "https://t.me/gvardiolPlay/959",
+        "date": "2025-06-25",
+        "role": "winner_alias"
+      },
+      {
+        "msg_id": 1388,
+        "url": "https://t.me/gvardiolPlay/1388",
+        "date": "2025-11-27",
+        "role": "winner_alias"
+      }
+    ]
+  },
+  {
+    "name": "Баграт",
+    "occurrences": 3,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 985,
+        "url": "https://t.me/gvardiolPlay/985",
+        "date": "2025-07-01",
+        "role": "winner"
+      },
+      {
+        "msg_id": 1178,
+        "url": "https://t.me/gvardiolPlay/1178",
+        "date": "2025-08-20",
+        "role": "winner"
+      },
+      {
+        "msg_id": 1399,
+        "url": "https://t.me/gvardiolPlay/1399",
+        "date": "2025-12-03",
+        "role": "winner"
       }
     ]
   },
@@ -224,25 +342,6 @@
     ]
   },
   {
-    "name": "Юра",
-    "occurrences": 2,
-    "suggested_username": null,
-    "examples": [
-      {
-        "msg_id": 672,
-        "url": "https://t.me/gvardiolPlay/672",
-        "date": "2025-03-19",
-        "role": "winner"
-      },
-      {
-        "msg_id": 1078,
-        "url": "https://t.me/gvardiolPlay/1078",
-        "date": "2025-07-23",
-        "role": "winner_alias"
-      }
-    ]
-  },
-  {
     "name": "Dron4ik",
     "occurrences": 2,
     "suggested_username": null,
@@ -262,39 +361,20 @@
     ]
   },
   {
-    "name": "Lokomotive",
+    "name": "Nscoder",
     "occurrences": 2,
     "suggested_username": null,
     "examples": [
       {
-        "msg_id": 959,
-        "url": "https://t.me/gvardiolPlay/959",
-        "date": "2025-06-25",
-        "role": "winner_alias"
+        "msg_id": 1043,
+        "url": "https://t.me/gvardiolPlay/1043",
+        "date": "2025-07-16",
+        "role": "runner_up"
       },
       {
-        "msg_id": 1388,
-        "url": "https://t.me/gvardiolPlay/1388",
-        "date": "2025-11-27",
-        "role": "winner_alias"
-      }
-    ]
-  },
-  {
-    "name": "Баграт",
-    "occurrences": 2,
-    "suggested_username": null,
-    "examples": [
-      {
-        "msg_id": 1178,
-        "url": "https://t.me/gvardiolPlay/1178",
-        "date": "2025-08-20",
-        "role": "winner"
-      },
-      {
-        "msg_id": 1399,
-        "url": "https://t.me/gvardiolPlay/1399",
-        "date": "2025-12-03",
+        "msg_id": 1367,
+        "url": "https://t.me/gvardiolPlay/1367",
+        "date": "2025-11-12",
         "role": "winner"
       }
     ]
@@ -315,25 +395,6 @@
         "url": "https://t.me/gvardiolPlay/1215",
         "date": "2025-09-02",
         "role": "runner_up"
-      }
-    ]
-  },
-  {
-    "name": "Нурс",
-    "occurrences": 2,
-    "suggested_username": null,
-    "examples": [
-      {
-        "msg_id": 1215,
-        "url": "https://t.me/gvardiolPlay/1215",
-        "date": "2025-09-02",
-        "role": "winner"
-      },
-      {
-        "msg_id": 1331,
-        "url": "https://t.me/gvardiolPlay/1331",
-        "date": "2025-10-23",
-        "role": "winner"
       }
     ]
   },
@@ -564,6 +625,19 @@
     ]
   },
   {
+    "name": "Нурса",
+    "occurrences": 1,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 985,
+        "url": "https://t.me/gvardiolPlay/985",
+        "date": "2025-07-01",
+        "role": "runner_up"
+      }
+    ]
+  },
+  {
     "name": "Мусю",
     "occurrences": 1,
     "suggested_username": null,
@@ -573,6 +647,19 @@
         "url": "https://t.me/gvardiolPlay/1008",
         "date": "2025-07-07",
         "role": "runner_up"
+      }
+    ]
+  },
+  {
+    "name": "Whitesoho",
+    "occurrences": 1,
+    "suggested_username": null,
+    "examples": [
+      {
+        "msg_id": 1160,
+        "url": "https://t.me/gvardiolPlay/1160",
+        "date": "2025-08-13",
+        "role": "winner"
       }
     ]
   },
@@ -637,19 +724,6 @@
         "msg_id": 1341,
         "url": "https://t.me/gvardiolPlay/1341",
         "date": "2025-10-29",
-        "role": "winner"
-      }
-    ]
-  },
-  {
-    "name": "Nscoder",
-    "occurrences": 1,
-    "suggested_username": null,
-    "examples": [
-      {
-        "msg_id": 1367,
-        "url": "https://t.me/gvardiolPlay/1367",
-        "date": "2025-11-12",
         "role": "winner"
       }
     ]

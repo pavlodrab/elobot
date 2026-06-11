@@ -53,11 +53,16 @@ def classify_tournament_type(text: str) -> str:
     head = text[:CLASSIFY_HEAD_CHARS].lower()
     if re.search(r"\bvsa\b", head):
         return "vsa"
-    if any(k in head for k in ("фэнтези", "фентези", "фэнтэзи", "fantasy", "апл", "лиги чемпионов")):
+    if any(k in head for k in ("фэнтези", "фентези", "фэнтэзи", "fantasy", "лиги чемпионов")):
         # the basic Гвардиолыч tournament is sometimes called "Лига Чемпионшипа"
         # but never "Лиги Чемпионов" — so this works as a fantasy-LC marker.
         if "лига чемпионшипа" in head:
             return "main"
+        return "fantasy"
+    # "АПЛ" only with explicit word boundaries — otherwise we hit
+    # innocent words like "Аплодисменты" and mis-classify a main-tournament
+    # winner post as fantasy.
+    if re.search(r"\bапл\b", head):
         return "fantasy"
     return "main"
 
@@ -67,10 +72,20 @@ def classify_tournament_type(text: str) -> str:
 # --------------------------------------------------------------------------------------
 
 NEGATIVE_PATTERNS: List[Tuple[str, str]] = [
-    (r"beasts\s*fc\s*shop", "ad: BEASTS FC SHOP"),
-    (r"beastsfcshop_bot", "ad: BEASTS FC SHOP bot link"),
-    (r"магазин-бот", "ad: shop bot"),
+    # Full-pitch BEASTS FC SHOP ads — only the dedicated "магазин-бот"
+    # phrase combined with the brand name is unambiguous. The bare bot
+    # handle (`@beastsfcshop_bot`) and the standalone "BEASTS FC SHOP"
+    # mention also appear in real winner posts that credit the sponsor
+    # at the end (e.g. [401], [420]) so don't kill those.
+    (r"магазин-бот\s+beasts\s*fc\s*shop", "ad: BEASTS FC SHOP pitch"),
     (r"если\s+ты\s+покупаешь\s+абонемент", "ad: subscription pitch"),
+    (r"приз\s+получит\s+@", "sponsorship prize giveaway"),
+    (r"приз\s*[—\-–]\s*абонемент", "raffle / prize giveaway, not a tournament"),
+    # Posts that announce the NEXT tournament's prize while only
+    # mentioning the previous champion in passing (e.g. [403]).
+    (r"в\s+этом\s+турнире\s+мы\s+подарим", "future-tournament prize announcement"),
+    (r"тому\s+кто\s+победит", "future-tournament prize announcement"),
+    (r"победитель\s+нашего\s+\d+\s+турнира\s+гвардиолыча\s+получит\s+приз", "future-tournament prize announcement"),
     (r"\bмесси\b.*?(?:днём\s+рождения|с\s+днём)", "Messi birthday post"),
     (r"лионель\s+месси", "Messi-related post"),
     (r"манчестер\s+сити.*?(?:обладатель|кубка)", "real football news"),
@@ -79,17 +94,36 @@ NEGATIVE_PATTERNS: List[Tuple[str, str]] = [
     (r"финалисты\s+известны.*?ставки\s+сделаны", "pre-final announcement"),
     (r"\bанонс\b.*?(?:уже\s+совсем\s+скоро|🚀)", "tournament announcement"),
     (r"возвращаемся\s+к\s+сборным", "general post about national teams"),
-    (r"приз\s+получит\s+@", "sponsorship prize giveaway"),
     # Pre-final announcement: "Уже совсем скоро мы узнаем победителя N турнира"
     (r"уже\s+совсем\s+скоро\s+мы\s+узнаем\s+победителя", "pre-final announcement (winner not yet known)"),
     # Post about a national-teams sub-tournament (different format, user wants only main)
     (r"победой\s+сборной\s+\w+", "national teams sub-tournament"),
     (r"победой\s+в\s+розыгрыше", "raffle / prize giveaway, not a tournament"),
-    (r"приз\s*[—\-–]\s*абонемент", "raffle / prize giveaway, not a tournament"),
     # Mid-tournament progress posts (semifinal commentary, not final)
     (r"совершил\s+настоящий\s+подвиг.*?в\s+полуфинал", "semifinal progress post"),
     (r"обеспечил\s+себе\s+место\s+в\s+полуфинал", "semifinal progress post"),
     (r"\bвнимание\s+будет\s+приковано\s+к", "tournament status update"),
+    # Sub-tournaments that aren't part of the main "Турнир Гвардиолыча"
+    # series — Суперкубок (post-tournament champions cup), LG CUP, and
+    # the "мини-кубок" event run in parallel and would otherwise inflate
+    # the main trophy counts. Keeping them out per the user's "3 types" design.
+    (r"победитель\s+суперкубка", "Суперкубок (separate sub-tournament)"),
+    (r"\blg\s+cup\b", "LG CUP (separate sub-tournament)"),
+    (r"мини[-\s]кубка?", "мини-кубок (separate sub-tournament)"),
+    # Champions League / inter-league commentary, not a tournament finale.
+    (r"плей-офф\s+наш", "inter-league CL commentary"),
+    (r"общий\s+счёт\s*[—\-–]?\s*\d+\s*:\s*\d+\s+в\s+пользу", "inter-league CL match commentary"),
+    # In-progress status updates that mention a champion in passing.
+    (r"уже\s+известен\s+победитель\s+последнего\s+турнира", "between-tournament status post"),
+    (r"осталось\s+(?:всего\s+)?несколько\s+игр\s+до\s+окончания", "in-progress status update"),
+    (r"пока\s+в\s+плей-?офф", "in-progress status update"),
+    (r"турнир\s+окончен,\s+победитель\s+известен\s+и\s+поздравлен", "between-tournament status post"),
+    (r"осталось\s+буквально\s+совсем\s+ничего", "in-progress status update"),
+    # "Мы начнём новый набор уже на Юбилейный 50-й турнир!" / signup-phase
+    # posts that mention an upcoming jubilee number but no actual winner.
+    (r"начн[её]м\s+новый\s+набор", "signup announcement, not a winner"),
+    (r"новый\s+набор\s+уже\s+на\s+юбилейный", "signup announcement, not a winner"),
+    (r"^[^\n]{0,200}только\s+начинаются", "in-progress status update"),
 ]
 
 # Words that are NOT names (filter out spurious captures)
@@ -121,19 +155,35 @@ POSITIVE_SIGNALS = [
     r"\bкратн\w+\s+чемпион\w*",         # any case form: чемпион/чемпиона/чемпиону
     r"\bновый\s+чемпион\b",
     r"\b(?:снова|вновь|опять)\s+чемпион\b",
+    r"\bвпервые\s+чемпион\b",
     r"\bсамый\s+быстрый\s+чемпион\b",
     r"снова\s+поднял\s+трофей",
     r"поднимает\s+трофей",
     r"забрал\s+трофей",
     r"завоевал\s+(?:трофей|кубок|титул)",
+    r"взял\s+\d+",                       # "взял 10-й титул", "взял 8 кубков"
+    r"с\s+\w+\s+титулом",                # "с восьмым титулом" / "с 8-м титулом"
+    r"новый\s+рекорд\s+установлен",
+    r"чемпион\s+среди\s+чемпионов",      # "Чемпион среди чемпионов — Имя"
+    r"живая\s+легенда",                  # "Demidrol – живая легенда"
+    r"наконец-то\s+он\s+смог",           # post about first-time winner
+    r"\bновый\s+герой\b",
     r"поздравляем\s+(?:нового\s+|с\s+)?(?:победител|чемпион)",
     r"поздравляем\s+с\s+(?:[\w]+\s+)?победой",   # [270]: "поздравляем с победой @user"
+    r"поздравляем\s+с\s+(?:дублем|трэблом|треблом|квадруплом|пентой)",  # [420] back-to-back winner
     r"поздравляем\s+@\w+\s*[!\.\s🏆🌸🎉]",         # "Поздравляем @user 🏆"
-    r"поздравляем\s+[А-ЯA-Z]\w+\s*[!\.]",         # "Поздравляем Freshl!"
+    # ``has_positive_signal`` lower-cases the text before scanning, so
+    # capital-letter classes like ``[А-ЯA-Z]`` never match. Use the
+    # full-range ``[a-zа-яё]`` here — case-distinction was a misleading
+    # safeguard anyway since "Поздравляем" + Имя is a strong enough
+    # signal even when the next word is lower-case.
+    r"поздравляем\s+[a-zа-яё]\w+\s*[!\.]",         # "Поздравляем Freshl!"
+    r"поздравляем\s+[a-zа-яё]\w+\s*[—–\-]",       # "Поздравляем Whitesoho — нового чемпиона"
     r"победител\w+\s+(?:нашего\s+\d*\s*турнира|турнира\s+гвардиолыча|\d+\s+турнира|с\s+отличной)",
     r"кратн\w+\s+обладатель",
     r"очередн\w+\s+(?:победой|трофей|кубок)",
     r"юбилейн\w+\s+победа",
+    r"юбилейн\w+\s*,?\s*\d+[\-\u2013\u2014][йя]?\s+турнир",  # "Юбилейный, 40-й турнир"
     r"идеальн\w+\s+кубком",
     r"новый\s+король\s+турнира",
     r"взошедш\w+\s+на\s+вершину",
@@ -453,6 +503,62 @@ WINNER_PATTERNS: List[Tuple[re.Pattern, str]] = [
         re.IGNORECASE,
     ), "name"),
 
+    # ---- "Имя — живая легенда!" / "Имя (alias) – живая легенда!" ----
+
+    (re.compile(
+        rf"(?m)^\s*({_NAME_WITH_OPT_ALIAS})\s*{_DASH}\s*живая\s+легенда",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- "Имя — с восьмым титулом!" ----
+
+    (re.compile(
+        rf"(?m)^\s*({_NAME_WITH_OPT_ALIAS})\s*{_DASH}\s*с\s+\w+\s+титулом",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- "Имя, он же Alias — впервые чемпион!" ----
+
+    (re.compile(
+        rf"(?m)^\s*({_NAME_TOKEN}),?\s+он\s+же\s+{_NAME_TOKEN}\s*{_DASH}\s*впервые\s+чемпион",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- "Чемпион среди чемпионов — Имя!" ----
+
+    (re.compile(
+        rf"чемпион\s+среди\s+чемпионов\s*{_DASH}\s*({_NAME_TOKEN})\s*[!\.\n]",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- "Снова он. Снова Имя." (record-breaker post) ----
+
+    (re.compile(
+        rf"снова\s+он\.\s*снова\s+({_NAME_TOKEN})\s*\.",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- "Имя взял N-й титул." (e.g. "Freshl взял 10-й титул.") ----
+
+    (re.compile(
+        rf"(?m)^\s*({_NAME_TOKEN})\s+взял\s+\d+(?:[\-\u2013\u2014][йя])?\s*титул",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- "наконец-то он смог!\n\nИмя ждал ..." (first-time winner post) ----
+
+    (re.compile(
+        rf"наконец-то\s+он\s+смог[!\.\s🏆🎉]*\n+\s*({_NAME_TOKEN})\s+",
+        re.IGNORECASE,
+    ), "name"),
+
+    # ---- "Поздравляем Имя — нового чемпиона!" ----
+
+    (re.compile(
+        rf"поздравляем\s+({_NAME_TOKEN})\s*{_DASH}\s*нового\s+чемпион",
+        re.IGNORECASE,
+    ), "name"),
+
     # ---- Last-resort fallbacks (anchored to absolute start of post) ----
 
     # "Поздравляем нового X-кратного чемпиона N турнира\n+Имя"
@@ -512,6 +618,12 @@ def extract_winner(text: str) -> Tuple[Optional[str], Optional[str], Optional[st
 RUNNER_UP_PATTERNS: List[Tuple[re.Pattern, str]] = [
     # "финалиста @user" / "благодарим финалиста @user"
     (re.compile(rf"финалиста?\s+@({_NAME_TOKEN})", re.IGNORECASE), "username"),
+
+    # "о финалисте — Имя" / "не забываем и о финалисте — Имя"
+    (re.compile(
+        rf"о\s+финалисте\s*{_DASH}\s*({_NAME_WITH_OPT_ALIAS})",
+        re.IGNORECASE,
+    ), "name"),
 
     # "Финал против @user" / "Финал против Имя"
     (re.compile(rf"финал\s+против\s+@({_NAME_TOKEN})", re.IGNORECASE), "username"),
@@ -582,9 +694,9 @@ RUNNER_UP_PATTERNS: List[Tuple[re.Pattern, str]] = [
         re.IGNORECASE,
     ), "name"),
 
-    # Looser: "одолел Имя" / "обыграл Имя" anywhere
+    # Looser: "одолел Имя" / "обыграл Имя" / "разобрал Имя" anywhere
     (re.compile(
-        rf"(?:одолел|обыграл)\s+(?:не\s+безызвестного\s+|самого\s+)?({_NAME_WITH_OPT_ALIAS}?)\s*[,!\.\n⚔💔]",
+        rf"(?:одолел|обыграл|разобрал)\s+(?:не\s+безызвестного\s+|самого\s+|ярко\s+и\s+уверенно\s+)?({_NAME_WITH_OPT_ALIAS}?)\s*[,!\.\n⚔💔]",
         re.IGNORECASE,
     ), "name"),
 ]
