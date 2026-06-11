@@ -1147,13 +1147,20 @@ def merge_players(keep_id: int, drop_id: int) -> dict:
     """Merge ``drop_id`` into ``keep_id`` and delete the drop row.
 
     Reassigns every reference (tournament_players, matches at any
-    status, match_goals, tournament_elo) from ``drop_id`` to
-    ``keep_id``. When both ids share a row in ``tournament_players``
-    or ``tournament_elo``, per-row counters are summed onto the kept
-    side before the duplicate is removed.
+    status, match_goals, tournament_elo, tournament_winners) from
+    ``drop_id`` to ``keep_id``. When both ids share a row in
+    ``tournament_players`` or ``tournament_elo``, per-row counters
+    are summed onto the kept side before the duplicate is removed.
+
+    The ``tournament_winners`` re-tag is critical on Postgres: that
+    table has FOREIGN KEY constraints on both ``winner_player_id``
+    and ``runner_up_player_id``, so without rewiring them the final
+    ``DELETE FROM players`` would fail with
+    ``tournament_winners_winner_player_id_fkey`` and abort the merge.
 
     Returns ``{"matches_moved": int, "tp_overlap": int, "elo_overlap":
-    int, "goals_moved": int}`` so the caller can surface concrete
+    int, "goals_moved": int, "tw_winner_moved": int,
+    "tw_runnerup_moved": int}`` so the caller can surface concrete
     numbers to the admin.
     """
     if int(keep_id) == int(drop_id):
@@ -1431,6 +1438,45 @@ def merge_players(keep_id: int, drop_id: int) -> dict:
         except Exception:
             elo_overlap = 0
 
+        # 4.5. tournament_winners: re-tag the Hall-of-Fame FKs onto the
+        #      kept row. ``tournament_winners`` has FOREIGN KEYs on
+        #      both ``winner_player_id`` and ``runner_up_player_id``
+        #      (referencing ``players.id``); on Postgres these are
+        #      enforced, so without this step the ``DELETE FROM
+        #      players`` below fails with
+        #      ``tournament_winners_winner_player_id_fkey`` and the
+        #      whole merge rolls back.
+        #
+        #      Wrapped in a SAVEPOINT because:
+        #        * very old DBs may not have the table at all;
+        #        * a tournament where ``drop`` was the winner and
+        #          ``keep`` was the runner-up (or vice versa) would
+        #          produce a row with ``winner == runner_up`` after
+        #          the merge — semantically odd but not a constraint
+        #          violation, so we let it through and the admin can
+        #          clean up via ``/remove_trophy`` if it ever happens.
+        tw_winner_moved = 0
+        tw_runnerup_moved = 0
+
+        def _tw_step():
+            nonlocal tw_winner_moved, tw_runnerup_moved
+            c.execute(
+                "UPDATE tournament_winners SET winner_player_id=? "
+                "WHERE winner_player_id=?",
+                (keep_id, drop_id),
+            )
+            tw_winner_moved = int(c.rowcount or 0)
+            c.execute(
+                "UPDATE tournament_winners SET runner_up_player_id=? "
+                "WHERE runner_up_player_id=?",
+                (keep_id, drop_id),
+            )
+            tw_runnerup_moved = int(c.rowcount or 0)
+
+        if not _safe_step("sp_tournament_winners", _tw_step):
+            tw_winner_moved = 0
+            tw_runnerup_moved = 0
+
         # 5. Promote drop's stronger global counters onto the kept row.
         #
         #    Two production lessons baked into this block:
@@ -1506,6 +1552,8 @@ def merge_players(keep_id: int, drop_id: int) -> dict:
         "tp_overlap": tp_overlap,
         "elo_overlap": elo_overlap,
         "goals_moved": goals_moved,
+        "tw_winner_moved": tw_winner_moved,
+        "tw_runnerup_moved": tw_runnerup_moved,
     }
 
 

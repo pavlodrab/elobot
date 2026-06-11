@@ -390,6 +390,19 @@ async def cmd_relink_player(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Re-fetch the kept row so we can show the resulting state.
     kept = get_player_by_id(int(new_p["id"])) or new_p
+    tw_lines: list[str] = []
+    if counters.get("tw_winner_moved") or counters.get("tw_runnerup_moved"):
+        # Only surface the Hall-of-Fame counters when at least one row
+        # actually moved — keeps the success message tidy for the
+        # vast majority of merges that have nothing in /champions.
+        tw_lines.append(
+            f"Трофеев перевязано (winner): "
+            f"<b>{counters.get('tw_winner_moved', 0)}</b>"
+        )
+        tw_lines.append(
+            f"Финалов перевязано (runner-up): "
+            f"<b>{counters.get('tw_runnerup_moved', 0)}</b>"
+        )
     await send(
         update,
         "✅ <b>Записи объединены.</b>\n\n"
@@ -398,8 +411,9 @@ async def cmd_relink_player(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Перенесено матчей: <b>{counters['matches_moved']}</b>\n"
         f"Турниров с пересечением (стат-сумма): <b>{counters['tp_overlap']}</b>\n"
         f"Изолированных ELO с пересечением: <b>{counters['elo_overlap']}</b>\n"
-        f"Голов перепривязано: <b>{counters['goals_moved']}</b>\n\n"
-        "Итог по объединённой записи:\n"
+        f"Голов перепривязано: <b>{counters['goals_moved']}</b>"
+        + (("\n" + "\n".join(tw_lines)) if tw_lines else "")
+        + "\n\nИтог по объединённой записи:\n"
         f"  username: {mention(kept['username'])}\n"
         f"  telegram_id: <code>{kept.get('telegram_id') or '—'}</code>\n"
         f"  игровой ник: <b>{html.escape(kept.get('game_nickname') or '—')}</b>\n"
