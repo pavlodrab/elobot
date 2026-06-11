@@ -126,6 +126,30 @@ __all__ = [
     "set_chat_quote_quiet_hours",
     "mark_chat_quote_sent",
     "list_chats_with_quote_interval",
+    # Auto-jokes module (2026-06)
+    "JOKES_VALID_MODES",
+    "JOKES_LOG_CAP",
+    "JOKES_HISTORY_CAP",
+    "JOKES_MIN_INTERVAL_MIN",
+    "JOKES_MAX_INTERVAL_MIN",
+    "JOKES_MIN_CONTEXT",
+    "JOKES_MAX_CONTEXT",
+    "get_jokes_settings",
+    "is_jokes_enabled",
+    "set_jokes_enabled",
+    "set_jokes_interval",
+    "set_jokes_mode",
+    "set_jokes_context_size",
+    "set_jokes_min_msgs_since_last",
+    "set_jokes_model_override",
+    "mark_chat_joke_sent",
+    "list_chats_with_jokes_enabled",
+    "log_chat_message",
+    "recent_chat_messages",
+    "count_messages_since",
+    "clear_chat_messages_log",
+    "add_joke_history",
+    "list_jokes_history",
     # Champions / Hall of Fame
     "TOURNAMENT_WINNER_TYPES",
     "add_player_alias",
@@ -933,6 +957,89 @@ def init_db():
         c.execute(
             "ALTER TABLE tournaments "
             "ADD COLUMN playoff_pairing TEXT NOT NULL DEFAULT 'auto'"
+        )
+
+    # ── Auto-jokes module (2026-06) ──────────────────────────────────────
+    # The /joke feature: bot reads recent chat text and asks an LLM
+    # to write a one-liner. To respect privacy we only log messages
+    # in chats that explicitly opt in via /jokes_on. The chat_messages
+    # table is a rolling buffer (capped at JOKES_LOG_CAP per chat,
+    # pruned at insert time). jokes_history records what the bot
+    # actually posted for /jokes_history and dedup.
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id      TEXT    NOT NULL,
+            message_id   INTEGER,
+            telegram_id  INTEGER,
+            username     TEXT,
+            display_name TEXT,
+            text         TEXT    NOT NULL,
+            ts           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_id "
+        "ON chat_messages (chat_id, id DESC)"
+    )
+
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jokes_history (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id       TEXT    NOT NULL,
+            ts            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            mode          TEXT,
+            model         TEXT,
+            text          TEXT    NOT NULL,
+            context_size  INTEGER,
+            source        TEXT
+        )
+        """
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jokes_history_chat_id "
+        "ON jokes_history (chat_id, id DESC)"
+    )
+
+    # Per-chat jokes config — additive columns on chat_settings
+    # (which already lived for the quote loop). Defaults: disabled
+    # everywhere with a 'normal' vibe and a 100-message context.
+    if not _column_exists(conn, "chat_settings", "jokes_enabled"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN jokes_enabled INTEGER NOT NULL DEFAULT 0"
+        )
+    if not _column_exists(conn, "chat_settings", "jokes_interval_minutes"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN jokes_interval_minutes INTEGER NOT NULL DEFAULT 0"
+        )
+    if not _column_exists(conn, "chat_settings", "jokes_mode"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN jokes_mode TEXT NOT NULL DEFAULT 'normal'"
+        )
+    if not _column_exists(conn, "chat_settings", "jokes_context_size"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN jokes_context_size INTEGER NOT NULL DEFAULT 100"
+        )
+    if not _column_exists(conn, "chat_settings", "jokes_min_msgs_since_last"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN jokes_min_msgs_since_last INTEGER NOT NULL DEFAULT 20"
+        )
+    if not _column_exists(conn, "chat_settings", "jokes_model_override"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN jokes_model_override TEXT"
+        )
+    if not _column_exists(conn, "chat_settings", "jokes_last_joke_at"):
+        c.execute(
+            "ALTER TABLE chat_settings ADD COLUMN jokes_last_joke_at DATETIME"
         )
 
     # Custom display name for the single group in a league (Лига, Сетка 1, etc.)
@@ -4168,3 +4275,450 @@ def delete_tournament_winner(record_id: int) -> bool:
     conn.commit()
     conn.close()
     return affected > 0
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-jokes module helpers (2026-06)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Two storage units:
+#   * chat_messages  — rolling text buffer, pruned to at most
+#     ``JOKES_LOG_CAP`` rows per chat at insert time. Only filled in
+#     chats with jokes_enabled=true (privacy).
+#   * jokes_history  — the bot's own posted jokes (for /jokes_history
+#     and to give the model an "avoid repeating yourself" hint).
+#
+# All helpers expose plain dicts so the handler module never sees raw
+# Row objects.
+
+JOKES_VALID_MODES = ("soft", "normal", "spicy", "savage", "absurd")
+JOKES_LOG_CAP = 500              # max chat_messages rows kept per chat
+JOKES_HISTORY_CAP = 200          # max jokes_history rows kept per chat
+JOKES_MIN_INTERVAL_MIN = 5       # below this an admin probably mis-typed
+JOKES_MAX_INTERVAL_MIN = 60 * 24 # 24h — above this auto-jokes basically off
+JOKES_MIN_CONTEXT = 20           # less than this and the LLM has no signal
+JOKES_MAX_CONTEXT = 200          # more than this and we blow OpenRouter context
+
+
+def _jokes_defaults(chat_id: str | int) -> dict:
+    """Default settings dict for a chat that has no chat_settings row
+    yet. Mirrors the column defaults defined in init_db so callers can
+    rely on every key being present.
+
+    Types match the post-coercion shape returned by
+    :func:`get_jokes_settings` so callers don't have to differentiate
+    between "no row" and "row with defaults".
+    """
+    return {
+        "chat_id": str(chat_id),
+        "jokes_enabled": False,
+        "jokes_interval_minutes": 0,
+        "jokes_mode": "normal",
+        "jokes_context_size": 100,
+        "jokes_min_msgs_since_last": 20,
+        "jokes_model_override": None,
+        "jokes_last_joke_at": None,
+    }
+
+
+def get_jokes_settings(chat_id: str | int) -> dict:
+    """All jokes_* keys for ``chat_id`` with sane defaults backfilled
+    when a row is missing or pre-dates the migration. Returns the
+    canonical dict that ``handlers.jokes`` works with everywhere.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT chat_id, jokes_enabled, jokes_interval_minutes, jokes_mode, "
+        "       jokes_context_size, jokes_min_msgs_since_last, "
+        "       jokes_model_override, jokes_last_joke_at "
+        "FROM chat_settings WHERE chat_id=?",
+        (str(chat_id),),
+    ).fetchone()
+    conn.close()
+    base = _jokes_defaults(chat_id)
+    if row is None:
+        return base
+    d = dict(row)
+    for k, v in base.items():
+        if d.get(k) is None and k != "jokes_model_override" and k != "jokes_last_joke_at":
+            d[k] = v
+    # Coerce types so callers don't have to.
+    d["jokes_enabled"] = bool(d.get("jokes_enabled") or 0)
+    try:
+        d["jokes_interval_minutes"] = int(d.get("jokes_interval_minutes") or 0)
+    except (TypeError, ValueError):
+        d["jokes_interval_minutes"] = 0
+    try:
+        d["jokes_context_size"] = int(d.get("jokes_context_size") or 100)
+    except (TypeError, ValueError):
+        d["jokes_context_size"] = 100
+    try:
+        d["jokes_min_msgs_since_last"] = int(d.get("jokes_min_msgs_since_last") or 20)
+    except (TypeError, ValueError):
+        d["jokes_min_msgs_since_last"] = 20
+    if not d.get("jokes_mode"):
+        d["jokes_mode"] = "normal"
+    return d
+
+
+def is_jokes_enabled(chat_id: str | int) -> bool:
+    """Cheap boolean lookup for the message logger — runs on every
+    text message in every chat the bot is in, so we keep it indexed
+    on the chat_settings PK and avoid loading the full row.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT jokes_enabled FROM chat_settings WHERE chat_id=?",
+        (str(chat_id),),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return False
+    try:
+        val = row["jokes_enabled"] if hasattr(row, "keys") else row[0]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return bool(val or 0)
+
+
+def _ensure_chat_settings_row(conn, chat_id: str) -> None:
+    """Insert a default chat_settings row if missing. Caller manages
+    commit/close. Used by every set_jokes_* helper to make
+    UPDATE-then-INSERT idempotent without fighting Postgres ON CONFLICT
+    syntax differences vs SQLite.
+    """
+    cur = conn.execute(
+        "SELECT 1 FROM chat_settings WHERE chat_id=?",
+        (str(chat_id),),
+    ).fetchone()
+    if cur is None:
+        conn.execute(
+            "INSERT INTO chat_settings (chat_id) VALUES (?)",
+            (str(chat_id),),
+        )
+
+
+def set_jokes_enabled(chat_id: str | int, enabled: bool) -> None:
+    """Toggle the lazy logger + scheduler for one chat."""
+    conn = get_conn()
+    _ensure_chat_settings_row(conn, str(chat_id))
+    conn.execute(
+        "UPDATE chat_settings SET jokes_enabled=? WHERE chat_id=?",
+        (1 if enabled else 0, str(chat_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_jokes_interval(chat_id: str | int, minutes: int) -> None:
+    """How often the auto-loop fires. ``0`` keeps logging on but stops
+    scheduled posts (admin can still trigger manually with /joke).
+    Clamped to ``0`` or ``[JOKES_MIN_INTERVAL_MIN, JOKES_MAX_INTERVAL_MIN]``.
+    """
+    m = int(minutes)
+    if m > 0:
+        m = max(JOKES_MIN_INTERVAL_MIN, min(JOKES_MAX_INTERVAL_MIN, m))
+    else:
+        m = 0
+    conn = get_conn()
+    _ensure_chat_settings_row(conn, str(chat_id))
+    conn.execute(
+        "UPDATE chat_settings SET jokes_interval_minutes=? WHERE chat_id=?",
+        (m, str(chat_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_jokes_mode(chat_id: str | int, mode: str) -> None:
+    """Pick a vibe preset. ``mode`` must be one of JOKES_VALID_MODES."""
+    if mode not in JOKES_VALID_MODES:
+        raise ValueError(
+            f"Unknown jokes mode: {mode!r}. "
+            f"Allowed: {', '.join(JOKES_VALID_MODES)}"
+        )
+    conn = get_conn()
+    _ensure_chat_settings_row(conn, str(chat_id))
+    conn.execute(
+        "UPDATE chat_settings SET jokes_mode=? WHERE chat_id=?",
+        (mode, str(chat_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_jokes_context_size(chat_id: str | int, n: int) -> None:
+    """How many recent chat_messages rows to feed the prompt.
+    Clamped to ``[JOKES_MIN_CONTEXT, JOKES_MAX_CONTEXT]``.
+    """
+    n = max(JOKES_MIN_CONTEXT, min(JOKES_MAX_CONTEXT, int(n)))
+    conn = get_conn()
+    _ensure_chat_settings_row(conn, str(chat_id))
+    conn.execute(
+        "UPDATE chat_settings SET jokes_context_size=? WHERE chat_id=?",
+        (n, str(chat_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_jokes_min_msgs_since_last(chat_id: str | int, n: int) -> None:
+    """Auto-loop floor: don't joke unless at least N new messages
+    arrived since the previous joke. Prevents joking on a dead chat.
+    """
+    n = max(0, int(n))
+    conn = get_conn()
+    _ensure_chat_settings_row(conn, str(chat_id))
+    conn.execute(
+        "UPDATE chat_settings SET jokes_min_msgs_since_last=? WHERE chat_id=?",
+        (n, str(chat_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_jokes_model_override(chat_id: str | int, model: str | None) -> None:
+    """Pin one OpenRouter model for this chat (overrides the default
+    fallback chain). ``None``/empty restores the default chain.
+    """
+    val = (model or "").strip() or None
+    conn = get_conn()
+    _ensure_chat_settings_row(conn, str(chat_id))
+    conn.execute(
+        "UPDATE chat_settings SET jokes_model_override=? WHERE chat_id=?",
+        (val, str(chat_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_chat_joke_sent(chat_id: str | int) -> None:
+    """Update jokes_last_joke_at to UTC-now after the bot posts a joke
+    so the auto-loop throttles correctly.
+    """
+    from datetime import datetime as _dt
+    now = _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_conn()
+    _ensure_chat_settings_row(conn, str(chat_id))
+    conn.execute(
+        "UPDATE chat_settings SET jokes_last_joke_at=? WHERE chat_id=?",
+        (now, str(chat_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_chats_with_jokes_enabled() -> list[dict]:
+    """Every chat with ``jokes_enabled=1``. Used by ``job_jokes`` —
+    we still re-read settings per chat to honour live admin edits
+    (no aggressive caching).
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT chat_id, jokes_enabled, jokes_interval_minutes, jokes_mode, "
+        "       jokes_context_size, jokes_min_msgs_since_last, "
+        "       jokes_model_override, jokes_last_joke_at "
+        "FROM chat_settings WHERE jokes_enabled=1"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── chat_messages: rolling buffer ────────────────────────────────────────────
+
+def log_chat_message(
+    chat_id: str | int,
+    *,
+    message_id: int | None,
+    telegram_id: int | None,
+    username: str | None,
+    display_name: str | None,
+    text: str,
+) -> None:
+    """Append one line to the rolling buffer for ``chat_id`` and prune
+    the oldest rows if we're above ``JOKES_LOG_CAP``. Caller is
+    responsible for the privacy gate (``is_jokes_enabled``) — this
+    helper *always* writes when invoked.
+    """
+    if not text or not str(text).strip():
+        return
+    text = str(text)[:4000]  # hard cap so a single mega-message can't OOM the row
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO chat_messages "
+        "(chat_id, message_id, telegram_id, username, display_name, text) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (str(chat_id), message_id, telegram_id, username, display_name, text),
+    )
+    # Prune. We do this every Nth insert? — simplest is "every time"
+    # but that's a SELECT+DELETE per message. Compromise: only prune
+    # when row count is at least 10% above cap, so on average we run
+    # the prune once every ~50 inserts.
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM chat_messages WHERE chat_id=?",
+        (str(chat_id),),
+    ).fetchone()
+    n = 0
+    if row is not None:
+        try:
+            n = int(row["n"] if hasattr(row, "keys") else row[0])
+        except (KeyError, IndexError, TypeError, ValueError):
+            n = 0
+    if n > int(JOKES_LOG_CAP * 1.1):
+        # Keep the JOKES_LOG_CAP newest by id. We compute the cutoff
+        # id explicitly because the SQL DELETE … LIMIT … ORDER BY
+        # syntax differs across SQLite/Postgres.
+        cutoff_row = conn.execute(
+            "SELECT id FROM chat_messages WHERE chat_id=? "
+            "ORDER BY id DESC LIMIT 1 OFFSET ?",
+            (str(chat_id), JOKES_LOG_CAP),
+        ).fetchone()
+        if cutoff_row is not None:
+            try:
+                cutoff = int(cutoff_row["id"] if hasattr(cutoff_row, "keys") else cutoff_row[0])
+            except (KeyError, IndexError, TypeError, ValueError):
+                cutoff = None
+            if cutoff:
+                conn.execute(
+                    "DELETE FROM chat_messages WHERE chat_id=? AND id<=?",
+                    (str(chat_id), cutoff),
+                )
+    conn.commit()
+    conn.close()
+
+
+def recent_chat_messages(chat_id: str | int, limit: int = 100) -> list[dict]:
+    """Up to ``limit`` most-recent messages for ``chat_id``, ordered
+    *oldest first* (which is what an LLM prompt wants). Empty list if
+    nothing is logged yet.
+    """
+    n = max(1, min(JOKES_MAX_CONTEXT, int(limit)))
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, message_id, telegram_id, username, display_name, text, ts "
+        "FROM chat_messages WHERE chat_id=? "
+        "ORDER BY id DESC LIMIT ?",
+        (str(chat_id), n),
+    ).fetchall()
+    conn.close()
+    out = [dict(r) for r in rows]
+    out.reverse()  # chronological — easier on the model
+    return out
+
+
+def count_messages_since(
+    chat_id: str | int, ts: str | None,
+) -> int:
+    """How many rows arrived after ``ts`` (UTC ``YYYY-MM-DD HH:MM:SS``)
+    for ``chat_id``. ``None``/empty means "all rows".
+    """
+    conn = get_conn()
+    if ts:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM chat_messages "
+            "WHERE chat_id=? AND ts > ?",
+            (str(chat_id), str(ts)),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM chat_messages WHERE chat_id=?",
+            (str(chat_id),),
+        ).fetchone()
+    conn.close()
+    if row is None:
+        return 0
+    try:
+        return int(row["n"] if hasattr(row, "keys") else row[0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return 0
+
+
+def clear_chat_messages_log(chat_id: str | int) -> int:
+    """Wipe every row for ``chat_id`` — used by ``/jokes_clear_log``
+    when an admin wants to drop accumulated context (e.g. before
+    handing the bot to a different group). Returns rows deleted.
+    """
+    conn = get_conn()
+    cur = conn.execute(
+        "DELETE FROM chat_messages WHERE chat_id=?",
+        (str(chat_id),),
+    )
+    n = int(getattr(cur, "rowcount", 0) or 0)
+    conn.commit()
+    conn.close()
+    return n
+
+
+# ── jokes_history: what the bot actually posted ─────────────────────────────
+
+def add_joke_history(
+    chat_id: str | int,
+    *,
+    mode: str | None,
+    model: str | None,
+    text: str,
+    context_size: int | None,
+    source: str = "auto",
+) -> int:
+    """Record one posted joke. Returns the new row id. Also prunes
+    the oldest entries down to ``JOKES_HISTORY_CAP`` per chat.
+    """
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO jokes_history "
+        "(chat_id, mode, model, text, context_size, source) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (str(chat_id), mode, model, text, context_size, source),
+    )
+    new_id = getattr(cur, "lastrowid", None)
+    # Prune oldest rows for this chat above the cap.
+    cutoff_row = conn.execute(
+        "SELECT id FROM jokes_history WHERE chat_id=? "
+        "ORDER BY id DESC LIMIT 1 OFFSET ?",
+        (str(chat_id), JOKES_HISTORY_CAP),
+    ).fetchone()
+    if cutoff_row is not None:
+        try:
+            cutoff = int(cutoff_row["id"] if hasattr(cutoff_row, "keys") else cutoff_row[0])
+        except (KeyError, IndexError, TypeError, ValueError):
+            cutoff = None
+        if cutoff:
+            conn.execute(
+                "DELETE FROM jokes_history WHERE chat_id=? AND id<=?",
+                (str(chat_id), cutoff),
+            )
+    conn.commit()
+    conn.close()
+    if new_id is None:
+        # Postgres path — re-read by composite (rare but possible).
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT MAX(id) AS id FROM jokes_history WHERE chat_id=?",
+            (str(chat_id),),
+        ).fetchone()
+        conn.close()
+        if row is not None:
+            try:
+                return int(row["id"] if hasattr(row, "keys") else row[0])
+            except (KeyError, IndexError, TypeError, ValueError):
+                return 0
+        return 0
+    return int(new_id)
+
+
+def list_jokes_history(chat_id: str | int, limit: int = 10) -> list[dict]:
+    """Most-recent jokes for ``chat_id`` — newest first. Used both by
+    /jokes_history (display) and by ``generate_joke_for_chat`` (to
+    show the LLM what it already said and avoid repetition).
+    """
+    n = max(1, min(JOKES_HISTORY_CAP, int(limit)))
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, ts, mode, model, text, context_size, source "
+        "FROM jokes_history WHERE chat_id=? "
+        "ORDER BY id DESC LIMIT ?",
+        (str(chat_id), n),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

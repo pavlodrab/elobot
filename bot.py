@@ -664,6 +664,21 @@ ADMIN_ONLY_HELP_TEXT = """
 /remove_trophy &lt;id&gt; — удалить запись о трофее по ID
   ID берётся из /list_trophies или из ответа /add_trophy.
   Алиасы: /removetrophy, /del_trophy, /trophy_remove
+
+<b>Авто-шутки (LLM)</b>
+/joke — выдать шутку сейчас по последним сообщениям этого чата
+  Cooldown 60 сек на чат. Требует /jokes_on заранее.
+/jokes_on, /jokes_off — включить/выключить логирование и авто-шутки в чате
+  В выключенных чатах сообщения не логируются (приватность).
+/jokes_interval &lt;минуты&gt; — частота авто-шуток (0 = только вручную)
+  Допустимо 5..1440 при положительном значении.
+/jokes_mode &lt;soft|normal|spicy|savage|absurd&gt; — «упоротость»
+/jokes_context &lt;N&gt; — сколько последних сообщений в промпт (20..200)
+/jokes_minmsgs &lt;N&gt; — минимум новых сообщений между авто-шутками
+/jokes_setmodel &lt;model|reset&gt; — переопределить OpenRouter-модель чата (root)
+/jokes_clear_log — стереть лог сообщений этого чата
+/jokes_settings — текущая конфигурация + статистика
+/jokes_history [N] — последние N шуток (доступно всем)
 """
 # ADMIN_HELP_TEXT). Kept as the concatenation, BUT note that we never send
 # this as a single Telegram message — Telegram's hard limit is 4096 chars
@@ -7294,6 +7309,55 @@ def main():
     app.add_handler(CommandHandler("quotehelp", cmd_quote_help))
     app.add_handler(CommandHandler("quote_guide", cmd_quote_help))
     app.add_handler(CommandHandler("quoteguide", cmd_quote_help))
+
+    # ── Auto-jokes (LLM-generated jokes from recent chat context) ──
+    # Lazy logger lives at group=-1 so it always runs first and never
+    # blocks the master text router below at group=0. Inside the
+    # logger we double-check that ``jokes_enabled=true`` for the chat
+    # before persisting anything (privacy).
+    from handlers.jokes import (
+        log_chat_message as _log_chat_message,
+        cmd_joke as _cmd_joke,
+        cmd_jokes_on as _cmd_jokes_on,
+        cmd_jokes_off as _cmd_jokes_off,
+        cmd_jokes_interval as _cmd_jokes_interval,
+        cmd_jokes_mode as _cmd_jokes_mode,
+        cmd_jokes_context as _cmd_jokes_context,
+        cmd_jokes_minmsgs as _cmd_jokes_minmsgs,
+        cmd_jokes_setmodel as _cmd_jokes_setmodel,
+        cmd_jokes_clear_log as _cmd_jokes_clear_log,
+        cmd_jokes_history as _cmd_jokes_history,
+        cmd_jokes_settings as _cmd_jokes_settings,
+        job_jokes as _job_jokes,
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            _log_chat_message,
+        ),
+        group=-1,
+    )
+    app.add_handler(CommandHandler("joke", _cmd_joke))
+    app.add_handler(CommandHandler("jokes_on", _cmd_jokes_on))
+    app.add_handler(CommandHandler("jokeson", _cmd_jokes_on))
+    app.add_handler(CommandHandler("jokes_off", _cmd_jokes_off))
+    app.add_handler(CommandHandler("jokesoff", _cmd_jokes_off))
+    app.add_handler(CommandHandler("jokes_interval", _cmd_jokes_interval))
+    app.add_handler(CommandHandler("jokesinterval", _cmd_jokes_interval))
+    app.add_handler(CommandHandler("jokes_mode", _cmd_jokes_mode))
+    app.add_handler(CommandHandler("jokesmode", _cmd_jokes_mode))
+    app.add_handler(CommandHandler("jokes_context", _cmd_jokes_context))
+    app.add_handler(CommandHandler("jokescontext", _cmd_jokes_context))
+    app.add_handler(CommandHandler("jokes_minmsgs", _cmd_jokes_minmsgs))
+    app.add_handler(CommandHandler("jokesminmsgs", _cmd_jokes_minmsgs))
+    app.add_handler(CommandHandler("jokes_setmodel", _cmd_jokes_setmodel))
+    app.add_handler(CommandHandler("jokessetmodel", _cmd_jokes_setmodel))
+    app.add_handler(CommandHandler("jokes_clear_log", _cmd_jokes_clear_log))
+    app.add_handler(CommandHandler("jokesclearlog", _cmd_jokes_clear_log))
+    app.add_handler(CommandHandler("jokes_history", _cmd_jokes_history))
+    app.add_handler(CommandHandler("jokeshistory", _cmd_jokes_history))
+    app.add_handler(CommandHandler("jokes_settings", _cmd_jokes_settings))
+    app.add_handler(CommandHandler("jokessettings", _cmd_jokes_settings))
     # NB: Telegram only allows ASCII / digits / underscore in command
     # names, so the Russian-only aliases (/цитаты, /баг) had to go —
     # ``CommandHandler('цитаты', ...)`` raises at startup. Users
@@ -7747,6 +7811,11 @@ def main():
     # Quote loop — every 5 minutes; per-chat cadence (admin-set) is
     # checked inside ``job_quotes``. Idle chats no-op cheaply.
     app.job_queue.run_repeating(job_quotes, interval=5 * 60, first=300)
+    # Auto-jokes loop — same cadence, gated per-chat by interval +
+    # min_msgs_since_last inside ``handlers.jokes.job_jokes``. First
+    # run is offset 30s after job_quotes so the two LLM-using loops
+    # don't fire in the same tick on bot restart.
+    app.job_queue.run_repeating(_job_jokes, interval=5 * 60, first=330)
     app.add_error_handler(error_handler)
 
     log.info("Bot started ✅")
