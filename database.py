@@ -3703,38 +3703,52 @@ def _norm_alias(alias: str) -> str:
     return " ".join(str(alias).strip().lower().split())
 
 
-def add_player_alias(alias: str, player_id: int, granted_by: int | None = None) -> bool:
-    """Register an alias for a player. Returns True if a new row was
-    inserted, False if the alias already pointed at this same player
-    (idempotent). Raises ``ValueError`` if the alias is already taken
-    by a *different* player.
+def add_player_alias(
+    alias: str, player_id: int, granted_by: int | None = None,
+) -> tuple[str, int | None]:
+    """Register an alias for a player. Idempotent + upsert.
+
+    Returns ``(status, previous_player_id)``:
+      - ``("created",    None)``  — new alias inserted
+      - ``("unchanged",  pid)``   — alias already pointed at this same player
+      - ``("repointed",  prev)``  — alias previously mapped to ``prev``,
+                                    now repointed to ``player_id``
+
+    The repointed-from id is returned so the caller can do follow-up
+    bookkeeping (e.g. tell the admin which player just got demoted).
+
+    Raises ``ValueError`` only when the alias text itself is empty.
     """
     key = _norm_alias(alias)
     if not key:
         raise ValueError("alias must not be empty")
+    pid = int(player_id)
     conn = get_conn()
     existing = conn.execute(
         "SELECT player_id FROM player_aliases WHERE alias=?", (key,),
     ).fetchone()
     if existing:
-        existing_pid = (
+        existing_pid = int(
             existing["player_id"] if isinstance(existing, dict) or hasattr(existing, "keys")
             else existing[0]
         )
-        if int(existing_pid) == int(player_id):
+        if existing_pid == pid:
             conn.close()
-            return False
-        conn.close()
-        raise ValueError(
-            f"alias {alias!r} already maps to player_id={existing_pid}"
+            return "unchanged", pid
+        conn.execute(
+            "UPDATE player_aliases SET player_id=?, granted_by=? WHERE alias=?",
+            (pid, granted_by, key),
         )
+        conn.commit()
+        conn.close()
+        return "repointed", existing_pid
     conn.execute(
         "INSERT INTO player_aliases (alias, player_id, granted_by) VALUES (?, ?, ?)",
-        (key, int(player_id), granted_by),
+        (key, pid, granted_by),
     )
     conn.commit()
     conn.close()
-    return True
+    return "created", None
 
 
 def remove_player_alias(alias: str) -> bool:

@@ -495,7 +495,7 @@ async def cmd_alias(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         try:
-            inserted = db.add_player_alias(
+            status, prev_pid = db.add_player_alias(
                 alias_text, target["id"],
                 granted_by=update.effective_user.id,
             )
@@ -503,20 +503,54 @@ async def cmd_alias(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await send(update, f"❌ {html.escape(str(e))}")
             return
         # Retroactively repoint already-imported tournament_winners rows.
-        # When the user added the alias *after* /import_champions had
-        # auto-created a placeholder player, the existing records still
-        # pointed at that placeholder — leaving the leaderboard split
-        # ('Freshl 6' + '@freshl66 4' instead of '@freshl66 10').
-        # Consolidate them now so the merge is visible immediately.
+        # Two consolidation passes: any placeholder player whose
+        # username/game_nickname matches the alias text gets merged onto
+        # the new target. When this is a "repointed" call, ALSO move
+        # records that were previously pointing at the OLD target onto
+        # the new target — that's what the admin clearly meant by
+        # changing the alias mapping.
+        moved = 0
+        orphan_ids: list[int] = []
         try:
-            moved, orphan_ids = db.consolidate_winner_records_for_alias(
+            m, ids = db.consolidate_winner_records_for_alias(
                 alias_text, target["id"],
             )
+            moved += m
+            orphan_ids.extend(ids)
         except Exception as e:
             log.warning("alias consolidate failed: %s", e)
-            moved, orphan_ids = 0, []
 
-        verb = "добавлен" if inserted else "уже был назначен"
+        if status == "repointed" and prev_pid and prev_pid != target["id"]:
+            # Direct UPDATE of every column referencing the previous
+            # target. Keeps the leaderboard in sync without forcing a
+            # /import_champions re-run.
+            try:
+                conn = db.get_conn()
+                for col in (
+                    "winner_player_id", "runner_up_player_id",
+                    "fantasy_silver_player_id", "fantasy_bronze_player_id",
+                    "fantasy_cup_winner_player_id",
+                ):
+                    cur = conn.execute(
+                        f"UPDATE tournament_winners SET {col}=? WHERE {col}=?",
+                        (target["id"], int(prev_pid)),
+                    )
+                    moved += int(getattr(cur, "rowcount", 0) or 0)
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                log.warning("alias repoint UPDATE failed: %s", e)
+            if int(prev_pid) not in orphan_ids:
+                orphan_ids.append(int(prev_pid))
+
+        verb_map = {
+            "created":   "добавлен",
+            "unchanged": "уже был назначен (без изменений)",
+            "repointed": (
+                f"переподвязан с player_id=<code>{prev_pid}</code> на новый таргет"
+            ),
+        }
+        verb = verb_map.get(status, "добавлен")
         lines = [
             f"✅ Алиас <b>{html.escape(alias_text)}</b> {verb} → "
             f"{mention(target['username'])} (id={target['id']}).",
@@ -526,14 +560,14 @@ async def cmd_alias(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(
                 f"🔁 Переподвязал <b>{moved}</b> запис"
                 + ("ь" if moved == 1 else ("и" if 2 <= moved <= 4 else "ей"))
-                + f" с плейсхолдер-игрока"
+                + f" с плейсхолдер-игрок"
                 + ("а" if len(orphan_ids) == 1 else "ов")
                 + f" (id="
                 + ", ".join(str(i) for i in orphan_ids)
                 + f") на {mention(target['username'])}."
             )
             lines.append(
-                "ℹ️ Плейсхолдер-игрок остался в БД с 0 трофеями. "
+                "ℹ️ Прежние плейсхолдер-записи остались в БД с 0 трофеями. "
                 "Если хочешь полностью слить — <code>/relink_player</code>."
             )
         await send(update, "\n".join(lines))
