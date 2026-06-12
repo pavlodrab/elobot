@@ -6586,6 +6586,38 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _handle_wizard_text(update, ctx, wiz)
         return
 
+    # ── Free-form joke request: "Давай шутку про X" / "шутка про X" ──
+    # Last-chance branch BEFORE silent ignore — runs only when nothing
+    # else consumed the message (no pending state, no menu label, no
+    # wizard step, no feedback/bug reply state). Detector is
+    # conservative: a no-topic match requires an imperative verb
+    # ("давай/расскажи/сделай/кинь шутку"); a topic-bearing match
+    # accepts a bare "шутка про X".
+    #
+    # Privacy: trigger_joke_request internally checks
+    # ``is_jokes_enabled`` and silently no-ops in chats that haven't
+    # opted in via ``/jokes_on`` — we don't want the bot volunteering
+    # itself in random chats.
+    #
+    # Quota: also enforced inside trigger_joke_request — non-admins
+    # share 5 jokes/chat/day; admins bypass. Same 60-sec anti-spam
+    # cooldown as the slash command. No double-consumption: the
+    # detector only fires once per message.
+    chat = update.effective_chat
+    if chat is not None and getattr(chat, "type", None) != "private":
+        from handlers.jokes import (
+            detect_joke_intent as _detect_joke_intent,
+            trigger_joke_request as _trigger_joke_request,
+        )
+        intent = _detect_joke_intent(txt)
+        if intent is not None:
+            await _trigger_joke_request(
+                update, ctx,
+                topic=intent,
+                source="freeform",
+            )
+            return
+
     # Otherwise ignore (don't react to random chat)
 
 

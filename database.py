@@ -11,6 +11,7 @@ translates it transparently for Postgres.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
 from db_backend import (
     DB_PATH,
@@ -135,11 +136,14 @@ __all__ = [
     "JOKES_MIN_CONTEXT",
     "JOKES_MAX_CONTEXT",
     "JOKES_MAX_CUSTOM_PROMPT",
+    "JOKES_USER_DAILY_LIMIT",
     "get_jokes_settings",
     "is_jokes_enabled",
     "set_jokes_enabled",
     "is_analyze_enabled",
     "set_analyze_enabled",
+    "peek_jokes_user_daily",
+    "bump_jokes_user_daily",
     "set_jokes_interval",
     "set_jokes_mode",
     "set_jokes_context_size",
@@ -1118,6 +1122,24 @@ def init_db():
     if not _column_exists(conn, "chat_settings", "jokes_last_joke_at"):
         c.execute(
             "ALTER TABLE chat_settings ADD COLUMN jokes_last_joke_at DATETIME"
+        )
+
+    # User-requested jokes daily quota (2026-06). Single counter
+    # shared by every participant of the chat (NOT per-user). Resets
+    # at 00:00 UTC (= 03:00 МСК) — that's a 3-hour offset from the
+    # local "midnight" people might expect, but trades correctness
+    # for not having to plumb the display TZ into a hot DB helper.
+    # Admins always bypass; the limit only applies to non-admin
+    # /joke calls and free-form "шутка про X" triggers.
+    if not _column_exists(conn, "chat_settings", "jokes_user_daily_date"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN jokes_user_daily_date TEXT"
+        )
+    if not _column_exists(conn, "chat_settings", "jokes_user_daily_count"):
+        c.execute(
+            "ALTER TABLE chat_settings "
+            "ADD COLUMN jokes_user_daily_count INTEGER NOT NULL DEFAULT 0"
         )
 
     # Per-chat analyze module opt-in (2026-06). Independent privacy
@@ -4389,6 +4411,7 @@ JOKES_MAX_INTERVAL_MIN = 60 * 24 # 24h — above this auto-jokes basically off
 JOKES_MIN_CONTEXT = 20           # less than this and the LLM has no signal
 JOKES_MAX_CONTEXT = 200          # more than this and we blow OpenRouter context
 JOKES_MAX_CUSTOM_PROMPT = 2000   # per-chat custom system-prompt override cap
+JOKES_USER_DAILY_LIMIT = 5       # /joke calls non-admin can make per chat per day
 
 
 def _jokes_defaults(chat_id: str | int) -> dict:
@@ -4545,6 +4568,122 @@ def set_analyze_enabled(chat_id: str | int, enabled: bool) -> None:
     )
     conn.commit()
     conn.close()
+
+
+# ── User-requested jokes: per-chat-per-day quota (2026-06) ──────────────
+#
+# A single counter on chat_settings shared by every participant of
+# the chat. Resets when the stored ``jokes_user_daily_date`` no
+# longer matches today's UTC date — that's 03:00 МСК in operator
+# time, accepted to keep the helper TZ-trivial.
+#
+# Admins bypass entirely at the handler layer (the helpers don't
+# know who the user is, by design — they're plain quota maths).
+
+def _today_utc_date_str() -> str:
+    """``YYYY-MM-DD`` in UTC. Used as the rollover key so the counter
+    auto-resets at 00:00 UTC (= 03:00 МСК).
+    """
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def peek_jokes_user_daily(chat_id: str | int) -> tuple[int, int]:
+    """Read-only view of today's user-joke counter for ``chat_id``.
+
+    Returns ``(used, limit)``:
+      * ``used`` is the current count IF the stored date == today,
+        else ``0`` (yesterday's count is treated as not-yet-rolled).
+      * ``limit`` is :data:`JOKES_USER_DAILY_LIMIT`.
+
+    Does NOT mutate state — safe to call from /jokes panels and
+    from "quota left" diagnostics. Use :func:`bump_jokes_user_daily`
+    when actually charging a request.
+    """
+    today = _today_utc_date_str()
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT jokes_user_daily_date, jokes_user_daily_count "
+        "FROM chat_settings WHERE chat_id=?",
+        (str(chat_id),),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return 0, JOKES_USER_DAILY_LIMIT
+    try:
+        date = row["jokes_user_daily_date"] if hasattr(row, "keys") else row[0]
+        count = row["jokes_user_daily_count"] if hasattr(row, "keys") else row[1]
+    except (KeyError, IndexError, TypeError):
+        return 0, JOKES_USER_DAILY_LIMIT
+    if date != today:
+        return 0, JOKES_USER_DAILY_LIMIT
+    try:
+        return int(count or 0), JOKES_USER_DAILY_LIMIT
+    except (TypeError, ValueError):
+        return 0, JOKES_USER_DAILY_LIMIT
+
+
+def bump_jokes_user_daily(chat_id: str | int) -> tuple[bool, int, int]:
+    """Atomically charge one user-requested joke against today's
+    per-chat quota.
+
+    Returns ``(allowed, count_after, limit)``:
+      * ``allowed=True``  — quota was available, ``count_after`` is
+        the post-increment value (≤ limit). Caller proceeds.
+      * ``allowed=False`` — quota already exhausted; ``count_after``
+        is the unchanged current value (== limit). Caller refuses.
+
+    Auto-resets the counter when the stored date doesn't match
+    today's UTC date — the SELECT-then-UPDATE pair runs inside a
+    single connection so two concurrent calls won't both reset
+    (the first wins, the second sees the fresh row and reads
+    ``count_after=1``, ``count_after=2``, etc.).
+    """
+    today = _today_utc_date_str()
+    limit = JOKES_USER_DAILY_LIMIT
+    conn = get_conn()
+    try:
+        _ensure_chat_settings_row(conn, str(chat_id))
+        row = conn.execute(
+            "SELECT jokes_user_daily_date, jokes_user_daily_count "
+            "FROM chat_settings WHERE chat_id=?",
+            (str(chat_id),),
+        ).fetchone()
+        try:
+            date = row["jokes_user_daily_date"] if row and hasattr(row, "keys") else (row[0] if row else None)
+            count_raw = row["jokes_user_daily_count"] if row and hasattr(row, "keys") else (row[1] if row else 0)
+        except (KeyError, IndexError, TypeError):
+            date, count_raw = None, 0
+        try:
+            count = int(count_raw or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if date != today:
+            # Day rolled over (or row was just inserted) — reset to 0
+            # before charging.
+            count = 0
+        if count >= limit:
+            # Persist the today's-date marker even on refusal so a
+            # rollover happening between two refused calls doesn't
+            # appear to "reset" the count visually.
+            conn.execute(
+                "UPDATE chat_settings "
+                "SET jokes_user_daily_date=?, jokes_user_daily_count=? "
+                "WHERE chat_id=?",
+                (today, count, str(chat_id)),
+            )
+            conn.commit()
+            return False, count, limit
+        new_count = count + 1
+        conn.execute(
+            "UPDATE chat_settings "
+            "SET jokes_user_daily_date=?, jokes_user_daily_count=? "
+            "WHERE chat_id=?",
+            (today, new_count, str(chat_id)),
+        )
+        conn.commit()
+        return True, new_count, limit
+    finally:
+        conn.close()
 
 
 def set_jokes_interval(chat_id: str | int, minutes: int) -> None:
