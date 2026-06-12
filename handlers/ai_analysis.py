@@ -298,145 +298,48 @@ _MD_CHARS_RE = re.compile(r"[*_`~]")
 #      treats a rejection as a soft failure and retries the next model
 #      in the fallback chain.
 
-_THINK_BLOCK_RE = re.compile(
-    r"<\s*think(?:ing)?\s*>.*?<\s*/\s*think(?:ing)?\s*>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-_REASONING_BLOCK_RE = re.compile(
-    r"<\s*reasoning\s*>.*?<\s*/\s*reasoning\s*>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-_OPEN_THINK_RE = re.compile(
-    r"<\s*think(?:ing)?\s*>", flags=re.IGNORECASE,
+# All the heavy lifting (regex stripping, prefix lists, latin/cyr
+# heuristic) lives in ``handlers._llm_safety`` so ``handlers.jokes``
+# can share the same defenses without duplicating code. We keep
+# only the analyze-specific giveaways here as ``extra_substrings``.
+from handlers._llm_safety import (
+    looks_like_meta_leak as _shared_looks_like_meta_leak,
+    strip_reasoning_blocks as _strip_reasoning_blocks,
 )
 
-# Phrases that, when they OPEN the response, mean the model is dumping
-# its plan / restating the task instead of producing the summary.
-# Matched lower-cased and whitespace-stripped from the start.
-_META_LEAK_PREFIXES: tuple[str, ...] = (
-    # English CoT openings (the common case for free-tier reasoning
-    # models that leak their inner monologue).
-    "we need to",
-    "we should",
-    "we have to",
-    "we'll",
-    "we will",
-    "let me",
-    "let's",
-    "let us",
-    "i need to",
-    "i'll",
-    "i will",
-    "i'm going to",
-    "i should",
-    "i must",
-    "i have to",
-    "okay,",
-    "ok,",
-    "alright,",
-    "sure,",
-    "first,",
-    "now,",
-    "the user",
-    "the task",
-    "the assistant",
-    "the chat",
-    "the goal is",
-    "the system prompt",
-    "looking at",
-    "based on the",
-    "according to the",
-    "identify ",
-    "focus on",
-    "must be ",
-    "task:",
-    "instruction:",
-    "instructions:",
-    # Russian CoT openings (rarer but seen on bilingual reasoning models).
-    "итак, мне нужно",
-    "так, мне нужно",
-    "хорошо, мне нужно",
-    "понятно, нужно сделать",
-    "сейчас сделаю",
-    "сейчас составлю",
-    "сейчас проанализирую",
-    "проанализирую и составлю",
-)
-
-# Substrings that, anywhere in the answer, strongly indicate the model
-# is regurgitating the prompt rules instead of answering. Lower-cased
-# match.
-_META_LEAK_SUBSTRINGS: tuple[str, ...] = (
+# Analyze-specific prompt-rule fragments. The summary prompt asks for
+# ≤300 chars, "no preamble", "summarize the chat fragment", and
+# "key facts/events" — when the model echoes any of these back to us,
+# we know it's regurgitating instructions instead of answering.
+# Universal fragments ("no markdown", "must be russian", …) live in
+# ``_llm_safety.META_LEAK_SUBSTRINGS_UNIVERSAL`` so we don't duplicate
+# them here.
+_ANALYZE_META_SUBSTRINGS: tuple[str, ...] = (
     "300 characters",
     "<=300",
     "≤300",
-    "no markdown",
-    "no preamble",
-    "system prompt",
     "summarize the chat",
     "summarize the conversation",
     "key facts/events",
     "key facts / events",
-    "must be russian",
-    "in russian",
-    "without preamble",
 )
-
-
-def _strip_reasoning_blocks(s: str) -> str:
-    """Remove ``<think>…</think>`` / ``<reasoning>…</reasoning>``
-    wrappers some reasoning-tuned models leak into ``message.content``.
-
-    If a stray opener appears with no closer (the model ran out of
-    tokens mid-CoT), drop everything from the opener onward — it's
-    all monologue, no answer follows.
-    """
-    if not s:
-        return s
-    s = _THINK_BLOCK_RE.sub("", s)
-    s = _REASONING_BLOCK_RE.sub("", s)
-    m = _OPEN_THINK_RE.search(s)
-    if m:
-        s = s[:m.start()]
-    return s.strip()
 
 
 def _looks_like_meta_leak(text: str) -> bool:
     """``True`` if the model dumped its chain-of-thought / restated
     the task instructions instead of producing the summary.
 
-    Heuristics (any one fires → reject this model's output):
-      * The answer opens with a known meta-thinking prefix
-        (:data:`_META_LEAK_PREFIXES`).
-      * The answer contains a known prompt-rule regurgitation
-        substring (:data:`_META_LEAK_SUBSTRINGS`).
-      * The first 200 chars are heavily Latin (≥30 Latin letters AND
-        more than 2× as many Latin as Cyrillic letters) — our system
-        prompt mandates Russian, so a Latin-dominated head means the
-        model either answered in English or leaked CoT in English.
-
-    Tuned to be conservative: a Russian summary that legitimately
-    contains player nicknames in Latin (e.g. ``Oliver Queen``,
-    ``Fragment``) is well below the 2:1 threshold and won't trip.
+    Thin wrapper around :func:`handlers._llm_safety.looks_like_meta_leak`
+    that supplies analyze-specific extra substrings and the analyze
+    Latin/Cyrillic threshold (30 chars, 2:1 ratio — strict, since a
+    300-char Russian summary should not contain a wall of English).
     """
-    if not text:
-        return False
-    head = text.strip().lower()
-    if not head:
-        return False
-    for prefix in _META_LEAK_PREFIXES:
-        if head.startswith(prefix):
-            return True
-    for needle in _META_LEAK_SUBSTRINGS:
-        if needle in head:
-            return True
-    # Latin vs Cyrillic in the first 200 chars.
-    sample = text.strip()[:200]
-    latin = sum(1 for c in sample if "a" <= c.lower() <= "z")
-    cyr = sum(1 for c in sample if "\u0400" <= c <= "\u04ff")
-    if latin >= 30 and latin > cyr * 2:
-        return True
-    return False
+    return _shared_looks_like_meta_leak(
+        text,
+        extra_substrings=_ANALYZE_META_SUBSTRINGS,
+        latin_threshold=30,
+        latin_ratio=2.0,
+    )
 
 
 def _strip_mentions(s: str) -> str:
