@@ -154,6 +154,15 @@ __all__ = [
     "clear_chat_messages_log",
     "add_joke_history",
     "list_jokes_history",
+    # Joke feedback loop (replies + reactions)
+    "set_joke_message_id",
+    "get_joke_by_message",
+    "add_joke_reply",
+    "list_joke_replies",
+    "list_recent_replies_for_chat",
+    "apply_joke_reaction_delta",
+    "set_joke_reaction_snapshot",
+    "list_top_reacted_jokes",
     # Champions / Hall of Fame
     "TOURNAMENT_WINNER_TYPES",
     "add_player_alias",
@@ -1006,6 +1015,64 @@ def init_db():
     c.execute(
         "CREATE INDEX IF NOT EXISTS idx_jokes_history_chat_id "
         "ON jokes_history (chat_id, id DESC)"
+    )
+
+    # ── Joke feedback loop (2026-06) ─────────────────────────────────
+    # ``message_id``     — Telegram message_id of the posted joke. Used
+    #                      to match incoming replies / reaction updates
+    #                      back to the joke they target.
+    # ``score``          — Net reaction score (sum of positive minus
+    #                      negative reactions). Updated on every
+    #                      ``message_reaction`` / ``message_reaction_count``
+    #                      update we receive for this joke.
+    # ``reactions_json`` — Latest snapshot of ``{"emoji": count}`` (or
+    #                      ``{"emoji": 1}`` when only per-user events
+    #                      are available). Used purely for diagnostics
+    #                      and the history view; the actual signal is
+    #                      ``score``.
+    if not _column_exists(conn, "jokes_history", "message_id"):
+        c.execute("ALTER TABLE jokes_history ADD COLUMN message_id INTEGER")
+    if not _column_exists(conn, "jokes_history", "score"):
+        c.execute(
+            "ALTER TABLE jokes_history "
+            "ADD COLUMN score INTEGER NOT NULL DEFAULT 0"
+        )
+    if not _column_exists(conn, "jokes_history", "reactions_json"):
+        c.execute("ALTER TABLE jokes_history ADD COLUMN reactions_json TEXT")
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jokes_history_chat_msg "
+        "ON jokes_history (chat_id, message_id)"
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jokes_history_chat_score "
+        "ON jokes_history (chat_id, score DESC, id DESC)"
+    )
+
+    # Replies to bot jokes — captured by the message logger when a
+    # user replies to a tracked joke message. We store both the FK to
+    # ``jokes_history.id`` and the chat_id so per-chat queries don't
+    # need a JOIN. ``text`` is the reply body (no formatting).
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS joke_replies (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            joke_history_id INTEGER NOT NULL,
+            chat_id         TEXT    NOT NULL,
+            ts              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            telegram_id     INTEGER,
+            username        TEXT,
+            display_name    TEXT,
+            text            TEXT    NOT NULL
+        )
+        """
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_joke_replies_joke "
+        "ON joke_replies (joke_history_id, id DESC)"
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_joke_replies_chat "
+        "ON joke_replies (chat_id, id DESC)"
     )
 
     # Per-chat jokes config — additive columns on chat_settings
@@ -4762,18 +4829,26 @@ def add_joke_history(
     text: str,
     context_size: int | None,
     source: str = "auto",
+    message_id: int | None = None,
 ) -> int:
     """Record one posted joke. Returns the new row id. Also prunes
     the oldest entries down to ``JOKES_HISTORY_CAP`` per chat.
+
+    ``message_id`` is the Telegram message id of the posted joke;
+    callers that already know it (most of them — they post the
+    message before bookkeeping) pass it here so the reaction /
+    reply feedback loop can match incoming events. When the caller
+    only learns the id later (e.g. notice→edit fallbacks), pass
+    ``None`` and call :func:`set_joke_message_id` afterwards.
     """
     conn = get_conn()
-    cur = conn.execute(
+    new_id = conn.insert_returning_id(
         "INSERT INTO jokes_history "
-        "(chat_id, mode, model, text, context_size, source) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (str(chat_id), mode, model, text, context_size, source),
+        "(chat_id, mode, model, text, context_size, source, message_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (str(chat_id), mode, model, text, context_size, source,
+         int(message_id) if message_id is not None else None),
     )
-    new_id = getattr(cur, "lastrowid", None)
     # Prune oldest rows for this chat above the cap.
     cutoff_row = conn.execute(
         "SELECT id FROM jokes_history WHERE chat_id=? "
@@ -4786,27 +4861,24 @@ def add_joke_history(
         except (KeyError, IndexError, TypeError, ValueError):
             cutoff = None
         if cutoff:
+            # Cascade-delete replies for pruned jokes so joke_replies
+            # doesn't grow unbounded for chronic-poster chats.
+            conn.execute(
+                "DELETE FROM joke_replies WHERE chat_id=? AND "
+                "joke_history_id IN (SELECT id FROM jokes_history "
+                "WHERE chat_id=? AND id<=?)",
+                (str(chat_id), str(chat_id), cutoff),
+            )
             conn.execute(
                 "DELETE FROM jokes_history WHERE chat_id=? AND id<=?",
                 (str(chat_id), cutoff),
             )
     conn.commit()
     conn.close()
-    if new_id is None:
-        # Postgres path — re-read by composite (rare but possible).
-        conn = get_conn()
-        row = conn.execute(
-            "SELECT MAX(id) AS id FROM jokes_history WHERE chat_id=?",
-            (str(chat_id),),
-        ).fetchone()
-        conn.close()
-        if row is not None:
-            try:
-                return int(row["id"] if hasattr(row, "keys") else row[0])
-            except (KeyError, IndexError, TypeError, ValueError):
-                return 0
+    try:
+        return int(new_id) if new_id is not None else 0
+    except (TypeError, ValueError):
         return 0
-    return int(new_id)
 
 
 def list_jokes_history(chat_id: str | int, limit: int = 10) -> list[dict]:
@@ -4817,10 +4889,251 @@ def list_jokes_history(chat_id: str | int, limit: int = 10) -> list[dict]:
     n = max(1, min(JOKES_HISTORY_CAP, int(limit)))
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, ts, mode, model, text, context_size, source "
+        "SELECT id, ts, mode, model, text, context_size, source, "
+        "       message_id, score, reactions_json "
         "FROM jokes_history WHERE chat_id=? "
         "ORDER BY id DESC LIMIT ?",
         (str(chat_id), n),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── Joke feedback loop ──────────────────────────────────────────────────────
+#
+# The bot stores three signals about every posted joke so future jokes can
+# learn the chat's taste:
+#
+#   1. ``message_id``       — set on insert (or via ``set_joke_message_id``)
+#                             so we can match replies and reactions back.
+#   2. ``joke_replies``     — every chat reply to a joke message lands here
+#                             (in addition to the rolling chat_messages buffer).
+#   3. ``score`` + snapshot — per-joke reaction tally, updated from the
+#                             ``message_reaction`` and ``message_reaction_count``
+#                             updates dispatched by Telegram.
+#
+# ``handlers.jokes`` then queries ``list_top_reacted_jokes`` and
+# ``list_recent_replies_for_chat`` and feeds them into the LLM prompt so
+# the model gets concrete style examples + audience reactions.
+
+def set_joke_message_id(joke_history_id: int, message_id: int) -> None:
+    """Late-binding setter for jokes that were inserted before the
+    Telegram post completed. Idempotent: reapplying the same id is
+    a no-op.
+    """
+    if not joke_history_id or message_id is None:
+        return
+    conn = get_conn()
+    conn.execute(
+        "UPDATE jokes_history SET message_id=? WHERE id=?",
+        (int(message_id), int(joke_history_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_joke_by_message(chat_id: str | int, message_id: int) -> dict | None:
+    """Look up the jokes_history row whose ``(chat_id, message_id)``
+    matches. Returns ``None`` when the message isn't a tracked joke
+    (e.g. it's a regular bot reply or a quote-loop post).
+    """
+    if message_id is None:
+        return None
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id, ts, mode, model, text, context_size, source, "
+        "       message_id, score, reactions_json "
+        "FROM jokes_history WHERE chat_id=? AND message_id=? "
+        "ORDER BY id DESC LIMIT 1",
+        (str(chat_id), int(message_id)),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def add_joke_reply(
+    *,
+    joke_history_id: int,
+    chat_id: str | int,
+    telegram_id: int | None,
+    username: str | None,
+    display_name: str | None,
+    text: str,
+) -> int:
+    """Append one chat reply to the joke feedback log. Caller has
+    already verified the message is a reply to a tracked joke.
+    Returns the new row id (or 0 on insert failure).
+    """
+    if not text or not str(text).strip():
+        return 0
+    text = str(text)[:4000]
+    conn = get_conn()
+    new_id = conn.insert_returning_id(
+        "INSERT INTO joke_replies "
+        "(joke_history_id, chat_id, telegram_id, username, display_name, text) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (int(joke_history_id), str(chat_id), telegram_id, username,
+         display_name, text),
+    )
+    conn.commit()
+    conn.close()
+    try:
+        return int(new_id) if new_id is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def list_joke_replies(joke_history_id: int, limit: int = 20) -> list[dict]:
+    """Every reply to one specific joke, oldest-first (so a reader
+    sees the conversation in order).
+    """
+    n = max(1, min(200, int(limit)))
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, ts, telegram_id, username, display_name, text "
+        "FROM joke_replies WHERE joke_history_id=? "
+        "ORDER BY id ASC LIMIT ?",
+        (int(joke_history_id), n),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_recent_replies_for_chat(
+    chat_id: str | int, limit: int = 10,
+) -> list[dict]:
+    """Most-recent replies to *any* of the bot's jokes in this chat.
+
+    Each row carries the joke text alongside the reply so the LLM
+    can see the (joke → reaction) pair without an extra round-trip.
+    Returns chronological-most-recent-first.
+    """
+    n = max(1, min(50, int(limit)))
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT r.id, r.ts, r.telegram_id, r.username, r.display_name, "
+        "       r.text AS reply_text, "
+        "       j.id AS joke_id, j.text AS joke_text, j.score AS joke_score "
+        "FROM joke_replies r "
+        "JOIN jokes_history j ON j.id = r.joke_history_id "
+        "WHERE r.chat_id=? "
+        "ORDER BY r.id DESC LIMIT ?",
+        (str(chat_id), n),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def apply_joke_reaction_delta(
+    joke_history_id: int, delta: int,
+    *,
+    snapshot_json: str | None = None,
+) -> int:
+    """Bump the joke's running score by ``delta`` (can be negative).
+    When ``snapshot_json`` is provided it's also stored as the
+    latest reactions snapshot — callers that have a full count
+    breakdown should pass it; per-user delta callers can omit it.
+
+    Returns the new score, or ``0`` when the joke row is gone (e.g.
+    pruned).
+    """
+    if not joke_history_id or not delta:
+        # Still record snapshot if provided, since reactions can
+        # change to identical totals (add+remove canceling) — caller
+        # may want the snapshot updated even with zero delta.
+        if snapshot_json is not None and joke_history_id:
+            conn = get_conn()
+            conn.execute(
+                "UPDATE jokes_history SET reactions_json=? WHERE id=?",
+                (snapshot_json, int(joke_history_id)),
+            )
+            conn.commit()
+            conn.close()
+        return 0
+    conn = get_conn()
+    if snapshot_json is not None:
+        conn.execute(
+            "UPDATE jokes_history "
+            "SET score = COALESCE(score, 0) + ?, reactions_json=? "
+            "WHERE id=?",
+            (int(delta), snapshot_json, int(joke_history_id)),
+        )
+    else:
+        conn.execute(
+            "UPDATE jokes_history "
+            "SET score = COALESCE(score, 0) + ? "
+            "WHERE id=?",
+            (int(delta), int(joke_history_id)),
+        )
+    row = conn.execute(
+        "SELECT score FROM jokes_history WHERE id=?",
+        (int(joke_history_id),),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    if row is None:
+        return 0
+    try:
+        return int(row["score"] if hasattr(row, "keys") else row[0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return 0
+
+
+def set_joke_reaction_snapshot(
+    joke_history_id: int, *, score: int, snapshot_json: str | None,
+) -> None:
+    """Replace both ``score`` and ``reactions_json`` outright.
+
+    Used by the ``message_reaction_count`` handler, which receives an
+    authoritative aggregate from Telegram (so we just overwrite,
+    rather than apply a delta).
+    """
+    if not joke_history_id:
+        return
+    conn = get_conn()
+    conn.execute(
+        "UPDATE jokes_history SET score=?, reactions_json=? WHERE id=?",
+        (int(score), snapshot_json, int(joke_history_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_top_reacted_jokes(
+    chat_id: str | int,
+    *,
+    limit: int = 3,
+    min_score: int = 1,
+    max_age_days: int | None = None,
+) -> list[dict]:
+    """Top-scoring jokes for ``chat_id`` — used as style exemplars in
+    future joke prompts. ``min_score`` keeps zero-reaction jokes out
+    of the sample (one stray 👍 still counts so small chats aren't
+    starved). ``max_age_days``, when set, drops anything older than
+    that — useful if a chat's taste shifts.
+    """
+    n = max(1, min(20, int(limit)))
+    sql = (
+        "SELECT id, ts, mode, text, score, reactions_json "
+        "FROM jokes_history "
+        "WHERE chat_id=? AND COALESCE(score, 0) >= ? "
+    )
+    params: list = [str(chat_id), int(min_score)]
+    if max_age_days and max_age_days > 0:
+        # Compute the ISO timestamp in Python so the SQL stays
+        # backend-agnostic (the db_backend translator only rewrites
+        # ``datetime('now', '+N units')`` literals, not parameterised
+        # offsets — see ``_RE_DATETIME_OFFSET`` in db_backend.py).
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff_ts = (_dt.utcnow() - _td(days=int(max_age_days))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        sql += "AND ts >= ? "
+        params.append(cutoff_ts)
+    sql += "ORDER BY COALESCE(score, 0) DESC, id DESC LIMIT ?"
+    params.append(n)
+    conn = get_conn()
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+

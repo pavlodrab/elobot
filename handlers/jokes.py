@@ -50,6 +50,7 @@ from typing import Optional
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    Message,
     Update,
 )
 from telegram.error import TelegramError
@@ -293,6 +294,80 @@ def _clean_joke_text(raw: str) -> str:
 
 _CTX_HARD_CAP_CHARS = 6000   # OpenRouter context cap budget for the user msg
 
+# Reaction-emoji scoring vocabulary. We keep this deliberately broad on
+# the positive side (Telegram's premium emoji set + common chat reactions)
+# and narrow on the negative side (only unambiguously-disapproving
+# emojis count against the joke). Anything not listed here scores 0 —
+# it's a reaction, but neither a thumbs-up nor a thumbs-down.
+#
+# These are the emoji *characters* Telegram puts in
+# ``ReactionTypeEmoji.emoji``. Custom-emoji reactions
+# (``ReactionTypeCustomEmoji``) are uncommon in groups and we ignore
+# them — their semantics are chat-specific and we'd need a per-chat
+# polarity map, which isn't worth the complexity right now.
+_POSITIVE_EMOJIS: frozenset[str] = frozenset({
+    "👍", "❤", "❤️", "🔥", "🥰", "👏", "😁", "🎉", "🤩", "💯",
+    "🤣", "😂", "🤗", "🤡", "🆒", "❤‍🔥", "❤️‍🔥", "🌚",
+    "💋", "🤝", "🦄", "😘", "🏆", "💘", "🤓", "✨",
+})
+_NEGATIVE_EMOJIS: frozenset[str] = frozenset({
+    "👎", "💩", "🤮", "😱", "🤬", "😢", "😨", "🥱", "🥴",
+    "😴", "😭", "🤨", "🖕", "☠", "☠️",
+})
+
+
+def _score_emoji(emoji: str) -> int:
+    """Map one reaction emoji to ``+1 / -1 / 0``. Unknown emojis are
+    neutral — the joke-reaction loop only wants signal where the chat
+    *clearly* approved or disapproved.
+    """
+    if not emoji:
+        return 0
+    if emoji in _POSITIVE_EMOJIS:
+        return 1
+    if emoji in _NEGATIVE_EMOJIS:
+        return -1
+    return 0
+
+
+def _reactions_to_score(reactions) -> tuple[int, dict[str, int]]:
+    """Convert a list of :class:`telegram.ReactionType` (per-user new
+    reactions) into ``(net_score, {emoji: 1, ...})``.
+
+    Per-user lists are short (Telegram caps them at one or a few),
+    so we always treat each entry as ``count=1``.
+    """
+    score = 0
+    snapshot: dict[str, int] = {}
+    for r in reactions or ():
+        emoji = getattr(r, "emoji", None)
+        if not emoji:
+            continue
+        score += _score_emoji(emoji)
+        snapshot[emoji] = snapshot.get(emoji, 0) + 1
+    return score, snapshot
+
+
+def _reaction_counts_to_score(reaction_counts) -> tuple[int, dict[str, int]]:
+    """Convert a list of :class:`telegram.ReactionCount` (chat-wide
+    aggregate from ``message_reaction_count``) into
+    ``(net_score, {emoji: total_count, ...})``.
+    """
+    score = 0
+    snapshot: dict[str, int] = {}
+    for rc in reaction_counts or ():
+        rtype = getattr(rc, "type", None)
+        emoji = getattr(rtype, "emoji", None) if rtype else None
+        try:
+            n = int(getattr(rc, "total_count", 0) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if not emoji or n <= 0:
+            continue
+        score += _score_emoji(emoji) * n
+        snapshot[emoji] = snapshot.get(emoji, 0) + n
+    return score, snapshot
+
 
 def _format_author(row: dict) -> str:
     """Pick the friendliest author label we have for a single line:
@@ -357,12 +432,82 @@ def _format_recent_jokes_for_prompt(history: list[dict], limit: int = 5) -> str:
     )
 
 
+def _format_top_jokes_for_prompt(top: list[dict], limit: int = 3) -> str:
+    """Top-scoring past jokes for this chat — fed into the prompt as
+    *style exemplars*, NOT as templates to copy. The model is told
+    explicitly to imitate vibe/structure, not subject matter.
+
+    A joke without a score (``score == 0``) is filtered out by the
+    DB query already; this helper just renders what survives.
+    Returns empty string when there's no signal yet.
+    """
+    if not top:
+        return ""
+    bits: list[str] = []
+    for h in top[:limit]:
+        t = (h.get("text") or "").strip().replace("\n", " ")
+        score = h.get("score") or 0
+        if not t:
+            continue
+        if len(t) > 220:
+            t = t[:220].rstrip() + "…"
+        bits.append(f"- (👍{score}) {t}")
+    if not bits:
+        return ""
+    return (
+        "Шутки этого чата, которые получили положительные реакции "
+        "(👍/❤️/🔥 и т.п.) — ИМИТИРУЙ их стиль, ритм, длину, тип "
+        "панчлайна. НЕ копируй их сюжет и не повторяй формулировки:\n"
+        + "\n".join(bits)
+    )
+
+
+def _format_replies_for_prompt(replies: list[dict], limit: int = 8) -> str:
+    """Recent chat replies *to* the bot's previous jokes. Each line
+    pairs a short joke snippet with the reply, so the LLM can see
+    which jokes landed and which ones the chat dunked on.
+
+    Replies are ordered newest-first (DB does that for us) but we
+    render oldest-first inside the limit window so the prompt reads
+    chronologically.
+    """
+    if not replies:
+        return ""
+    window = list(replies[:limit])
+    window.reverse()
+    bits: list[str] = []
+    for r in window:
+        joke = (r.get("joke_text") or "").strip().replace("\n", " ")
+        reply = (r.get("reply_text") or "").strip().replace("\n", " ")
+        if not reply:
+            continue
+        if len(joke) > 120:
+            joke = joke[:120].rstrip() + "…"
+        if len(reply) > 160:
+            reply = reply[:160].rstrip() + "…"
+        author = (r.get("display_name") or r.get("username") or "аноним").strip()
+        if len(author) > 30:
+            author = author[:30] + "…"
+        bits.append(
+            f"- шутка: «{joke}» → ответ {author}: «{reply}»"
+        )
+    if not bits:
+        return ""
+    return (
+        "Реакции чата на твои предыдущие шутки (что ответили текстом). "
+        "Учти их вкус — что зашло, что нет — и подстрой стиль:\n"
+        + "\n".join(bits)
+    )
+
+
 def _build_prompt(
     *,
     mode: str,
     context_text: str,
     history_text: str,
     custom_prompt: str | None = None,
+    top_text: str = "",
+    replies_text: str = "",
 ) -> tuple[str, str, float]:
     """Return ``(system, user, temperature)`` for the OpenRouter call.
 
@@ -372,6 +517,12 @@ def _build_prompt(
     unconditionally). The temperature still comes from ``mode``: a
     chat that wants a different temperature should pick a different
     mode; the custom prompt is the *style*, mode is the *energy*.
+
+    ``top_text`` and ``replies_text`` are produced by the feedback
+    loop helpers (:func:`_format_top_jokes_for_prompt` /
+    :func:`_format_replies_for_prompt`). When empty, the prompt
+    falls back to a context-only joke (same as the pre-feedback
+    behaviour).
     """
     mode_prompt, temperature = _MODE_PROMPTS.get(mode, _MODE_PROMPTS["normal"])
     style_prompt = (custom_prompt or "").strip() or mode_prompt
@@ -382,6 +533,12 @@ def _build_prompt(
         "",
         context_text or "(чат пуст или ничего смешного)",
     ]
+    if top_text:
+        user_parts.append("")
+        user_parts.append(top_text)
+    if replies_text:
+        user_parts.append("")
+        user_parts.append(replies_text)
     if history_text:
         user_parts.append("")
         user_parts.append(history_text)
@@ -586,11 +743,32 @@ async def generate_joke_for_chat(chat_id: str | int) -> JokeOutcome:
     history = db.list_jokes_history(chat_id, limit=5)
     history_text = _format_recent_jokes_for_prompt(history)
 
+    # Feedback loop: top-scoring past jokes (style exemplars) +
+    # recent text replies the chat sent in response to bot jokes.
+    # Both are best-effort — if a chat has no signal yet we fall
+    # through to the original context-only prompt.
+    try:
+        top_rated = db.list_top_reacted_jokes(
+            chat_id, limit=3, min_score=1, max_age_days=60,
+        )
+    except Exception:
+        log.debug("list_top_reacted_jokes failed for %s", chat_id, exc_info=True)
+        top_rated = []
+    top_text = _format_top_jokes_for_prompt(top_rated)
+
+    try:
+        recent_replies = db.list_recent_replies_for_chat(chat_id, limit=8)
+    except Exception:
+        log.debug("list_recent_replies_for_chat failed for %s", chat_id, exc_info=True)
+        recent_replies = []
+    replies_text = _format_replies_for_prompt(recent_replies)
+
     custom_prompt = (settings.get("jokes_custom_prompt") or "").strip() or None
 
     system, user, temperature = _build_prompt(
         mode=mode, context_text=context_text, history_text=history_text,
         custom_prompt=custom_prompt,
+        top_text=top_text, replies_text=replies_text,
     )
 
     # Build the model fallback list: per-chat override goes first,
@@ -684,6 +862,36 @@ async def log_chat_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             display_name=(user.full_name if user else None) or None,
             text=text,
         )
+
+        # Feedback loop: if this message is a reply to one of the
+        # bot's tracked jokes, also persist it to ``joke_replies``
+        # so future prompts can show the LLM "вот как чат ответил
+        # на твою предыдущую шутку". We don't gate this on
+        # ``jokes_enabled`` separately — getting here already means
+        # the chat opted in (jokes or analyze). The reply is logged
+        # in BOTH ``chat_messages`` (general context) and
+        # ``joke_replies`` (joke-linked feedback) — that's
+        # intentional, the two stores serve different prompt slots.
+        try:
+            reply_to = getattr(msg, "reply_to_message", None)
+            if reply_to is not None and getattr(reply_to, "message_id", None):
+                joke_row = db.get_joke_by_message(
+                    str(chat.id), int(reply_to.message_id)
+                )
+                if joke_row and joke_row.get("id"):
+                    db.add_joke_reply(
+                        joke_history_id=int(joke_row["id"]),
+                        chat_id=str(chat.id),
+                        telegram_id=int(user.id) if user and user.id else None,
+                        username=getattr(user, "username", None) if user else None,
+                        display_name=(user.full_name if user else None) or None,
+                        text=text,
+                    )
+        except Exception:
+            log.debug(
+                "log_chat_message: joke-reply detection failed in chat %s",
+                getattr(chat, "id", "?"), exc_info=True,
+            )
     except Exception:
         log.debug("log_chat_message failed", exc_info=True)
 
@@ -980,9 +1188,15 @@ def _jokes_history_text(chat_id: str | int, *, limit: int = 5) -> str:
         if len(body) > 300:
             body = body[:300].rstrip() + "…"
         body = _strip_mentions(html.escape(body))
+        score = r.get("score") or 0
+        score_lbl = (
+            f" · <b>{'+' if int(score) > 0 else ''}{int(score)}</b>"
+            if score else ""
+        )
         lines.append("")
         lines.append(
-            f"<i>{html.escape(str(ts))} · {html.escape(mode)} · {src}</i>"
+            f"<i>{html.escape(str(ts))} · {html.escape(mode)} · "
+            f"{src}{score_lbl}</i>"
         )
         lines.append(body)
     return "\n".join(lines)
@@ -1191,6 +1405,11 @@ async def cb_jokes_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             parse_mode = "HTML"
         posted = False
+        # ``posted_message_id`` tracks where the joke text actually
+        # ended up — that's the message reactions/replies will
+        # target. ``edit_text`` keeps the same id; the fallback
+        # ``send_message`` returns a fresh Message we read for its id.
+        posted_message_id: int | None = None
         if notice is not None:
             try:
                 await notice.edit_text(
@@ -1199,16 +1418,18 @@ async def cb_jokes_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     disable_web_page_preview=True,
                 )
                 posted = True
+                posted_message_id = int(notice.message_id) if notice.message_id else None
             except TelegramError:
                 posted = False
         if not posted and chat_obj is not None:
             try:
-                await chat_obj.send_message(
+                sent = await chat_obj.send_message(
                     final_text,
                     parse_mode=parse_mode,
                     disable_web_page_preview=True,
                 )
                 posted = True
+                posted_message_id = int(sent.message_id) if sent and sent.message_id else None
             except TelegramError as e:
                 log.warning("j:run failed to post in chat %s: %s", cid, e)
         if outcome.text and posted:
@@ -1220,6 +1441,7 @@ async def cb_jokes_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     text=outcome.text,
                     context_size=outcome.context_size,
                     source="manual",
+                    message_id=posted_message_id,
                 )
                 db.mark_chat_joke_sent(cid)
             except Exception:
@@ -1832,6 +2054,7 @@ async def cmd_joke(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     posted = False
+    posted_message_id: int | None = None
     if notice is not None:
         try:
             await notice.edit_text(
@@ -1840,17 +2063,23 @@ async def cmd_joke(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 disable_web_page_preview=True,
             )
             posted = True
+            posted_message_id = (
+                int(notice.message_id) if notice.message_id else None
+            )
         except TelegramError:
             posted = False
     if not posted:
         try:
-            await ctx.bot.send_message(
+            sent = await ctx.bot.send_message(
                 chat_id=chat.id,
                 text=final_text,
                 parse_mode="HTML" if not outcome.text else None,
                 disable_web_page_preview=True,
             )
             posted = True
+            posted_message_id = (
+                int(sent.message_id) if sent and sent.message_id else None
+            )
         except TelegramError as e:
             log.warning("/joke failed to post in chat %s: %s", chat.id, e)
             return
@@ -1864,6 +2093,7 @@ async def cmd_joke(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 text=outcome.text,
                 context_size=outcome.context_size,
                 source="manual",
+                message_id=posted_message_id,
             )
             db.mark_chat_joke_sent(str(chat.id))
         except Exception:
@@ -1898,10 +2128,15 @@ async def cmd_jokes_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         if len(body) > 300:
             body = body[:300].rstrip() + "…"
         body = _strip_mentions(html.escape(body))
+        score = r.get("score") or 0
+        score_lbl = (
+            f" · <b>{'+' if int(score) > 0 else ''}{int(score)}</b>"
+            if score else ""
+        )
         lines.append("")
         lines.append(
             f"<i>{html.escape(str(ts))} · {html.escape(mode)} · "
-            f"{html.escape(model)} · {src}</i>"
+            f"{html.escape(model)} · {src}{score_lbl}</i>"
         )
         lines.append(body)
     await send(update, "\n".join(lines))
@@ -2006,8 +2241,9 @@ async def job_jokes(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
         # Post.
+        sent_msg: Message | None = None
         try:
-            await ctx.bot.send_message(
+            sent_msg = await ctx.bot.send_message(
                 chat_id=int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id,
                 text=outcome.text,
                 disable_web_page_preview=True,
@@ -2029,10 +2265,121 @@ async def job_jokes(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 text=outcome.text,
                 context_size=outcome.context_size,
                 source="auto",
+                message_id=(
+                    int(sent_msg.message_id)
+                    if sent_msg and sent_msg.message_id else None
+                ),
             )
             db.mark_chat_joke_sent(chat_id)
         except Exception:
             log.exception("job_jokes: bookkeeping failed for %s", chat_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reaction feedback (MessageReactionHandler)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Telegram delivers two flavours of reaction event:
+#
+#   * ``update.message_reaction``       — per-user, requires the bot to
+#                                         be a chat administrator. We
+#                                         get the user's old + new
+#                                         reaction lists.
+#   * ``update.message_reaction_count`` — chat-wide aggregate, delivered
+#                                         when per-user delivery isn't
+#                                         enabled (anonymous chats /
+#                                         non-admin bot). We get the
+#                                         total counts per emoji.
+#
+# Both arrive on the *same* ``MessageReactionHandler`` callback when the
+# default ``message_reaction_types`` is left at ``MESSAGE_REACTION``
+# (which subscribes to both subtypes). We dispatch by checking which
+# field of ``update`` is set.
+#
+# The bot must also list these update types in ``allowed_updates`` —
+# see ``run_polling`` in :mod:`bot`. Without that, Telegram silently
+# drops the events and this handler never fires.
+
+async def on_message_reaction(
+    update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Update the score / snapshot for a tracked joke when somebody
+    reacts to it. Routes by update sub-type:
+
+    * Per-user (``update.message_reaction``): apply a delta of
+      ``score(new) - score(old)`` and merge per-user reaction lists.
+    * Chat-wide (``update.message_reaction_count``): overwrite the
+      snapshot with the authoritative aggregate counts.
+
+    Untracked messages (anything not in ``jokes_history``) are
+    ignored — reactions on quote-loop posts, AI-summary posts,
+    bot-command replies etc. don't need to feed back into jokes.
+    """
+    try:
+        # ── per-user reaction event ───────────────────────────────────
+        mr = getattr(update, "message_reaction", None)
+        if mr is not None:
+            chat = getattr(mr, "chat", None)
+            if chat is None or not getattr(mr, "message_id", None):
+                return
+            joke = db.get_joke_by_message(str(chat.id), int(mr.message_id))
+            if not joke or not joke.get("id"):
+                return
+            old_score, _ = _reactions_to_score(getattr(mr, "old_reaction", None) or [])
+            new_score, new_snap = _reactions_to_score(getattr(mr, "new_reaction", None) or [])
+            delta = new_score - old_score
+            # We don't have an authoritative full snapshot from a
+            # per-user event (would need to track every user). Pass
+            # ``snapshot_json=None`` so the existing snapshot —
+            # populated by message_reaction_count if available — is
+            # preserved.
+            if delta != 0:
+                try:
+                    new_total = db.apply_joke_reaction_delta(
+                        int(joke["id"]), int(delta),
+                    )
+                    log.info(
+                        "joke %s reaction delta=%+d → score=%d (per-user, "
+                        "user new=%s)",
+                        joke["id"], delta, new_total, new_snap or "{}",
+                    )
+                except Exception:
+                    log.exception(
+                        "apply_joke_reaction_delta failed for joke %s",
+                        joke.get("id"),
+                    )
+            return
+
+        # ── chat-wide aggregate event ─────────────────────────────────
+        mrc = getattr(update, "message_reaction_count", None)
+        if mrc is not None:
+            chat = getattr(mrc, "chat", None)
+            if chat is None or not getattr(mrc, "message_id", None):
+                return
+            joke = db.get_joke_by_message(str(chat.id), int(mrc.message_id))
+            if not joke or not joke.get("id"):
+                return
+            score, snap = _reaction_counts_to_score(
+                getattr(mrc, "reactions", None) or []
+            )
+            try:
+                db.set_joke_reaction_snapshot(
+                    int(joke["id"]),
+                    score=score,
+                    snapshot_json=json.dumps(snap, ensure_ascii=False) if snap else None,
+                )
+                log.info(
+                    "joke %s reactions snapshot score=%d emojis=%s",
+                    joke["id"], score, snap or "{}",
+                )
+            except Exception:
+                log.exception(
+                    "set_joke_reaction_snapshot failed for joke %s",
+                    joke.get("id"),
+                )
+            return
+    except Exception:
+        log.debug("on_message_reaction failed", exc_info=True)
 
 
 __all__ = [
@@ -2047,6 +2394,7 @@ __all__ = [
     "cb_jokes_menu",
     "handle_pending_jokes_text",
     "cmd_jokes_history",
+    "on_message_reaction",
     # for tests / smoke
     "JokeOutcome",
 ]
