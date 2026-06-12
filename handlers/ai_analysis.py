@@ -59,7 +59,7 @@ import time
 import urllib.error
 import urllib.request
 
-from typing import Optional
+from typing import Callable, Optional
 
 from telegram import (
     InlineKeyboardButton,
@@ -278,6 +278,166 @@ _LEADING_LABEL_RE = re.compile(
 # Strip markdown bold/italic/code wrappers if the model ignores rule 3.
 _MD_CHARS_RE = re.compile(r"[*_`~]")
 
+# ── CoT / reasoning-leak defenses ────────────────────────────────────────────
+#
+# Some OpenRouter free-tier models (gpt-oss-style, deepseek-r1-style,
+# nemotron-think) put their chain-of-thought into ``message.content``
+# instead of (or in addition to) the separate ``message.reasoning``
+# field. If we just trim and post that, the user gets the model's
+# inner monologue ("We need to summarize the chat fragment, focusing
+# on key facts/events. Must be Russian, ≤300 characters…") instead
+# of the actual summary.
+#
+# We defend in two layers:
+#   1. Strip explicit ``<think>…</think>`` / ``<reasoning>…</reasoning>``
+#      blocks if present — that gives the real answer back when the
+#      model wrapped its CoT properly.
+#   2. If what's left still LOOKS like meta-thinking (English phrasing
+#      restating the task, reciting the prompt rules, or English-only
+#      output when we asked for Russian) — reject it. The orchestrator
+#      treats a rejection as a soft failure and retries the next model
+#      in the fallback chain.
+
+_THINK_BLOCK_RE = re.compile(
+    r"<\s*think(?:ing)?\s*>.*?<\s*/\s*think(?:ing)?\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_REASONING_BLOCK_RE = re.compile(
+    r"<\s*reasoning\s*>.*?<\s*/\s*reasoning\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_OPEN_THINK_RE = re.compile(
+    r"<\s*think(?:ing)?\s*>", flags=re.IGNORECASE,
+)
+
+# Phrases that, when they OPEN the response, mean the model is dumping
+# its plan / restating the task instead of producing the summary.
+# Matched lower-cased and whitespace-stripped from the start.
+_META_LEAK_PREFIXES: tuple[str, ...] = (
+    # English CoT openings (the common case for free-tier reasoning
+    # models that leak their inner monologue).
+    "we need to",
+    "we should",
+    "we have to",
+    "we'll",
+    "we will",
+    "let me",
+    "let's",
+    "let us",
+    "i need to",
+    "i'll",
+    "i will",
+    "i'm going to",
+    "i should",
+    "i must",
+    "i have to",
+    "okay,",
+    "ok,",
+    "alright,",
+    "sure,",
+    "first,",
+    "now,",
+    "the user",
+    "the task",
+    "the assistant",
+    "the chat",
+    "the goal is",
+    "the system prompt",
+    "looking at",
+    "based on the",
+    "according to the",
+    "identify ",
+    "focus on",
+    "must be ",
+    "task:",
+    "instruction:",
+    "instructions:",
+    # Russian CoT openings (rarer but seen on bilingual reasoning models).
+    "итак, мне нужно",
+    "так, мне нужно",
+    "хорошо, мне нужно",
+    "понятно, нужно сделать",
+    "сейчас сделаю",
+    "сейчас составлю",
+    "сейчас проанализирую",
+    "проанализирую и составлю",
+)
+
+# Substrings that, anywhere in the answer, strongly indicate the model
+# is regurgitating the prompt rules instead of answering. Lower-cased
+# match.
+_META_LEAK_SUBSTRINGS: tuple[str, ...] = (
+    "300 characters",
+    "<=300",
+    "≤300",
+    "no markdown",
+    "no preamble",
+    "system prompt",
+    "summarize the chat",
+    "summarize the conversation",
+    "key facts/events",
+    "key facts / events",
+    "must be russian",
+    "in russian",
+    "without preamble",
+)
+
+
+def _strip_reasoning_blocks(s: str) -> str:
+    """Remove ``<think>…</think>`` / ``<reasoning>…</reasoning>``
+    wrappers some reasoning-tuned models leak into ``message.content``.
+
+    If a stray opener appears with no closer (the model ran out of
+    tokens mid-CoT), drop everything from the opener onward — it's
+    all monologue, no answer follows.
+    """
+    if not s:
+        return s
+    s = _THINK_BLOCK_RE.sub("", s)
+    s = _REASONING_BLOCK_RE.sub("", s)
+    m = _OPEN_THINK_RE.search(s)
+    if m:
+        s = s[:m.start()]
+    return s.strip()
+
+
+def _looks_like_meta_leak(text: str) -> bool:
+    """``True`` if the model dumped its chain-of-thought / restated
+    the task instructions instead of producing the summary.
+
+    Heuristics (any one fires → reject this model's output):
+      * The answer opens with a known meta-thinking prefix
+        (:data:`_META_LEAK_PREFIXES`).
+      * The answer contains a known prompt-rule regurgitation
+        substring (:data:`_META_LEAK_SUBSTRINGS`).
+      * The first 200 chars are heavily Latin (≥30 Latin letters AND
+        more than 2× as many Latin as Cyrillic letters) — our system
+        prompt mandates Russian, so a Latin-dominated head means the
+        model either answered in English or leaked CoT in English.
+
+    Tuned to be conservative: a Russian summary that legitimately
+    contains player nicknames in Latin (e.g. ``Oliver Queen``,
+    ``Fragment``) is well below the 2:1 threshold and won't trip.
+    """
+    if not text:
+        return False
+    head = text.strip().lower()
+    if not head:
+        return False
+    for prefix in _META_LEAK_PREFIXES:
+        if head.startswith(prefix):
+            return True
+    for needle in _META_LEAK_SUBSTRINGS:
+        if needle in head:
+            return True
+    # Latin vs Cyrillic in the first 200 chars.
+    sample = text.strip()[:200]
+    latin = sum(1 for c in sample if "a" <= c.lower() <= "z")
+    cyr = sum(1 for c in sample if "\u0400" <= c <= "\u04ff")
+    if latin >= 30 and latin > cyr * 2:
+        return True
+    return False
+
 
 def _strip_mentions(s: str) -> str:
     """Insert ZWSP after ``@`` so Telegram doesn't ping anybody when
@@ -287,14 +447,32 @@ def _strip_mentions(s: str) -> str:
 
 
 def _clean_response(raw: str) -> str:
-    """Normalise the LLM output: trim, drop leading "Сводка:" /
+    """Normalise the LLM output: strip ``<think>`` blocks, reject
+    chain-of-thought/meta leaks, trim, drop leading "Сводка:" /
     "Анализ:" labels, strip surrounding quotes, kill leftover
     markdown markers, hard-cap at :data:`_RESPONSE_HARD_CHARS`, and
     de-fang @mentions.
+
+    Returns ``""`` (empty) when the input is itself a CoT/meta leak
+    rather than a real answer — this is a soft-failure signal the
+    orchestrator uses to skip to the next model in the fallback
+    chain (see :func:`_call_openrouter_sync`).
+
+    Idempotent: ``_clean_response(_clean_response(x)) == _clean_response(x)``.
     """
     if not raw:
         return ""
-    s = str(raw).strip()
+    # 1. Strip explicit reasoning wrappers BEFORE anything else — if
+    #    the model put its real answer after a `<think>…</think>`
+    #    block, this gives us the answer.
+    s = _strip_reasoning_blocks(str(raw))
+    if not s:
+        return ""
+    # 2. Reject if what's left is itself the CoT / meta-instruction
+    #    dump rather than the summary.
+    if _looks_like_meta_leak(s):
+        return ""
+    s = s.strip()
     s = _LEADING_LABEL_RE.sub("", s).strip()
     # Strip leading/trailing matched quote chars.
     for opener, closer in (
@@ -400,9 +578,18 @@ def _call_openrouter_sync(
     models: list[str],
     timeout: float = _OPENROUTER_TIMEOUT,
     attempts: list[str] | None = None,
+    validator: Callable[[str], str] | None = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    """Try every (model × key) combo until one returns non-empty
-    content. Returns ``(text, model_used)`` or ``(None, None)``.
+    """Try every (model × key) combo until one returns a non-empty
+    content that ``validator`` accepts. Returns ``(text, model_used)``
+    or ``(None, None)``.
+
+    ``validator``: optional callable that takes the raw model content
+    and returns the cleaned final string, or ``""`` to reject. A
+    rejection is treated as a *model-level* failure (CoT/meta leak,
+    English-only output, etc.) — we ``break`` out of the key loop
+    and move to the next model in the fallback chain, since trying
+    the same broken model with a different key won't help.
 
     Mirrors :func:`handlers.jokes._call_openrouter_sync` so we keep
     consistent error handling across LLM call sites.
@@ -427,8 +614,14 @@ def _call_openrouter_sync(
         # truncated mid-sentence; we hard-cap on our side anyway.
         "max_tokens": 400,
         "temperature": float(temperature),
-        # Reasoning-effort hint for nemotron / similar — fine to ignore.
-        "reasoning": {"effort": "low"},
+        # Reasoning hints. ``effort: low`` keeps the CoT short on
+        # supported reasoning models; ``exclude: true`` asks
+        # OpenRouter to put any chain-of-thought into the separate
+        # ``message.reasoning`` field rather than inside ``content``.
+        # Models that don't support these hints silently ignore them
+        # — and our validator (see ``validator=`` below) catches the
+        # cases where the model leaks CoT into ``content`` anyway.
+        "reasoning": {"effort": "low", "exclude": True},
     }
 
     for model in models:
@@ -499,6 +692,27 @@ def _call_openrouter_sync(
                 content = (msg.get("reasoning") if isinstance(msg, dict) else "") or ""
                 content = content.strip()
             if content:
+                # Defensive validation: some models leak chain-of-thought
+                # or English meta-instructions into ``content`` (see
+                # ``_clean_response`` / ``_looks_like_meta_leak``). If
+                # the validator rejects, it's a model-level problem —
+                # don't retry the same model with another key, ``break``
+                # the key loop and let the outer model loop fall through
+                # to the next model in the chain.
+                if validator is not None:
+                    cleaned = validator(content)
+                    if not cleaned:
+                        attempts.append(
+                            f"openrouter {model}: rejected (CoT/meta "
+                            f"leak, {len(content)} chars)"
+                        )
+                        log.info(
+                            "analyze: %s rejected (CoT/meta leak in "
+                            "content, %d chars)",
+                            model, len(content),
+                        )
+                        break
+                    content = cleaned
                 attempts.append(
                     f"openrouter {model}: OK ({len(content)} chars, {dt:.1f}s)"
                 )
@@ -516,6 +730,7 @@ async def _call_openrouter(
     models: list[str],
     timeout: float = _OPENROUTER_TIMEOUT,
     attempts: list[str] | None = None,
+    validator: Callable[[str], str] | None = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Async wrapper around the blocking OpenRouter call so the bot
     event loop isn't blocked while we wait on a 30-second HTTP
@@ -529,6 +744,7 @@ async def _call_openrouter(
         models=models,
         timeout=timeout,
         attempts=attempts,
+        validator=validator,
     )
 
 
@@ -598,6 +814,10 @@ async def generate_analysis(
             models=_analyze_models(),
             timeout=_OPENROUTER_TIMEOUT,
             attempts=attempts,
+            # Validator runs INSIDE the model loop so a CoT-leaking
+            # model gets skipped (we move on to the next fallback)
+            # instead of returning bogus output to the user.
+            validator=_clean_response,
         )
     except Exception as e:
         log.exception("generate_analysis(%s) crashed", chat_id)
@@ -614,6 +834,10 @@ async def generate_analysis(
             error="all_models_failed",
         )
 
+    # Validator already cleaned the content above. Run _clean_response
+    # one more time as a defensive idempotent pass — cheap, and means
+    # any future change to the call path (e.g. a different validator)
+    # still gets the canonical output shape.
     cleaned = _clean_response(raw)
     if not cleaned:
         return AnalyzeOutcome(
