@@ -289,6 +289,128 @@ def _clean_joke_text(raw: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Free-form joke-request intent detection
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Two regex patterns matched against user text in ``handle_text``:
+#
+#   1. WITH topic:  "(давай/расскажи/...) шутку про <X>"
+#                   "(давай/расскажи/...) анекдот про <X>"
+#                   "(давай/...) шутку на тему <X>"
+#                   verb is OPTIONAL — pure "шутку про X" works.
+#
+#   2. NO topic:    "давай/расскажи/сделай/кинь шутку"
+#                   "давай/... анекдот"
+#                   verb is REQUIRED to avoid false positives on
+#                   conversational uses of the word "шутка"
+#                   ("это шутка такая", "ну ты шутник", etc.).
+#
+# Both are anchored to the whole message — we don't fire if the
+# trigger phrase is buried mid-sentence. Cap the source length so
+# pasted novellas don't incur a regex cost.
+
+# Imperative-verb prefix the user might use ("давай/те", "сделай",
+# "расскажи", "кинь", "выдай", "запили", "подай", "покажи", "сори"…).
+# All optional in the WITH-topic variant. Captured non-greedy so
+# they don't eat the topic.
+_JOKE_VERB = (
+    r"(?:давай(?:те)?|сделай(?:те)?|расскажи(?:те)?|подай(?:те)?|"
+    r"кинь(?:те)?|покажи(?:те)?|выдай(?:те)?|запили?(?:те)?|"
+    r"сори(?:те)?|сочини(?:те)?|придумай(?:те)?|выдумай(?:те)?)"
+)
+_JOKE_NOUN = r"(?:анекдот[ауы]?|шутк[ауи]|joke|джоук)"
+_JOKE_TOPIC_PREP = r"(?:про|об|о|на\s+тему|по\s+теме)"
+
+_JOKE_INTENT_WITH_TOPIC_RE = re.compile(
+    rf"^\s*(?:{_JOKE_VERB}\s+)?{_JOKE_NOUN}\s+{_JOKE_TOPIC_PREP}\s+"
+    rf"(.{{2,150}}?)\s*[.!?…]*\s*$",
+    flags=re.IGNORECASE | re.UNICODE,
+)
+_JOKE_INTENT_NO_TOPIC_RE = re.compile(
+    rf"^\s*{_JOKE_VERB}\s+{_JOKE_NOUN}\s*[.!?…]*\s*$",
+    flags=re.IGNORECASE | re.UNICODE,
+)
+
+# Topic-noise tokens to strip BEFORE handing the topic to the LLM.
+# These show up when a user types `/joke про погоду` (the word
+# "про" leaks into ctx.args) or "шутку на тему черемша" (the
+# "на тему" prefix). The free-form regex above already strips them
+# via the named group, but cmd_joke args go through this path.
+_TOPIC_PREFIX_STRIP_RE = re.compile(
+    r"^(?:про|об|о|на\s+тему|по\s+теме)\s+",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_topic(s: str | None) -> str:
+    """Trim, strip surrounding quotes/punctuation, drop a leading
+    "про/о/об/на тему/по теме", and cap to 150 chars.
+
+    Returns ``""`` when there's nothing useful left — callers treat
+    that as "no topic" and fall back to context-only generation.
+    """
+    if not s:
+        return ""
+    out = str(s).strip()
+    # Strip surrounding quote pairs.
+    for opener, closer in (
+        ("«", "»"),
+        ("\u201c", "\u201d"),
+        ("\u2018", "\u2019"),
+        ("\"", "\""),
+        ("'", "'"),
+    ):
+        if out.startswith(opener) and out.endswith(closer) and len(out) >= 2:
+            out = out[1:-1].strip()
+    out = out.strip(" .!?,…")
+    out = _TOPIC_PREFIX_STRIP_RE.sub("", out).strip()
+    return out[:150]
+
+
+def detect_joke_intent(text: str | None) -> Optional[str]:
+    """Inspect a free-form chat message and decide whether it reads
+    as "the user is asking the bot for a joke".
+
+    Returns:
+      * ``None``  — not a joke request, leave the message alone.
+      * ``""``    — a joke request without a specified topic
+                    (e.g. "Давай шутку").
+      * ``"X"``   — a joke request with topic ``X``
+                    (e.g. "Давай шутку про черемшу" → ``"черемшу"``).
+
+    The two-tier output lets the caller reuse the same downstream
+    code path for slash-command and free-form entry points.
+
+    Conservative on purpose: a no-topic match REQUIRES an imperative
+    verb prefix so chat lines like "это просто шутка такая" don't
+    fire. The topic variant accepts a bare "шутку про X" because the
+    "про X" tail is itself a strong signal of intent.
+    """
+    if not text:
+        return None
+    s = str(text).strip()
+    if not s or len(s) > 400:
+        return None
+    m = _JOKE_INTENT_WITH_TOPIC_RE.match(s)
+    if m:
+        return _normalize_topic(m.group(1))
+    if _JOKE_INTENT_NO_TOPIC_RE.match(s):
+        return ""
+    return None
+
+
+def parse_topic_from_args(args: list[str] | None) -> str:
+    """Turn ``ctx.args`` (slash-command tail) into a clean topic
+    string. Strips a leading "про/о/об/на тему/по теме" if present —
+    users frequently write ``/joke про погоду`` after seeing the
+    free-form trigger work.
+    """
+    if not args:
+        return ""
+    return _normalize_topic(" ".join(args))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Prompt assembly
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -508,6 +630,7 @@ def _build_prompt(
     custom_prompt: str | None = None,
     top_text: str = "",
     replies_text: str = "",
+    topic: str | None = None,
 ) -> tuple[str, str, float]:
     """Return ``(system, user, temperature)`` for the OpenRouter call.
 
@@ -523,15 +646,50 @@ def _build_prompt(
     :func:`_format_replies_for_prompt`). When empty, the prompt
     falls back to a context-only joke (same as the pre-feedback
     behaviour).
+
+    ``topic`` (optional) is a user-supplied subject like ``"черемшу"``
+    or ``"Олега"``. When provided, an extra block is appended to the
+    system message anchoring the joke to that topic, AND the topic
+    is hoisted to the top of the user message. The chat context
+    becomes secondary — used to shape voice/style if it's relevant
+    to the topic, but the topic is the subject of the joke.
     """
     mode_prompt, temperature = _MODE_PROMPTS.get(mode, _MODE_PROMPTS["normal"])
     style_prompt = (custom_prompt or "").strip() or mode_prompt
     system = _FLOOR_RULES_RU + "\n\n" + style_prompt
-    user_parts = [
+
+    topic_clean = (topic or "").strip()[:150]
+    if topic_clean:
+        # The topic addendum has its own numbered rule so the model
+        # treats it as a hard constraint, not a hint. We deliberately
+        # tell the model what to do when the topic is unrelated to
+        # the chat context — otherwise a small model picks the chat
+        # context (it's right there in the user message) and ignores
+        # the topic, which is exactly what users complain about.
+        system += (
+            "\n\nТЕМА ЭТОЙ ШУТКИ (приоритетно):\n"
+            f"  «{topic_clean}»\n"
+            "  15. Шутка ОБЯЗАНА быть на эту тему. Если в контексте\n"
+            "      чата есть что-то связанное с темой — обыграй это;\n"
+            "      если нет — отталкивайся от общеизвестных фактов\n"
+            "      или ассоциаций про тему. Контекст чата в этом\n"
+            "      случае — фон, а не сюжет.\n"
+            "  16. Не превращай ответ в пересказ контекста, который\n"
+            "      темы не касается."
+        )
+
+    user_parts: list[str] = []
+    if topic_clean:
+        user_parts.append(f"Тема шутки (главное!): «{topic_clean}»")
+        user_parts.append("")
+    user_parts += [
         "Ниже — последние сообщения группового чата (в хронологическом "
         "порядке, [Имя]: текст):",
         "",
-        context_text or "(чат пуст или ничего смешного)",
+        context_text or (
+            "(чат пуст — отталкивайся от темы)" if topic_clean
+            else "(чат пуст или ничего смешного)"
+        ),
     ]
     if top_text:
         user_parts.append("")
@@ -543,8 +701,14 @@ def _build_prompt(
         user_parts.append("")
         user_parts.append(history_text)
     user_parts.append("")
-    user_parts.append("Сгенерируй ровно одну шутку. Только саму шутку, "
-                      "без преамбулы.")
+    if topic_clean:
+        user_parts.append(
+            f"Сгенерируй ровно одну шутку про «{topic_clean}». Только "
+            "саму шутку, без преамбулы."
+        )
+    else:
+        user_parts.append("Сгенерируй ровно одну шутку. Только саму шутку, "
+                          "без преамбулы.")
     return system, "\n".join(user_parts), float(temperature)
 
 
@@ -718,12 +882,19 @@ class JokeOutcome:
         self.error = error
 
 
-async def generate_joke_for_chat(chat_id: str | int) -> JokeOutcome:
+async def generate_joke_for_chat(
+    chat_id: str | int, *, topic: str | None = None,
+) -> JokeOutcome:
     """Pull recent messages, build prompt per chat's settings, call
     OpenRouter, and return a :class:`JokeOutcome`. Does NOT write to
     ``jokes_history`` or update ``last_joke_at`` — the caller does
     that after a successful Telegram post (so we don't claim "joke
     sent" when Telegram itself fails).
+
+    ``topic`` (optional) — when provided, the prompt is anchored to
+    that subject and an empty chat buffer is no longer a hard error
+    (we still produce a topic-only joke). When ``None`` / empty, the
+    behaviour is identical to the pre-topic implementation.
     """
     settings = db.get_jokes_settings(chat_id)
     mode = settings.get("jokes_mode") or "normal"
@@ -732,14 +903,18 @@ async def generate_joke_for_chat(chat_id: str | int) -> JokeOutcome:
     context_n = int(settings.get("jokes_context_size") or 100)
     context_n = max(db.JOKES_MIN_CONTEXT, min(db.JOKES_MAX_CONTEXT, context_n))
 
+    topic_clean = _normalize_topic(topic)
     rows = db.recent_chat_messages(chat_id, limit=context_n)
-    if not rows:
+    # An empty buffer is normally a hard fail — without recent chat
+    # text the auto-loop has nothing to be funny about. With a
+    # user-supplied topic we have a fallback subject, so allow it.
+    if not rows and not topic_clean:
         return JokeOutcome(
             text=None, model=None, mode=mode, context_size=0, attempts=[],
             error="empty_log",
         )
 
-    context_text = _build_context_text(rows)
+    context_text = _build_context_text(rows) if rows else ""
     history = db.list_jokes_history(chat_id, limit=5)
     history_text = _format_recent_jokes_for_prompt(history)
 
@@ -769,6 +944,7 @@ async def generate_joke_for_chat(chat_id: str | int) -> JokeOutcome:
         mode=mode, context_text=context_text, history_text=history_text,
         custom_prompt=custom_prompt,
         top_text=top_text, replies_text=replies_text,
+        topic=topic_clean or None,
     )
 
     # Build the model fallback list: per-chat override goes first,
@@ -1988,22 +2164,82 @@ async def handle_pending_jokes_text(
 
 
 async def cmd_joke(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """``/joke`` — admin-only, manually trigger one joke right now.
+    """``/joke [тема]`` — запросить шутку прямо сейчас.
 
-    Cooldown: ``_MANUAL_COOLDOWN_SEC`` per chat (anti-spam for the
-    OpenRouter quota). Posts the joke into the chat and writes it to
-    ``jokes_history`` with ``source='manual'``. Updates
-    ``jokes_last_joke_at`` so the auto-loop's interval window
-    restarts from now.
+    Поведение:
+      * Админ: без дневной квоты, только 60-сек анти-спам на чат.
+      * Не-админ: дневная квота 5/чат/сутки + те же 60 сек анти-спам.
+        Лимит общий на всех участников чата (это "5 шуток в день
+        на чат", а не "на пользователя"); сбрасывается в 00:00 UTC.
+
+    Если в ``ctx.args`` есть текст — он трактуется как тема:
+    ``/joke про погоду``, ``/joke черемша``, ``/joke на тему инфляции``.
+    Без аргументов — обычная шутка по контексту чата (старое поведение).
     """
     user = update.effective_user
     chat = update.effective_chat
     if user is None or chat is None:
         return
-    if not is_admin(user.id):
-        await send(update, "❌ Только админ.")
+    topic = parse_topic_from_args(list(ctx.args or []))
+    await trigger_joke_request(
+        update, ctx,
+        topic=topic,
+        source="slash",
+    )
+
+
+async def trigger_joke_request(
+    update: Update,
+    ctx: ContextTypes.DEFAULT_TYPE,
+    *,
+    topic: str = "",
+    source: str = "slash",
+) -> None:
+    """Central entry-point for all user-driven joke requests.
+
+    Used by:
+      * :func:`cmd_joke` — slash-command entry, ``source='slash'``.
+      * The free-form text trigger in ``bot.py``'s ``handle_text``
+        when :func:`detect_joke_intent` matches a chat message,
+        ``source='freeform'``.
+
+    Performs (in this order):
+      1. Privacy gate: refuse if ``jokes_enabled=false`` for this chat.
+         Slash-source replies loudly with the ``/jokes_on`` hint;
+         freeform-source stays silent (we don't want the bot
+         volunteering itself in chats that haven't opted in).
+      2. Per-chat-per-day quota for non-admins (``5/chat/day`` shared
+         across all participants). Admins skip this entirely.
+      3. Anti-spam 60-sec per-chat in-memory cooldown (admins included
+         — protects the OpenRouter quota).
+      4. Empty-buffer guard: with no topic AND no recent messages,
+         there's nothing to joke about; with a topic the buffer
+         emptiness is allowed.
+      5. Generate via :func:`generate_joke_for_chat`, post the
+         result, write to ``jokes_history``, mark ``last_joke_at``.
+
+    The quota counter is consumed BEFORE the OpenRouter call (so an
+    OpenRouter failure still costs a daily charge). That's a
+    deliberate trade — without the up-front charge a non-admin could
+    burn the quota with no effective rate-limit during an outage,
+    and the OpenRouter quota itself would be the only backstop.
+    Admins bypass the daily charge entirely (we trust them, and the
+    60-sec cooldown is enough).
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    if user is None or chat is None:
         return
-    if not db.is_jokes_enabled(str(chat.id)):
+
+    cid = str(chat.id)
+    is_freeform = source == "freeform"
+
+    # 1. Privacy gate.
+    if not db.is_jokes_enabled(cid):
+        if is_freeform:
+            # Don't volunteer the bot's existence in a chat that
+            # hasn't opted in. Silent no-op is the right call.
+            return
         await send(
             update,
             "❌ В этом чате авто-шутки выключены.\n"
@@ -2012,38 +2248,77 @@ async def cmd_joke(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    cd = _manual_cooldown_remaining(str(chat.id))
+    # 2. Per-chat-per-day quota for non-admins.
+    user_is_admin = is_admin(user.id)
+    if not user_is_admin:
+        allowed, count, limit = db.bump_jokes_user_daily(cid)
+        if not allowed:
+            if is_freeform:
+                # Soft refusal — quote the limit but don't shout. The
+                # quota is shared, so it's not the asker's fault.
+                await send(
+                    update,
+                    f"🃏 Лимит шуток в этом чате на сегодня исчерпан "
+                    f"(<b>{count}/{limit}</b>). Сбросится в 00:00 UTC "
+                    "(03:00 МСК). Админ может запустить шутку без "
+                    "лимита.",
+                )
+            else:
+                await send(
+                    update,
+                    f"🃏 Лимит шуток в этом чате на сегодня исчерпан: "
+                    f"<b>{count}/{limit}</b>.\n"
+                    "Сбросится в 00:00 UTC (03:00 МСК). Админ может "
+                    "запустить шутку без лимита через <code>/joke</code>.",
+                )
+            return
+
+    # 3. Anti-spam cooldown — applies to admins too (it's protecting
+    # the OpenRouter quota, not the user). On a freeform trigger we
+    # softly explain instead of loudly erroring.
+    cd = _manual_cooldown_remaining(cid)
     if cd > 0:
-        await send(update, f"⏳ Подожди ещё <b>{cd}</b> сек — анти-спам.")
+        if is_freeform:
+            await send(
+                update,
+                f"⏳ Анти-спам: подожди ещё <b>{cd}</b> сек.",
+            )
+        else:
+            await send(update, f"⏳ Подожди ещё <b>{cd}</b> сек — анти-спам.")
         return
 
-    # Verify there's enough material to actually joke about.
-    rows_count = len(db.recent_chat_messages(str(chat.id), limit=db.JOKES_MAX_CONTEXT))
-    if rows_count < db.JOKES_MIN_CONTEXT:
-        await send(
-            update,
-            f"📭 Слишком мало сообщений в логе ({rows_count}/"
-            f"{db.JOKES_MIN_CONTEXT}). Нужно ещё немного пообщаться "
-            "после <code>/jokes_on</code>.",
-        )
-        return
+    # 4. Buffer guard. With a topic we tolerate an empty buffer
+    # (generate_joke_for_chat will fall back to topic-only). Without
+    # a topic, the LLM has nothing to be funny about.
+    topic_clean = _normalize_topic(topic)
+    if not topic_clean:
+        rows_count = len(db.recent_chat_messages(
+            cid, limit=db.JOKES_MAX_CONTEXT,
+        ))
+        if rows_count < db.JOKES_MIN_CONTEXT:
+            await send(
+                update,
+                f"📭 Слишком мало сообщений в логе ({rows_count}/"
+                f"{db.JOKES_MIN_CONTEXT}). Нужно ещё немного "
+                "пообщаться, либо запроси шутку с темой: "
+                "<code>/joke про &lt;тема&gt;</code>.",
+            )
+            return
 
-    _manual_cooldown_set(str(chat.id))
+    _manual_cooldown_set(cid)
 
-    # Show the user we're working — long calls can take 10–20 sec.
+    # 5. Generate & post.
     notice = None
     try:
-        notice = await ctx.bot.send_message(
-            chat_id=chat.id,
-            text="🤖 Думаю…",
-        )
+        progress = "🤖 Думаю…"
+        if topic_clean:
+            progress = f"🤖 Думаю про «{html.escape(topic_clean)}»…"
+        notice = await ctx.bot.send_message(chat_id=chat.id, text=progress)
     except TelegramError:
         notice = None
 
-    outcome = await generate_joke_for_chat(str(chat.id))
+    outcome = await generate_joke_for_chat(cid, topic=topic_clean or None)
 
-    # Replace the "Думаю…" notice with the actual joke (or an error).
-    final_text: str
     if outcome.text:
         final_text = outcome.text
     else:
@@ -2087,15 +2362,15 @@ async def cmd_joke(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if outcome.text and posted:
         try:
             db.add_joke_history(
-                str(chat.id),
+                cid,
                 mode=outcome.mode,
                 model=outcome.model,
                 text=outcome.text,
                 context_size=outcome.context_size,
-                source="manual",
+                source=("manual_topic" if topic_clean else "manual"),
                 message_id=posted_message_id,
             )
-            db.mark_chat_joke_sent(str(chat.id))
+            db.mark_chat_joke_sent(cid)
         except Exception:
             log.exception("/joke history bookkeeping failed for chat %s", chat.id)
 
@@ -2390,6 +2665,9 @@ __all__ = [
     "generate_joke_for_chat",
     "job_jokes",
     "cmd_joke",
+    "trigger_joke_request",
+    "detect_joke_intent",
+    "parse_topic_from_args",
     "cmd_jokes_menu",
     "cb_jokes_menu",
     "handle_pending_jokes_text",
