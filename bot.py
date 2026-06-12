@@ -31,6 +31,7 @@ from telegram.ext import (
     ContextTypes,
     Defaults,
     MessageHandler,
+    MessageReactionHandler,
     filters,
 )
 
@@ -7349,6 +7350,7 @@ def main():
         cmd_jokes_menu as _cmd_jokes_menu,
         cmd_jokes_history as _cmd_jokes_history,
         job_jokes as _job_jokes,
+        on_message_reaction as _on_message_reaction,
     )
     app.add_handler(
         MessageHandler(
@@ -7357,6 +7359,17 @@ def main():
         ),
         group=-1,
     )
+    # Reaction feedback loop: jokes the chat reacts to (👍/❤️/🔥 etc.)
+    # bump that joke's score and become style exemplars for future
+    # generations; the handler covers BOTH per-user
+    # (``update.message_reaction``, requires bot to be admin) and
+    # chat-wide aggregate (``update.message_reaction_count``) events.
+    # ``run_polling`` must subscribe to those update kinds —
+    # ``allowed_updates=Update.ALL_TYPES`` below opts in to all of
+    # them, including reactions, edited messages, and chat-member
+    # updates. See handlers.jokes.on_message_reaction for the
+    # routing logic.
+    app.add_handler(MessageReactionHandler(_on_message_reaction))
     app.add_handler(CommandHandler("joke", _cmd_joke))
     app.add_handler(CommandHandler("jokes", _cmd_jokes_menu))
     app.add_handler(CommandHandler("jokes_menu", _cmd_jokes_menu))
@@ -7845,7 +7858,15 @@ def main():
     app.add_error_handler(error_handler)
 
     log.info("Bot started ✅")
-    app.run_polling(drop_pending_updates=True)
+    # ``allowed_updates=Update.ALL_TYPES`` opts in to every update
+    # type Telegram supports (including ``message_reaction`` and
+    # ``message_reaction_count``, which are NOT in the default
+    # subscription list). Without this the joke feedback loop would
+    # never fire because the bot wouldn't be told about reactions.
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
