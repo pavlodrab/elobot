@@ -41,6 +41,46 @@ Free-form-триггер срабатывает только в чатах с `/
 вызывался в чатах, которые не подписывались. Слеш-команда `/joke` в
 чате без opt-in отвечает громко с подсказкой про `/jokes`.
 
+### 🛡 Защита от CoT-leak'а в шутках
+Тот же класс багов, что в `/analyze` (PR #40), теперь закрыт и в
+`/joke`: некоторые free-tier reasoning-tuned модели OpenRouter льют в
+`message.content` свой план/правила вместо самой шутки —
+«We need to produce a short joke in Russian, 1-3 sentences, max 350
+characters, no markdown, no emojis, no quoting entire answer, no
+mention of rules. Must be a setup → punchline…». Раньше бот покорно
+постил это в чат как «шутку».
+
+Что сделано:
+
+- Общие хелперы вынесены в новый модуль **`handlers/_llm_safety.py`**
+  (`strip_reasoning_blocks`, `looks_like_meta_leak`,
+  `META_LEAK_PREFIXES`, `META_LEAK_SUBSTRINGS_UNIVERSAL`). И
+  `ai_analysis`, и `jokes` теперь используют общий код, чтобы
+  детекция CoT-зачинов / `<think>`-блоков не расходилась между
+  фичами. Каждая фича подмешивает свой `extra_substrings`
+  (analyze: «300 characters», «summarize the chat», «key facts/events»;
+  jokes: «350 characters», «produce a joke», «setup → punchline»,
+  «1-3 sentences», «one specific line», «no quoting entire»…).
+- Эвристика на латиницу для шуток сделана мягче, чем для analyze
+  (60 chars / 3:1 вместо 30 / 2:1) — легитимные шутки могут содержать
+  никнеймы и иностранные цитаты больше, чем 300-символьная сводка.
+- В `handlers/jokes.py`:
+  - Новый `_validate_joke_content(raw)` объединяет strip + leak-check
+    + `_clean_joke_text` (идемпотентен).
+  - `_call_openrouter_sync` принимает `validator=`; при отбраковке
+    выходим из key-loop'а и идём к следующей модели в
+    `_DEFAULT_JOKE_MODELS` / `JOKES_MODELS` (CoT-leak — свойство
+    модели, не ключа). В `attempts` пишется `rejected (CoT/meta
+    leak, N chars)` для diagnostic tail.
+  - В тело OpenRouter-запроса добавлен `reasoning.exclude=true` —
+    у моделей, поддерживающих хинт, CoT уйдёт в `message.reasoning`.
+
+E2E-проверка (мок urllib.urlopen, реальный SQLite + telegram-bot 21.3
+на Py3.11): `models[0]` возвращает leak → валидатор отбраковывает →
+бот идёт к `models[1]` → пользователь получает чистую шутку.
+В `attempts` корректно пишется `fake/model-leaky: rejected (CoT/meta
+leak, 252 chars)` и `fake/model-clean: OK (74 chars, 0.0s)`.
+
 ## Архитектура
 
 - Новые DB-колонки на `chat_settings`: `jokes_user_daily_date TEXT` и
@@ -90,8 +130,13 @@ Free-form-триггер срабатывает только в чатах с `/
 
 ## Файлы
 - Модифицированы: `database.py` (миграция + хелперы + `__all__`),
-  `handlers/jokes.py` (интент, тема, центральный trigger),
+  `handlers/jokes.py` (интент, тема, центральный trigger,
+  CoT-валидатор, `reasoning.exclude=true`),
+  `handlers/ai_analysis.py` (рефакторинг на общие хелперы из
+  `_llm_safety`),
   `bot.py` (free-form-ветка в `handle_text`).
+- Новый файл: `handlers/_llm_safety.py` (общие защиты от CoT-leak'а,
+  переиспользуются `/analyze` и `/jokes`).
 
 ---
 

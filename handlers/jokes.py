@@ -45,7 +45,7 @@ import urllib.error
 import urllib.request
 
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 from telegram import (
     InlineKeyboardButton,
@@ -286,6 +286,106 @@ def _clean_joke_text(raw: str) -> str:
     if len(s) > 800:
         s = s[:800].rsplit(" ", 1)[0].rstrip(",.;") + "…"
     return _strip_mentions(s)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CoT / meta-leak defense
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Same class of bug as ``handlers.ai_analysis`` (see PR #40): some
+# free-tier reasoning-tuned models dump their chain-of-thought or
+# restate the prompt rules into ``message.content`` instead of
+# emitting the actual joke. The user gets garbage like:
+#
+#   "We need to produce a short joke in Russian, 1-3 sentences, max 350
+#    characters, no markdown, no emojis, no quoting entire answer, no
+#    mention of rules. Must be a setup → punchline, based on ONE
+#    specific line from the chat, about theme «Тимоха и черемша»…"
+#
+# Defense — three layers:
+#   1. Strip ``<think>…</think>`` blocks (some models wrap CoT but the
+#      real answer follows after).
+#   2. Heuristic ``looks_like_meta_leak`` — rejects open-with-CoT-zachin,
+#      regurgitates-prompt-rules, or English-only output.
+#   3. Wired as a ``validator=`` into ``_call_openrouter_sync``: a leaked
+#      response triggers retry on the next model in the fallback chain
+#      (CoT-leak is a model-property, not key-property — re-trying with
+#      another key on the same model wouldn't help).
+#
+# The shared helpers live in ``handlers._llm_safety`` so /analyze and
+# /jokes don't drift apart on the prefix/wrapper detection.
+
+from handlers._llm_safety import (
+    looks_like_meta_leak as _shared_looks_like_meta_leak,
+    strip_reasoning_blocks as _strip_reasoning_blocks,
+)
+
+# Joke-prompt-specific giveaways. These appear when the model echoes
+# the joke prompt rules ("max 350 characters", "no emojis", "setup →
+# punchline", "ONE specific line from the chat") back to us instead
+# of writing a joke. Universal fragments (no markdown / no preamble /
+# in russian / system prompt) live in ``_llm_safety``.
+#
+# Tuning note: the patterns are intentionally narrow — the joke
+# prompt is the only place in the codebase that talks about "setup →
+# punchline" or "350 characters" or "based on theme", so these
+# substrings have effectively zero false-positive rate on real jokes.
+_JOKE_META_SUBSTRINGS: tuple[str, ...] = (
+    "350 characters",
+    "max 350",
+    "produce a joke",
+    "produce a short joke",
+    "short joke in russian",
+    "setup → punchline",
+    "setup -> punchline",
+    "1-3 sentences",
+    "1–3 sentences",
+    "1-3 предложен",
+    "one specific line",
+    "based on theme",
+    "no quoting entire",
+    "must be a setup",
+    "based on one specific",
+)
+
+
+def _validate_joke_content(raw: str) -> str:
+    """Validator + cleaner combined.
+
+    Used as ``validator=`` for :func:`_call_openrouter_sync` so a
+    leaking model triggers retry on the next model in the chain.
+
+    Returns the fully-cleaned joke text on success, or ``""`` on
+    rejection (CoT/meta leak detected). The empty-string return is
+    the *signal* — ``_call_openrouter_sync`` skips to the next model
+    on a falsy validator result.
+
+    Pipeline:
+      1. ``strip_reasoning_blocks`` — peel any ``<think>…</think>`` /
+         ``<reasoning>…</reasoning>`` wrapper. If a stray opener has
+         no closer, the model ran out of tokens mid-CoT and there's
+         no answer to recover.
+      2. ``looks_like_meta_leak`` — reject whatever's left if it
+         reads as monologue/instructions rather than a joke. Latin
+         threshold is more lenient than ``/analyze`` (60 / 3:1
+         instead of 30 / 2:1) because legitimate jokes can name-drop
+         English-speaking characters or quote movie lines and would
+         tip a strict ratio.
+      3. ``_clean_joke_text`` — the canonical post-processing
+         (label-strip, quote-strip, length cap, mention de-fanging).
+         Idempotent on already-cleaned input.
+    """
+    s = _strip_reasoning_blocks(raw)
+    if not s:
+        return ""
+    if _shared_looks_like_meta_leak(
+        s,
+        extra_substrings=_JOKE_META_SUBSTRINGS,
+        latin_threshold=60,
+        latin_ratio=3.0,
+    ):
+        return ""
+    return _clean_joke_text(s)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -724,11 +824,21 @@ def _call_openrouter_sync(
     models: list[str],
     timeout: float = 30.0,
     attempts: list[str] | None = None,
+    validator: Callable[[str], str] | None = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    """Try every (model × key) combo until one returns non-empty
-    content. Returns ``(text, model_used)`` or ``(None, None)``.
+    """Try every (model × key) combo until one returns a non-empty
+    content that ``validator`` accepts. Returns ``(text, model_used)``
+    or ``(None, None)``.
 
-    Mirrors :func:`tournament_summary._try_openrouter` so we have
+    ``validator``: optional callable that takes the raw model content
+    and returns the cleaned final string, or ``""`` to reject. A
+    rejection is treated as a *model-level* failure (CoT/meta leak,
+    English-only output, etc.) — we ``break`` out of the key loop
+    and move to the next model in the fallback chain, since trying
+    the same broken model with a different key won't help.
+
+    Mirrors :func:`tournament_summary._try_openrouter` and
+    :func:`handlers.ai_analysis._call_openrouter_sync` so we have
     consistent error handling across LLM call sites.
     """
     if attempts is None:
@@ -748,8 +858,14 @@ def _call_openrouter_sync(
         ],
         "max_tokens": 600,        # one joke is short; this is generous
         "temperature": float(temperature),
-        # Reasoning-effort hint for nemotron / similar — fine to ignore.
-        "reasoning": {"effort": "low"},
+        # Reasoning hints. ``effort: low`` keeps any CoT short on
+        # supported reasoning models; ``exclude: true`` asks
+        # OpenRouter to put the chain-of-thought into the separate
+        # ``message.reasoning`` field rather than inside ``content``.
+        # Models that don't support these hints silently ignore them
+        # — the validator wired in below catches the cases where the
+        # model leaks CoT into ``content`` regardless.
+        "reasoning": {"effort": "low", "exclude": True},
     }
 
     for model in models:
@@ -821,6 +937,27 @@ def _call_openrouter_sync(
                 content = (msg.get("reasoning") if isinstance(msg, dict) else "") or ""
                 content = content.strip()
             if content:
+                # Defensive validation: some models leak chain-of-thought
+                # or English meta-instructions into ``content`` (see
+                # ``_validate_joke_content`` for the heuristic). If the
+                # validator rejects, it's a model-level problem — don't
+                # retry the same model with another key, ``break`` the
+                # key loop and let the outer model loop fall through to
+                # the next model in the chain.
+                if validator is not None:
+                    cleaned = validator(content)
+                    if not cleaned:
+                        attempts.append(
+                            f"openrouter {model}: rejected (CoT/meta "
+                            f"leak, {len(content)} chars)"
+                        )
+                        log.info(
+                            "jokes: %s rejected (CoT/meta leak in "
+                            "content, %d chars)",
+                            model, len(content),
+                        )
+                        break
+                    content = cleaned
                 attempts.append(
                     f"openrouter {model}: OK ({len(content)} chars, {dt:.1f}s)"
                 )
@@ -838,6 +975,7 @@ async def _call_openrouter(
     models: list[str],
     timeout: float = 30.0,
     attempts: list[str] | None = None,
+    validator: Callable[[str], str] | None = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Async wrapper around the blocking OpenRouter call so the bot
     event loop isn't blocked while we wait on a 30s HTTP request.
@@ -850,6 +988,7 @@ async def _call_openrouter(
         models=models,
         timeout=timeout,
         attempts=attempts,
+        validator=validator,
     )
 
 
@@ -966,6 +1105,11 @@ async def generate_joke_for_chat(
             models=chain,
             timeout=30.0,
             attempts=attempts,
+            # Validator runs INSIDE the model loop so a CoT-leaking
+            # model gets skipped (we move on to the next fallback)
+            # instead of returning bogus output to the user. See the
+            # CoT/meta-leak defense block near ``_validate_joke_content``.
+            validator=_validate_joke_content,
         )
     except Exception as e:
         log.exception("generate_joke_for_chat(%s) crashed", chat_id)
@@ -980,6 +1124,10 @@ async def generate_joke_for_chat(
             attempts=attempts, error="all_models_failed",
         )
 
+    # Validator already cleaned the content above. Run _clean_joke_text
+    # one more time as a defensive idempotent pass — cheap, and means
+    # any future change to the call path (e.g. a different validator)
+    # still gets the canonical output shape.
     cleaned = _clean_joke_text(raw)
     if not cleaned:
         return JokeOutcome(
