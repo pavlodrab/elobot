@@ -83,66 +83,67 @@ _DEFAULT_JOKE_MODELS: tuple[str, ...] = (
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Per-mode (system prompt fragment, temperature). Floor rules are
-# prepended to every prompt regardless of mode — they never bend.
-#
-# Each mode prompt is intentionally written as concrete *structural*
-# guidance ("pick one specific quote, build a punchline"), not vague
-# vibe descriptors ("be witty"). Free-tier models default to lazy
-# summary patterns when given vague instructions; concrete structure
-# instructions push them off that local minimum.
+# Per-mode (system prompt fragment, temperature). The mode fragment
+# describes *tone* only — what kind of joke we want energetically.
+# *Structure* (what to anchor on, what shape the joke takes) lives in
+# a separate block (``_STRUCTURE_*_RULES`` below) chosen by
+# :func:`_build_prompt` based on whether a topic / custom prompt was
+# supplied. Mixing tone and structure in one fragment used to break
+# topic mode: the mode preset said "цепляйся за реплику чата" and that
+# instruction always won over the topic addendum, so ``/joke <тема>``
+# produced a chat-anchored joke with the topic word tacked on.
 _MODE_PROMPTS: dict[str, tuple[str, float]] = {
     "soft": (
-        "Тёплая, добрая шутка с лёгким панчлайном. Найди ОДНУ милую "
-        "деталь в одной конкретной реплике из контекста и обыграй её "
-        "мягко через неожиданный угол. Без сарказма, без подколов "
-        "конкретных людей. Тон — как добрый друг, а не как стендапер.",
+        "Тёплая, добрая шутка с лёгким панчлайном через неожиданный, "
+        "но мягкий угол. Без сарказма, без подколок конкретных людей. "
+        "Тон — как у доброго друга, а не как у стендапера.",
         0.7,
     ),
     "normal": (
-        "Дружеская шутка с чётким панчлайном. Возьми ОДНУ конкретную "
-        "реплику или ситуацию у одного автора и построй на ней "
-        "наблюдение, где концовка ломает заданное ожидание. "
-        "Категорически нельзя пересказывать 2–3 темы подряд — это "
-        "пересказ повестки, а не шутка.",
+        "Дружеская шутка с чётким панчлайном — наблюдение, где "
+        "концовка ломает заданное ожидание неожиданным углом.",
         0.85,
     ),
     "spicy": (
         "Едкая шутка с чёрным юмором, но с панчлайном — не просто "
-        "сарказм. Выбери одну конкретную реплику, которая напрашивается "
-        "на колкость, и сломай ожидание неожиданным углом. Высмеивай "
-        "конкретное действие или фразу, а не человека целиком, "
-        "не общую «атмосферу чата».",
+        "сарказм. Высмеивай конкретное действие, фразу или деталь, "
+        "а не человека целиком и не общую «атмосферу».",
         1.0,
     ),
     "savage": (
-        "Беспощадный, сухой панчлайн на грани приличий. Цепляйся за "
-        "самую уязвимую конкретную реплику в контексте и ломай её "
-        "одним точным наблюдением. Без растекания по нескольким темам, "
-        "без обобщающих концовок про «уровень чата». Поэтика, а не "
-        "помои; точность, а не громкость.",
+        "Беспощадный, сухой панчлайн на грани приличий — одно точное "
+        "наблюдение, без растекания. Поэтика, а не помои; точность, "
+        "а не громкость.",
         1.1,
     ),
     "absurd": (
-        "Сюр с логикой, которая рушится в самом конце. Возьми одну "
-        "конкретную деталь из контекста и доведи её до неожиданного "
-        "абсурдного вывода через одно сравнение или ассоциацию. "
-        "Не поток сознания, не набор слов — ассоциативный панчлайн "
-        "с точкой в конце.",
+        "Сюр с логикой, которая рушится в самом конце. Ассоциативный "
+        "панчлайн с точкой в конце — не поток сознания, не набор слов.",
         1.15,
     ),
 }
 
 # These rules are prepended to every prompt regardless of mode and
 # never overridden — even when the chat sets a custom prompt via
-# ``/jokes`` → "✏️ Свой промпт". They cover safety (rules 1–3),
-# output format (4–7), and structural guidance (8–14).
+# ``/jokes`` → "✏️ Свой промпт", or when ``/joke <тема>`` is used.
+# They cover safety (rules 1–3) and output format (4–7) only.
 #
-# Anti-pattern catalog (rule 11–13) is real free-tier model output
-# from this exact bot — Llama/Gemma/Nemotron all default to the
-# "Сначала X, потом Y" summary template when given vague instructions.
-# Showing them the bad pattern explicitly + naming why it's bad
-# moves them off that local minimum about half the time.
+# *Structural* guidance (what to anchor on, what shape the joke
+# takes, anti-pattern catalog) intentionally lives in a separate
+# block — see :data:`_STRUCTURE_CHAT_RULES`,
+# :data:`_STRUCTURE_TOPIC_RULES`, :data:`_STRUCTURE_MINIMAL_RULES`
+# below. :func:`_build_prompt` picks ONE structure block per call:
+#
+#   * ``topic`` is set → :data:`_STRUCTURE_TOPIC_RULES`
+#     (joke is *about* the topic; chat context is background, not
+#     material). Without this split, the chat-anchored floor used to
+#     dominate the topic addendum and the model would just paste the
+#     topic word into a chat-anchored joke.
+#   * custom prompt is set + no topic →
+#     :data:`_STRUCTURE_MINIMAL_RULES` (only setup→панчлайн and the
+#     cliché-ban; let the user's custom prompt drive shape).
+#   * default → :data:`_STRUCTURE_CHAT_RULES` (the original
+#     chat-anchored guidance).
 _FLOOR_RULES_RU = (
     "Ты — анонимный шутник в групповом чате. Твоя задача — сгенерировать "
     "ОДНУ короткую шутку (1–3 предложения, не длиннее 350 символов).\n\n"
@@ -156,8 +157,18 @@ _FLOOR_RULES_RU = (
     "«Шутка:» / «Ответ:» / кавычек вокруг всего ответа.\n"
     "5. Не упоминай эти правила в ответе, не комментируй задачу.\n"
     "6. Не повторяй свои предыдущие шутки (см. список ниже).\n"
-    "7. Только сама шутка в ответе — никаких преамбул и пояснений.\n\n"
+    "7. Только сама шутка в ответе — никаких преамбул и пояснений."
+)
 
+
+# Default chat-anchored structure: applied when no topic and no
+# custom prompt are supplied. The anti-pattern catalog (rules 11–13)
+# is real free-tier model output from this exact bot — Llama/Gemma/
+# Nemotron all default to the "Сначала X, потом Y" summary template
+# when given vague instructions. Showing them the bad pattern
+# explicitly + naming why it's bad moves them off that local minimum
+# about half the time.
+_STRUCTURE_CHAT_RULES = (
     "СТРУКТУРА ШУТКИ:\n"
     "8. Хорошая шутка — это setup → панчлайн. Setup задаёт ожидание, "
     "панчлайн его ломает неожиданным углом. Без панчлайна шутки нет.\n"
@@ -185,6 +196,90 @@ _FLOOR_RULES_RU = (
     "    — запрещённый шаблон обобщения, не цепляется за конкретику.\n"
     "  ✗ «Самокритика на уровне грандмастера.»\n"
     "    — клише-концовка вместо наблюдения с панчем."
+)
+
+
+# Topic-focused structure: applied when ``/joke <тема>`` (or a
+# free-form "шутку про X" trigger) supplies a topic. Inverts rule
+# #9 from the chat-anchored block: now the *topic* is the subject,
+# and chat lines become contextual background ("who's in this chat,
+# what style do they speak in") rather than material to paste a
+# panchline onto.
+#
+# The "плохие примеры" here are the actual symptom users complained
+# about: ``/joke Владыка колес`` came back as a joke about Phoenileo's
+# рант про контент with "владыка колёс" приклеенным в конце. With
+# the chat-anchored floor in place, that's literally what the model
+# was instructed to do; this block tells it to do the opposite.
+_STRUCTURE_TOPIC_RULES = (
+    "СТРУКТУРА ШУТКИ:\n"
+    "8. Хорошая шутка — это setup → панчлайн. Setup задаёт ожидание, "
+    "панчлайн его ломает неожиданным углом. Без панчлайна шутки нет.\n"
+    "9. Шутка строится ВОКРУГ заданной темы. Тема — это её сюжет, "
+    "герой и поинт. И setup, и панчлайн оба должны касаться темы.\n"
+    "10. Контекст чата ниже — это ФОН, а НЕ материал для шутки. "
+    "Используй его, чтобы понять, в каком чате это говорится и кто "
+    "там сидит. НЕ строй шутку из конкретных реплик чата.\n"
+    "11. Если тема общеизвестна (вещь, явление, мем, бренд, понятие) "
+    "— отталкивайся от ассоциаций, фактов, стереотипов про неё. "
+    "Если тема непонятна без контекста (никнейм, локальный мем чата, "
+    "название проекта) — найди в контексте намёк, что это значит, "
+    "и обыграй именно это значение, а не сам контекст.\n"
+    "12. Можно упомянуть участника чата по имени, если это органично "
+    "вписывается в шутку про тему. Но шутка должна работать и без "
+    "имени — герой шутки = тема, а не имя участника.\n\n"
+
+    "ЗАПРЕЩЁННЫЕ ШАБЛОНЫ:\n"
+    "13. Главная ошибка: шутка построена про чат, а тема упомянута "
+    "одним словом «для галочки». Например, тема — «погода», а шутка "
+    "про то, как Phoenileo жалуется на контент, и в конце «он как "
+    "погода». Это НЕ шутка про погоду, это шутка про Phoenileo.\n"
+    "14. Пересказ нескольких сообщений чата с приклеенной темой "
+    "в конце — тоже мимо.\n"
+    "15. Концовки-клише: «классика жанра», «всё как обычно», "
+    "«X — это новый Y», «уровень дискуссии», «самокритика на уровне "
+    "грандмастера». Это ленивая ирония вместо панча.\n\n"
+
+    "ХОРОШИЙ ПРИМЕР:\n"
+    "  Тема: «погода».\n"
+    "  ✓ «Метеорологи обещали солнечный день — но забыли указать, "
+    "на какой именно планете.»\n"
+    "    — setup задаёт ожидание (прогноз), панчлайн ломает (другая "
+    "планета), всё про тему.\n\n"
+
+    "ПЛОХИЕ ПРИМЕРЫ (так делать НЕ надо):\n"
+    "  Тема: «погода».\n"
+    "  ✗ «Phoenileo жалуется на жару, но он сам как погода — вечно "
+    "меняется.»\n"
+    "    — это шутка про Phoenileo, тема упомянута и забыта.\n"
+    "  ✗ «Сначала спорили про Биг Мак, потом про турниры, теперь и "
+    "погода подъехала.»\n"
+    "    — пересказ чата с темой в конце, не шутка про погоду."
+)
+
+
+# Minimal structure: applied when a custom system prompt is set
+# (and no topic). The chat owner has explicitly chosen their own
+# style guidance — we don't want to override it with our default
+# "anchor to one chat line" instruction. So we only enforce the
+# basics: setup→панчлайн and the universally-bad cliché endings.
+# The custom prompt itself drives everything else.
+#
+# This is what the ``/jokes`` menu has been promising users all
+# along ("базовые правила безопасности и формата применяются всегда")
+# — the implementation just wasn't matching the promise before.
+_STRUCTURE_MINIMAL_RULES = (
+    "СТРУКТУРА ШУТКИ:\n"
+    "8. Хорошая шутка — это setup → панчлайн. Setup задаёт ожидание, "
+    "панчлайн его ломает неожиданным углом. Без панчлайна шутки нет.\n\n"
+
+    "ЗАПРЕЩЁННЫЕ ШАБЛОНЫ (всегда):\n"
+    "9. Концовки-клише: «интеллектуальный уровень/диапазон поражает», "
+    "«уровень дискуссии», «самокритика на уровне грандмастера», "
+    "«классика жанра», «всё как обычно», «X — это новый Y». "
+    "Это ленивая ирония вместо панча.\n"
+    "10. Шаблон «Сначала X, потом Y, а теперь Z» и «прошли путь от "
+    "X до Y за N сообщений» — пересказ, не шутка."
 )
 
 
@@ -722,6 +817,30 @@ def _format_replies_for_prompt(replies: list[dict], limit: int = 8) -> str:
     )
 
 
+# Tighter context cap for topic mode. With a topic, the chat
+# context is BACKGROUND, not material — we don't want it dominating
+# the user message. ~1500 chars (~25–30 short lines) is enough to
+# convey style and identify participants, without drowning the
+# topic instruction.
+_CTX_TOPIC_HARD_CAP_CHARS = 1500
+
+
+def _trim_context_to_cap(text: str, cap: int) -> str:
+    """Drop oldest lines until the rendered context fits under
+    ``cap`` characters. Used in topic mode to shrink the chat-context
+    block from the default 6000-char budget down to ~1500 so the
+    topic stays prominent in the user message.
+    """
+    if not text or len(text) <= cap:
+        return text
+    lines = text.split("\n")
+    total = sum(len(l) + 1 for l in lines)
+    while lines and total > cap:
+        dropped = lines.pop(0)
+        total -= len(dropped) + 1
+    return "\n".join(lines)
+
+
 def _build_prompt(
     *,
     mode: str,
@@ -734,63 +853,112 @@ def _build_prompt(
 ) -> tuple[str, str, float]:
     """Return ``(system, user, temperature)`` for the OpenRouter call.
 
-    If ``custom_prompt`` is non-empty, it replaces the mode's prompt
-    fragment in the system message — but :data:`_FLOOR_RULES_RU` is
-    still prepended (safety + format + anti-pattern rules apply
-    unconditionally). The temperature still comes from ``mode``: a
-    chat that wants a different temperature should pick a different
-    mode; the custom prompt is the *style*, mode is the *energy*.
+    System message is assembled in three parts:
 
-    ``top_text`` and ``replies_text`` are produced by the feedback
-    loop helpers (:func:`_format_top_jokes_for_prompt` /
-    :func:`_format_replies_for_prompt`). When empty, the prompt
-    falls back to a context-only joke (same as the pre-feedback
-    behaviour).
+      1. :data:`_FLOOR_RULES_RU` — safety + format. Always applied,
+         never overridable.
+      2. A structure block — ONE of:
 
-    ``topic`` (optional) is a user-supplied subject like ``"черемшу"``
-    or ``"Олега"``. When provided, an extra block is appended to the
-    system message anchoring the joke to that topic, AND the topic
-    is hoisted to the top of the user message. The chat context
-    becomes secondary — used to shape voice/style if it's relevant
-    to the topic, but the topic is the subject of the joke.
+           * :data:`_STRUCTURE_TOPIC_RULES` when ``topic`` is set.
+             Inverts chat-anchoring: joke is *about* the topic, chat
+             context is background only.
+           * :data:`_STRUCTURE_MINIMAL_RULES` when ``custom_prompt``
+             is set and there's no topic. Just setup→панчлайн and
+             the cliché-ban — lets the custom prompt drive shape.
+           * :data:`_STRUCTURE_CHAT_RULES` otherwise (default).
+
+      3. The style fragment — ``custom_prompt`` if set, otherwise the
+         mode preset from :data:`_MODE_PROMPTS`. Temperature still
+         comes from the mode (custom prompt is the *style*; mode is
+         the *energy*).
+
+    User message is also restructured in topic mode: topic at top
+    AND bottom, chat context capped to
+    :data:`_CTX_TOPIC_HARD_CAP_CHARS` and labelled as "background,
+    not material". Without the cap, 6KB of context drowned the
+    topic instruction and the model defaulted to chat-anchoring
+    even when the system prompt told it to focus on the topic.
+
+    ``top_text`` and ``replies_text`` (feedback-loop blocks) are
+    always included when present — style exemplars and reply-vibes
+    are useful in either mode.
     """
     mode_prompt, temperature = _MODE_PROMPTS.get(mode, _MODE_PROMPTS["normal"])
     style_prompt = (custom_prompt or "").strip() or mode_prompt
-    system = _FLOOR_RULES_RU + "\n\n" + style_prompt
+    has_custom_prompt = bool((custom_prompt or "").strip())
 
     topic_clean = (topic or "").strip()[:150]
-    if topic_clean:
-        # The topic addendum has its own numbered rule so the model
-        # treats it as a hard constraint, not a hint. We deliberately
-        # tell the model what to do when the topic is unrelated to
-        # the chat context — otherwise a small model picks the chat
-        # context (it's right there in the user message) and ignores
-        # the topic, which is exactly what users complain about.
-        system += (
-            "\n\nТЕМА ЭТОЙ ШУТКИ (приоритетно):\n"
-            f"  «{topic_clean}»\n"
-            "  15. Шутка ОБЯЗАНА быть на эту тему. Если в контексте\n"
-            "      чата есть что-то связанное с темой — обыграй это;\n"
-            "      если нет — отталкивайся от общеизвестных фактов\n"
-            "      или ассоциаций про тему. Контекст чата в этом\n"
-            "      случае — фон, а не сюжет.\n"
-            "  16. Не превращай ответ в пересказ контекста, который\n"
-            "      темы не касается."
-        )
 
+    # Pick the structure block. Topic always wins over custom-prompt
+    # — when the user supplied a topic they want a topic joke; the
+    # custom prompt becomes the "voice" but doesn't override the
+    # topic-focused structure.
+    if topic_clean:
+        structure_block = _STRUCTURE_TOPIC_RULES
+    elif has_custom_prompt:
+        structure_block = _STRUCTURE_MINIMAL_RULES
+    else:
+        structure_block = _STRUCTURE_CHAT_RULES
+
+    system_parts = [
+        _FLOOR_RULES_RU,
+        "",
+        structure_block,
+        "",
+        "СТИЛЬ ЭТОЙ ШУТКИ:",
+        style_prompt,
+    ]
+    if topic_clean:
+        # Topic is also restated at the end of the system block as a
+        # numbered hard-constraint, so the model sees it as a rule
+        # rather than a hint. The "приоритетно" label is deliberate —
+        # if anything in the structure block somehow conflicts with
+        # the topic, the topic wins.
+        system_parts += [
+            "",
+            "ТЕМА ЭТОЙ ШУТКИ (приоритетно):",
+            f"  «{topic_clean}»",
+            "  Шутка ОБЯЗАНА быть про эту тему — она её сюжет, "
+            "а не декорация. Если какие-то правила выше конфликтуют "
+            "с этим — тема важнее.",
+        ]
+    system = "\n".join(system_parts)
+
+    # ── User message ──────────────────────────────────────────────
     user_parts: list[str] = []
     if topic_clean:
-        user_parts.append(f"Тема шутки (главное!): «{topic_clean}»")
+        # Topic mode: lead with topic, render the chat context as
+        # background only (with a stricter cap so it doesn't drown
+        # the topic), bookend with the topic instruction.
+        user_parts.append(f"ТЕМА (главное): «{topic_clean}»")
         user_parts.append("")
-    user_parts += [
-        "Ниже — последние сообщения группового чата (в хронологическом "
-        "порядке, [Имя]: текст):",
-        "",
-        context_text or (
-            "(чат пуст — отталкивайся от темы)" if topic_clean
-            else "(чат пуст или ничего смешного)"
-        ),
-    ]
+        user_parts.append(
+            f"Сгенерируй ОДНУ шутку про «{topic_clean}». Тема — это "
+            "сюжет шутки, а не декорация."
+        )
+        user_parts.append("")
+        small_ctx = _trim_context_to_cap(
+            context_text, _CTX_TOPIC_HARD_CAP_CHARS,
+        )
+        user_parts.append(
+            "Контекст чата ниже — это ФОН (для понимания стиля чата "
+            "и его участников), а НЕ материал для шутки. НЕ цитируй "
+            "конкретные реплики, НЕ строй шутку про чат с темой "
+            "в конце:"
+        )
+        user_parts.append("")
+        user_parts.append(
+            small_ctx or "(чат пуст — отталкивайся только от темы)"
+        )
+    else:
+        # Default chat-anchored mode: original layout.
+        user_parts += [
+            "Ниже — последние сообщения группового чата (в "
+            "хронологическом порядке, [Имя]: текст):",
+            "",
+            context_text or "(чат пуст или ничего смешного)",
+        ]
+
     if top_text:
         user_parts.append("")
         user_parts.append(top_text)
@@ -800,15 +968,19 @@ def _build_prompt(
     if history_text:
         user_parts.append("")
         user_parts.append(history_text)
+
     user_parts.append("")
     if topic_clean:
         user_parts.append(
-            f"Сгенерируй ровно одну шутку про «{topic_clean}». Только "
-            "саму шутку, без преамбулы."
+            f"Сгенерируй ровно одну шутку ПРО «{topic_clean}» "
+            "(не про чат, а про саму тему). Только саму шутку, "
+            "без преамбулы."
         )
     else:
-        user_parts.append("Сгенерируй ровно одну шутку. Только саму шутку, "
-                          "без преамбулы.")
+        user_parts.append(
+            "Сгенерируй ровно одну шутку. Только саму шутку, "
+            "без преамбулы."
+        )
     return system, "\n".join(user_parts), float(temperature)
 
 
