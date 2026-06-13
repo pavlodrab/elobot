@@ -333,15 +333,54 @@ def _normalize_footballer_name(name: str) -> str:
     return stripped
 
 
+def _last_token_match(a: str, b: str) -> bool:
+    """Return True if one of the normalized names is a single token that
+    equals the last (surname) token of the other.
+
+    This catches the very common OCR / game-UI pattern where the same
+    real footballer is rendered both as full name and as surname only:
+
+        ("wiliams", "nico wiliams")  → True   (Nico Williams)
+        ("yamal",   "lamine yamal")  → True   (Lamine Yamal)
+        ("torres",  "ferran torres") → True   (Ferran Torres)
+        ("ronaldo", "c. ronaldo")    → True   (Cristiano Ronaldo)
+        ("vini",    "vinicius")      → False  (different first names)
+        ("torres",  "ferran")        → False  (no shared token)
+
+    Both names are expected to be already normalized via
+    ``_normalize_footballer_name`` (lowercased, diacritics stripped,
+    spaces collapsed).
+
+    Caller restricts merging to a single ``player_id``, which makes
+    surname-only collisions (two different footballers nicknamed
+    "Williams" scoring for the same player) extremely unlikely in
+    practice.
+    """
+    a_toks = a.split()
+    b_toks = b.split()
+    if not a_toks or not b_toks:
+        return False
+    if len(a_toks) == 1 and len(b_toks) >= 2:
+        return a_toks[0] == b_toks[-1]
+    if len(b_toks) == 1 and len(a_toks) >= 2:
+        return b_toks[0] == a_toks[-1]
+    return False
+
+
 def _merge_footballer_rows(rows: list[dict]) -> list[dict]:
     """Merge footballer rows with similar names (OCR variations).
 
-    Two-pass strategy:
+    Three-pass strategy:
     1) Exact match on normalized name + player_id (diacritics, doubles, ГОЛ).
-    2) Fuzzy pass: within the same player_id, merge names with edit distance
-       ≤ 2 (catches single-char typos like Mbarpé→Mbappé, Vini→Vini Jr).
+    2) Fuzzy pass: within the same player_id, merge names with
+       SequenceMatcher.ratio() above threshold (catches single-char
+       typos like Mbarpé→Mbappé) **or** the surname-token rule
+       (Williams ↔ Nico Williams, Yamal ↔ Lamine Yamal, …).
+    3) For each merged group prefer the more specific (multi-token)
+       spelling as display name, regardless of which spelling has more
+       goals — so "Nico Williams" wins over "Williams" even when they're
+       6:5.
 
-    Keeps the most-common raw_name spelling as the display name.
     Returns merged rows sorted by total_goals desc.
     """
     from collections import defaultdict
@@ -399,11 +438,23 @@ def _merge_footballer_rows(rows: list[dict]) -> list[dict]:
                 ratio = SequenceMatcher(None, anchor_norm, other_norm).ratio()
                 min_len = min(len(anchor_norm), len(other_norm))
                 threshold = 0.80 if min_len <= 6 else 0.75
-                if ratio >= threshold:
+                if ratio >= threshold or _last_token_match(anchor_norm, other_norm):
                     # Merge into anchor
                     anchor["total_goals"] += player_rows[j]["total_goals"]
                     anchor["home_goals"] += player_rows[j]["home_goals"]
                     anchor["away_goals"] += player_rows[j]["away_goals"]
+                    # Prefer the more specific (multi-token) spelling as
+                    # the display name. Without this, "Williams" 5 +
+                    # "Nico Williams" 6 would surface as "Nico Williams"
+                    # only because it's the anchor (more goals); but if
+                    # the surname-only spelling were ahead the merged
+                    # row would read "Williams 11", losing information.
+                    other_tok_count = len(other_norm.split())
+                    anchor_tok_count = len(anchor_norm.split())
+                    if other_tok_count > anchor_tok_count:
+                        anchor["raw_name"] = player_rows[j]["raw_name"]
+                        anchor["_norm"] = other_norm
+                        anchor_norm = other_norm
                     used[j] = True
             # Remove internal key before output
             row_out = {k: v for k, v in anchor.items() if k != "_norm"}
