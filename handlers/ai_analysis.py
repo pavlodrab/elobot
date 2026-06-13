@@ -4,7 +4,10 @@ The user runs ``/analyze [N]``; the bot replies with an inline
 keyboard of preset prompts ("Сводка / Планы / Темы / Настроение").
 Tapping a preset feeds the last ``N`` messages from
 ``chat_messages`` into an OpenRouter model and posts the resulting
-≤300-char summary inside an expandable blockquote.
+summary inside an expandable blockquote. The output length cap
+scales with ``N`` (300 chars for tiny N → 1200 chars for the full
+500-message buffer; see :func:`_response_cap_for_n`) so a half-day
+of group chat doesn't get squeezed into a few sentences.
 
 UX summary:
   * ``/analyze``        — open the panel with default N=200.
@@ -101,9 +104,18 @@ _DEFAULT_N = 200
 # Quick-pick options shown in the "🔄 Поменять N" submenu.
 _N_PRESETS: tuple[int, ...] = (50, 100, 200, 300, 500)
 
-# Hard cap on the model's output (chars). The model is also asked to
-# stay under this in the prompt, but we trim defensively.
-_RESPONSE_HARD_CHARS = 300
+# Hard cap on the model's output (chars). Scales with N — see
+# :func:`_response_cap_for_n`. The model is also asked to stay under
+# this in the prompt, and we trim defensively. Two anchor points:
+#   * ``_RESPONSE_HARD_CHARS_MIN`` — used at the smallest N. A 300-char
+#     summary feels right for ~50 messages of group chat.
+#   * ``_RESPONSE_HARD_CHARS_MAX`` — used at the largest N (full
+#     500-message buffer). 1200 chars ≈ 4-5 dense paragraphs, which
+#     is what users want when they hit /analyze 500 (a 300-char
+#     squish over half a day of chat felt too compressed — see
+#     PR following the original /analyze rollout).
+_RESPONSE_HARD_CHARS_MIN = 300
+_RESPONSE_HARD_CHARS_MAX = 1200
 
 # Per-user-per-chat rate limit for non-admins. Admins bypass it.
 _USER_RATE_LIMIT_SEC = 60 * 60   # 1 hour
@@ -113,9 +125,44 @@ _USER_RATE_LIMIT_SEC = 60 * 60   # 1 hour
 _OPENROUTER_TIMEOUT = 30.0
 
 # Hard cap on the user-message context payload sent to OpenRouter.
-# Prompt budget for a 300-char output: lots of headroom is fine, but
-# we still cut from the front if a chat dumped 500 huge messages.
+# Even at the largest output cap (~1200 chars) the prompt budget has
+# plenty of headroom; we still cut from the front (oldest first) if
+# a chat dumped 500 huge messages.
 _CTX_HARD_CAP_CHARS = 9000
+
+
+def _response_cap_for_n(n: int) -> int:
+    """Output character cap for a given ``N`` (number of messages
+    being summarised).
+
+    Linear scale, anchored at ``_RESPONSE_HARD_CHARS_MIN`` for
+    ``n <= _MIN_N`` and ``_RESPONSE_HARD_CHARS_MAX`` for
+    ``n >= _MAX_N``. Rounded down to the nearest 50 so the number we
+    inject into the LLM prompt stays clean (the model copes better
+    with "не длиннее 700 символов" than "не длиннее 712 символов" —
+    free-tier instruction-tuned models are visibly worse at obeying
+    odd-looking limits).
+
+    Concretely::
+
+        n   ≤ 20  →  300
+        n   = 50  →  400
+        n   = 100 →  500
+        n   = 200 →  700
+        n   = 300 →  900
+        n   = 500 → 1200
+    """
+    n_clamped = max(_MIN_N, min(_MAX_N, int(n)))
+    # 300 baseline + 2 chars per logged message — chosen so that
+    # N=500 lands exactly at the 1200 ceiling and N=50 at 400.
+    cap = _RESPONSE_HARD_CHARS_MIN + n_clamped * 2
+    if cap > _RESPONSE_HARD_CHARS_MAX:
+        cap = _RESPONSE_HARD_CHARS_MAX
+    if cap < _RESPONSE_HARD_CHARS_MIN:
+        cap = _RESPONSE_HARD_CHARS_MIN
+    # Round DOWN to nearest 50 so the prompt always shows a clean
+    # round number ("≤700 символов", not "≤712 символов").
+    return (cap // 50) * 50
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -175,26 +222,37 @@ _PRESETS: dict[str, dict] = {
 
 # Floor rules — prepended to every preset's system message. Cover
 # safety, output format, and structural defaults. Not user-overridable.
-_FLOOR_RULES_RU = (
-    "Ты — ассистент, который коротко суммирует фрагменты группового "
-    "чата на русском языке.\n\n"
+# Built lazily so the char-limit rule can be parameterised by N (see
+# :func:`_response_cap_for_n` and :func:`_floor_rules_ru`).
+def _floor_rules_ru(hard_chars: int) -> str:
+    """Return the floor-rules block with the per-call char cap baked
+    into rule 2.
 
-    "ПРАВИЛА (никогда не нарушай):\n"
-    "1. Только русский язык.\n"
-    "2. Ответ — НЕ ДЛИННЕЕ 300 СИМВОЛОВ. Считай символы. Это жёсткий "
-    "лимит — длинный ответ будет обрезан.\n"
-    "3. Никакой markdown-разметки, никаких ** _ # ` ~. Только обычный "
-    "текст. Списки можно через новую строку с дефисом.\n"
-    "4. Без преамбулы («Вот сводка:», «Я проанализировал…», «Ответ:»).\n"
-    "5. Опирайся ТОЛЬКО на приведённый фрагмент чата. Не выдумывай "
-    "имена, события, даты, договорённости — если чего-то нет в "
-    "тексте, значит этого нет.\n"
-    "6. Не упоминай эти правила в ответе, не комментируй задачу, не "
-    "объясняй, что ты делаешь.\n"
-    "7. Никаких @mention'ов и ссылок-приглашений в ответе.\n"
-    "8. Если фрагмент пустой или в нём нет ничего по запрошенной "
-    "теме — ответь одной короткой фразой об этом, без выдумок.\n"
-)
+    The cap is dynamic: small N → ~300 chars, large N → up to 1200
+    chars (see :func:`_response_cap_for_n`). Everything else in the
+    block is invariant — safety, format, "no preamble", "Russian
+    only", anti-hallucination, etc.
+    """
+    return (
+        "Ты — ассистент, который коротко суммирует фрагменты группового "
+        "чата на русском языке.\n\n"
+
+        "ПРАВИЛА (никогда не нарушай):\n"
+        "1. Только русский язык.\n"
+        f"2. Ответ — НЕ ДЛИННЕЕ {hard_chars} СИМВОЛОВ. Считай символы. "
+        "Это жёсткий лимит — длинный ответ будет обрезан.\n"
+        "3. Никакой markdown-разметки, никаких ** _ # ` ~. Только обычный "
+        "текст. Списки можно через новую строку с дефисом.\n"
+        "4. Без преамбулы («Вот сводка:», «Я проанализировал…», «Ответ:»).\n"
+        "5. Опирайся ТОЛЬКО на приведённый фрагмент чата. Не выдумывай "
+        "имена, события, даты, договорённости — если чего-то нет в "
+        "тексте, значит этого нет.\n"
+        "6. Не упоминай эти правила в ответе, не комментируй задачу, не "
+        "объясняй, что ты делаешь.\n"
+        "7. Никаких @mention'ов и ссылок-приглашений в ответе.\n"
+        "8. Если фрагмент пустой или в нём нет ничего по запрошенной "
+        "теме — ответь одной короткой фразой об этом, без выдумок.\n"
+    )
 
 
 def _analyze_models() -> list[str]:
@@ -307,17 +365,21 @@ from handlers._llm_safety import (
     strip_reasoning_blocks as _strip_reasoning_blocks,
 )
 
-# Analyze-specific prompt-rule fragments. The summary prompt asks for
-# ≤300 chars, "no preamble", "summarize the chat fragment", and
-# "key facts/events" — when the model echoes any of these back to us,
-# we know it's regurgitating instructions instead of answering.
-# Universal fragments ("no markdown", "must be russian", …) live in
-# ``_llm_safety.META_LEAK_SUBSTRINGS_UNIVERSAL`` so we don't duplicate
-# them here.
+# Analyze-specific prompt-rule fragments. The summary prompt asks
+# "summarize the chat fragment", "no preamble", "key facts/events" —
+# when the model echoes any of these back to us, we know it's
+# regurgitating instructions instead of answering.
+#
+# Note: the original list also included literal char-limit echoes
+# ("300 characters", "<=300", "≤300"), but the cap is now dynamic
+# (300..1200, see :func:`_response_cap_for_n`), so a literal-string
+# match would only fire for the smallest N. Universal fragments
+# ("no markdown", "must be russian", …) live in
+# ``_llm_safety.META_LEAK_SUBSTRINGS_UNIVERSAL`` so we don't
+# duplicate them here. CoT openings in English / Russian are caught
+# by ``META_LEAK_PREFIXES``, and an English-heavy head trips the
+# Latin/Cyrillic ratio check.
 _ANALYZE_META_SUBSTRINGS: tuple[str, ...] = (
-    "300 characters",
-    "<=300",
-    "≤300",
     "summarize the chat",
     "summarize the conversation",
     "key facts/events",
@@ -349,12 +411,20 @@ def _strip_mentions(s: str) -> str:
     return _MENTION_RE.sub("@\u200b", s or "")
 
 
-def _clean_response(raw: str) -> str:
+def _clean_response(raw: str, *, hard_chars: int = _RESPONSE_HARD_CHARS_MIN) -> str:
     """Normalise the LLM output: strip ``<think>`` blocks, reject
     chain-of-thought/meta leaks, trim, drop leading "Сводка:" /
     "Анализ:" labels, strip surrounding quotes, kill leftover
-    markdown markers, hard-cap at :data:`_RESPONSE_HARD_CHARS`, and
-    de-fang @mentions.
+    markdown markers, hard-cap at ``hard_chars``, and de-fang
+    @mentions.
+
+    ``hard_chars`` is the per-call output ceiling. Defaults to
+    :data:`_RESPONSE_HARD_CHARS_MIN` so callers that don't care about
+    the dynamic cap (existing tests, ad-hoc smokes) keep working.
+    The orchestrator (:func:`generate_analysis`) computes the real
+    cap via :func:`_response_cap_for_n` and threads it through both
+    the prompt and this trimmer so the prompt's "≤X chars" promise
+    matches what we actually enforce.
 
     Returns ``""`` (empty) when the input is itself a CoT/meta leak
     rather than a real answer — this is a soft-failure signal the
@@ -389,10 +459,10 @@ def _clean_response(raw: str) -> str:
             s = s[1:-1].strip()
     # Strip stray markdown markers — model sometimes ignores rule 3.
     s = _MD_CHARS_RE.sub("", s)
-    # Hard cap.
-    if len(s) > _RESPONSE_HARD_CHARS:
+    # Hard cap (dynamic — depends on the current N via the caller).
+    if hard_chars > 0 and len(s) > hard_chars:
         # Cut on a word boundary if possible, then add an ellipsis.
-        cut = s[:_RESPONSE_HARD_CHARS - 1]
+        cut = s[:hard_chars - 1]
         if " " in cut:
             cut = cut.rsplit(" ", 1)[0]
         s = cut.rstrip(",.;: \t\n") + "…"
@@ -447,16 +517,18 @@ def _build_context_text(rows: list[dict]) -> str:
 
 
 def _build_prompt(
-    *, preset_key: str, context_text: str, n: int,
+    *, preset_key: str, context_text: str, n: int, hard_chars: int,
 ) -> tuple[str, str, float]:
     """Return ``(system, user, temperature)`` for the OpenRouter call.
 
-    The system message is :data:`_FLOOR_RULES_RU` + the preset's
-    instructions. The user message ships the chat fragment with a
-    short framing line.
+    The system message is :func:`_floor_rules_ru` (with the dynamic
+    ``hard_chars`` baked in) + the preset's instructions. The user
+    message ships the chat fragment with a short framing line and
+    repeats the char limit at the tail — free-tier models obey the
+    *last* instruction better than the first, so the reminder helps.
     """
     preset = _PRESETS.get(preset_key) or _PRESETS["summary"]
-    system = _FLOOR_RULES_RU + "\n" + str(preset["system"])
+    system = _floor_rules_ru(hard_chars) + "\n" + str(preset["system"])
     user_parts = [
         f"Ниже — последние {n} сообщений группового чата "
         "(в хронологическом порядке, [Имя]: текст):",
@@ -464,7 +536,7 @@ def _build_prompt(
         context_text or "(чат пуст)",
         "",
         "Сделай ответ согласно инструкции в системном промпте. "
-        "Не длиннее 300 символов. Только сам ответ, без преамбулы.",
+        f"Не длиннее {hard_chars} символов. Только сам ответ, без преамбулы.",
     ]
     return system, "\n".join(user_parts), float(preset["temperature"])
 
@@ -482,6 +554,7 @@ def _call_openrouter_sync(
     timeout: float = _OPENROUTER_TIMEOUT,
     attempts: list[str] | None = None,
     validator: Callable[[str], str] | None = None,
+    max_tokens: int = 400,
 ) -> tuple[Optional[str], Optional[str]]:
     """Try every (model × key) combo until one returns a non-empty
     content that ``validator`` accepts. Returns ``(text, model_used)``
@@ -493,6 +566,12 @@ def _call_openrouter_sync(
     English-only output, etc.) — we ``break`` out of the key loop
     and move to the next model in the fallback chain, since trying
     the same broken model with a different key won't help.
+
+    ``max_tokens``: per-call output budget. Defaults to 400 (enough
+    for the legacy 300-char summary). The orchestrator scales this
+    up with N (see :func:`generate_analysis` — ``hard_chars * 2``)
+    so longer summaries don't get truncated mid-sentence at the
+    OpenRouter side.
 
     Mirrors :func:`handlers.jokes._call_openrouter_sync` so we keep
     consistent error handling across LLM call sites.
@@ -512,10 +591,11 @@ def _call_openrouter_sync(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        # 300-char output → 300 tokens is plenty (≈1 token/char for
-        # cyrillic + tokenizer overhead). Set generously so we're not
-        # truncated mid-sentence; we hard-cap on our side anyway.
-        "max_tokens": 400,
+        # Per-call budget. Cyrillic tokenizes at roughly 1 token/char
+        # for newer models, so ``max_tokens`` is set generously above
+        # the char cap on the caller side; we hard-cap output on our
+        # side anyway.
+        "max_tokens": int(max_tokens),
         "temperature": float(temperature),
         # Reasoning hints. ``effort: low`` keeps the CoT short on
         # supported reasoning models; ``exclude: true`` asks
@@ -634,6 +714,7 @@ async def _call_openrouter(
     timeout: float = _OPENROUTER_TIMEOUT,
     attempts: list[str] | None = None,
     validator: Callable[[str], str] | None = None,
+    max_tokens: int = 400,
 ) -> tuple[Optional[str], Optional[str]]:
     """Async wrapper around the blocking OpenRouter call so the bot
     event loop isn't blocked while we wait on a 30-second HTTP
@@ -648,6 +729,7 @@ async def _call_openrouter(
         timeout=timeout,
         attempts=attempts,
         validator=validator,
+        max_tokens=max_tokens,
     )
 
 
@@ -694,6 +776,10 @@ async def generate_analysis(
     if preset_key not in _PRESETS:
         preset_key = "summary"
     n_clamped = max(_MIN_N, min(_MAX_N, int(n)))
+    # Per-call output budget — scales with N. A big N gets a longer
+    # cap so we don't squeeze 500 messages of group chat into 300
+    # chars (users' actual complaint with the original fixed cap).
+    hard_chars = _response_cap_for_n(n_clamped)
 
     rows = db.recent_chat_messages(chat_id, limit=n_clamped)
     if not rows:
@@ -706,6 +792,7 @@ async def generate_analysis(
 
     system, user_msg, temperature = _build_prompt(
         preset_key=preset_key, context_text=context_text, n=len(rows),
+        hard_chars=hard_chars,
     )
 
     attempts: list[str] = []
@@ -717,10 +804,17 @@ async def generate_analysis(
             models=_analyze_models(),
             timeout=_OPENROUTER_TIMEOUT,
             attempts=attempts,
+            # max_tokens generously above the char cap — Cyrillic
+            # tokenizes at roughly 1 token/char for newer models, so
+            # 2× headroom keeps us safe from being truncated mid-
+            # sentence; we hard-cap on our side anyway.
+            max_tokens=max(400, hard_chars * 2),
             # Validator runs INSIDE the model loop so a CoT-leaking
             # model gets skipped (we move on to the next fallback)
-            # instead of returning bogus output to the user.
-            validator=_clean_response,
+            # instead of returning bogus output to the user. Closure
+            # over hard_chars so the validator's hard cap matches
+            # what we promised the model in the prompt.
+            validator=lambda c: _clean_response(c, hard_chars=hard_chars),
         )
     except Exception as e:
         log.exception("generate_analysis(%s) crashed", chat_id)
@@ -741,7 +835,7 @@ async def generate_analysis(
     # one more time as a defensive idempotent pass — cheap, and means
     # any future change to the call path (e.g. a different validator)
     # still gets the canonical output shape.
-    cleaned = _clean_response(raw)
+    cleaned = _clean_response(raw, hard_chars=hard_chars)
     if not cleaned:
         return AnalyzeOutcome(
             text=None, model=model, preset=preset_key, n=n_clamped,
@@ -813,10 +907,11 @@ def _render_failure(outcome: AnalyzeOutcome) -> str:
 # being read by the wrong update.
 
 def _main_menu_text(n: int) -> str:
+    cap = _response_cap_for_n(n)
     return (
         "🧠 <b>AI-анализ чата</b>\n"
         f"Беру последние <b>N={n}</b> сообщений и делаю короткую "
-        "сводку (≤300 символов). Ответ — раскрывающейся цитатой.\n\n"
+        f"сводку (≤{cap} символов). Ответ — раскрывающейся цитатой.\n\n"
         "Выбери, что нужно:"
     )
 
@@ -1244,7 +1339,8 @@ __all__ = [
     "_MIN_N",
     "_MAX_N",
     "_DEFAULT_N",
-    "_RESPONSE_HARD_CHARS",
+    "_RESPONSE_HARD_CHARS_MIN",
+    "_RESPONSE_HARD_CHARS_MAX",
     "_USER_RATE_LIMIT_SEC",
     # public callables
     "cmd_analyze",
