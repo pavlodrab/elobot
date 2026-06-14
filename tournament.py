@@ -1939,6 +1939,32 @@ def regenerate_unplayed_tours(tid: int) -> dict:
             tid, removed_dupes, len(by_pair),
         )
 
+    # ── Pass 1.5: kill orphan pending rows ───────────────────────────
+    # In a tours-enabled league every legitimate match belongs to a
+    # tour. Pending rows with tour_number <= 0 are leftovers from old
+    # buggy generators or the late-add-player flow; if we keep them
+    # they show up in pair_counts, force the matcher into the relax
+    # fallback, and end up scheduling new duplicates against the same
+    # opponents on every click.
+    cur = conn.execute(
+        "SELECT COUNT(*) FROM matches WHERE tournament_id=? "
+        "AND stage='group' AND status != 'confirmed' "
+        "AND (tour_number IS NULL OR tour_number <= 0)",
+        (tid,),
+    ).fetchone()
+    removed_orphans = _scalar(cur)
+    if removed_orphans:
+        conn.execute(
+            "DELETE FROM matches WHERE tournament_id=? "
+            "AND stage='group' AND status != 'confirmed' "
+            "AND (tour_number IS NULL OR tour_number <= 0)",
+            (tid,),
+        )
+        log.info(
+            "regenerate_unplayed_tours tid=%s: removed %s orphan pending matches",
+            tid, removed_orphans,
+        )
+
     # ── Pass 2: count + drop the unplayed tail ───────────────────────
     removed_matches = _scalar(
         conn.execute(
@@ -1974,6 +2000,7 @@ def regenerate_unplayed_tours(tid: int) -> dict:
         "removed_tours": removed_tours,
         "removed_matches": removed_matches,
         "removed_dupes": removed_dupes,
+        "removed_orphans": removed_orphans,
         "next_tour": last_played + 1,
     }
 

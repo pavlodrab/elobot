@@ -5768,18 +5768,8 @@ async def _handle_tournament_settings_cb(
         t_after = get_tournament(tid) or t
         created_tour = int(t_after.get("current_tour") or 0)
         msg = f"✅ Создан тур {created_tour} (матчей: {len(mids)})."
-        # Try to announce in bound chat
-        bound_chat = t.get("chat_id")
-        if bound_chat:
-            try:
-                await ctx.bot.send_message(
-                    int(bound_chat),
-                    f"⚡ <b>Тур {created_tour} начался!</b>\n"
-                    f"Все матчи созданы, ждём результаты.",
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
+        # Notification to the bound chat is intentionally suppressed —
+        # admins didn't want every tour creation echoed there.
         t = t_after
         from bot import _submenu_ts_tours
         await query.edit_message_text(
@@ -8111,17 +8101,8 @@ async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"✅ Создан тур {created_tour} ({len(mids)} матчей).\n"
         f"Используй /tours {t['id']} чтобы увидеть.",
     )
-    bound_chat = t.get("chat_id")
-    if bound_chat:
-        try:
-            await ctx.bot.send_message(
-                int(bound_chat),
-                f"⚡ <b>Тур {created_tour} начался!</b>\n"
-                f"Создано {len(mids)} матчей. Удачи!",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+    # Notification to the bound chat is intentionally suppressed —
+    # admins didn't want every tour creation echoed there.
 
 
 async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -8159,7 +8140,8 @@ async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "♻️ <b>Несыгранные туры очищены</b>\n"
         f"Сохранено сыгранных туров: <b>{res['kept_through']}</b>\n"
         f"Удалено: {res['removed_tours']} туров / {res['removed_matches']} матчей\n"
-        f"Удалено дубликатов матчей: <b>{res.get('removed_dupes', 0)}</b>\n\n"
+        f"Удалено дубликатов матчей: <b>{res.get('removed_dupes', 0)}</b>\n"
+        f"Удалено матчей-сирот без тура: <b>{res.get('removed_orphans', 0)}</b>\n\n"
         f"Жми «⚡ Создать матчи следующего тура», чтобы построить тур "
         f"<b>{res['next_tour']}</b> уже без повторов.",
     )
