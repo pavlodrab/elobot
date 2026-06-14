@@ -45,6 +45,7 @@ from database import (
     count_group_matches_for_pair,
     create_match,
     create_tournament,
+    create_tournament_tour,
     get_active_tournament,
     get_active_tournaments,
     get_player,
@@ -8103,6 +8104,205 @@ async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     # Notification to the bound chat is intentionally suppressed —
     # admins didn't want every tour creation echoed there.
+
+
+async def cmd_repair_tour_numbers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/repair_tour_numbers [ID] [confirm]`` — assign a real tour to
+    confirmed group-stage matches that ended up with ``tour_number=0``
+    (admin only).
+
+    Some confirmed matches end up with ``tour_number=0`` (the column
+    default): old rows from before the tour system, manual edits via
+    ``/edit_match``, or the rare ``create_match → UPDATE`` race in
+    ``_prefill_full_schedule``. They show up in the tournament but not
+    in any ``/tourstext`` page, and they leave their tours visually
+    short while they sit in tour-0 limbo.
+
+    This command picks the smallest tour T in ``1..total_tours`` where
+    both players are currently free (no other confirmed/pending match)
+    and re-tags the row to that tour. No scores or ELO touched —
+    metadata only.
+
+    Without a trailing ``confirm`` argument: dry-run, lists the proposed
+    moves. Pass ``confirm`` to apply.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    args = list(ctx.args or [])
+    apply_changes = False
+    if args and args[-1].lower() in ("confirm", "yes", "да"):
+        apply_changes = True
+        args = args[:-1]
+
+    t, err = _resolve_tournament_from_args(update, ctx, args=args)
+    if t is None:
+        await send(update, err or "❌ Не нашёл турнир.")
+        return
+    if not _can_manage_tournament(update.effective_user.id, t):
+        await send(update, "❌ Только админ турнира.")
+        return
+
+    tid = t["id"]
+    total_tours = int(t.get("total_tours") or 0)
+    if total_tours <= 0:
+        await send(update, "❌ В турнире не задано total_tours.")
+        return
+
+    # ── Find every group-stage match with tour_number IN (NULL, 0) ─────
+    conn = db.get_conn()
+    untagged_rows = conn.execute(
+        "SELECT id, player1_id, player2_id, status, score1, score2 "
+        "FROM matches WHERE tournament_id=? AND stage='group' "
+        "AND (tour_number IS NULL OR tour_number = 0) "
+        "ORDER BY id",
+        (tid,),
+    ).fetchall()
+
+    # Build the per-tour committed-set from EVERY group match (any
+    # status, any tour ≥ 1) so we know which slots are occupied.
+    committed_rows = conn.execute(
+        "SELECT tour_number, player1_id, player2_id FROM matches "
+        "WHERE tournament_id=? AND stage='group' "
+        "AND tour_number > 0",
+        (tid,),
+    ).fetchall()
+    conn.close()
+
+    if not untagged_rows:
+        await send(
+            update,
+            f"✅ В турнире <b>{html.escape(t['name'])}</b> (ID {tid}) "
+            f"нет матчей с tour_number=0.",
+        )
+        return
+
+    used_per_tour: dict[int, set[int]] = {
+        T: set() for T in range(1, total_tours + 1)
+    }
+    for r in committed_rows:
+        d = dict(r)
+        T = int(d.get("tour_number") or 0)
+        if T <= 0 or T > total_tours:
+            continue
+        p1 = d.get("player1_id")
+        p2 = d.get("player2_id")
+        if p1:
+            used_per_tour[T].add(p1)
+        if p2:
+            used_per_tour[T].add(p2)
+
+    # ── Plan the moves ────────────────────────────────────────────────
+    moves: list[tuple[int, int, int, int]] = []  # (mid, p1, p2, target_tour)
+    unplaceable: list[dict] = []
+    for r in untagged_rows:
+        d = dict(r)
+        mid = d["id"]
+        p1 = d.get("player1_id")
+        p2 = d.get("player2_id")
+        if p1 is None or p2 is None:
+            unplaceable.append(d)
+            continue
+        target = None
+        for T in range(1, total_tours + 1):
+            if p1 not in used_per_tour[T] and p2 not in used_per_tour[T]:
+                target = T
+                break
+        if target is None:
+            unplaceable.append(d)
+            continue
+        moves.append((mid, p1, p2, target))
+        # Reserve the slot so subsequent untagged rows don't claim it too.
+        used_per_tour[target].add(p1)
+        used_per_tour[target].add(p2)
+
+    # ── Compose response ─────────────────────────────────────────────
+    from database import get_player_by_id
+    lines = [
+        f"🔧 <b>Repair tour_number=0</b> в "
+        f"{html.escape(t['name'])} (ID {tid})",
+        f"Найдено матчей без тура: <b>{len(untagged_rows)}</b>",
+        f"  • можно перенести: {len(moves)}",
+        f"  • без свободного слота: {len(unplaceable)}",
+        "",
+    ]
+    for mid, p1, p2, target in moves[:25]:
+        u1 = (get_player_by_id(p1) or {}).get("username") or f"id={p1}"
+        u2 = (get_player_by_id(p2) or {}).get("username") or f"id={p2}"
+        lines.append(
+            f"  #{mid}: {html.escape(u1)} vs {html.escape(u2)} → тур {target}"
+        )
+    if len(moves) > 25:
+        lines.append(f"  … и ещё {len(moves) - 25}")
+
+    if unplaceable:
+        lines.append("")
+        lines.append(f"⚠ Без свободного тура ({len(unplaceable)}):")
+        for d in unplaceable[:10]:
+            mid = d["id"]
+            p1 = d.get("player1_id")
+            p2 = d.get("player2_id")
+            u1 = (get_player_by_id(p1) or {}).get("username") or f"id={p1}"
+            u2 = (get_player_by_id(p2) or {}).get("username") or f"id={p2}"
+            lines.append(
+                f"  #{mid}: {html.escape(u1)} vs {html.escape(u2)} "
+                f"(оба committed во всех турах)"
+            )
+
+    if not apply_changes:
+        lines.append("")
+        lines.append(
+            "ℹ️ Это <b>dry-run</b>. Чтобы применить, повтори с "
+            "<code>confirm</code>:"
+        )
+        lines.append(f"<code>/repair_tour_numbers {tid} confirm</code>")
+        await send(update, "\n".join(lines))
+        return
+
+    # ── Apply ─────────────────────────────────────────────────────────
+    if not moves:
+        await send(
+            update,
+            "Нечего двигать (см. dry-run).",
+        )
+        return
+
+    conn = db.get_conn()
+    for mid, _p1, _p2, target in moves:
+        conn.execute(
+            "UPDATE matches SET tour_number=? WHERE id=?",
+            (target, mid),
+        )
+        # Make sure tournament_tours has a row for the target tour.
+        try:
+            create_tournament_tour(tid, target)
+        except Exception:
+            # Likely already exists (UNIQUE constraint) — fine.
+            pass
+    conn.commit()
+    conn.close()
+
+    log_tournament_action(
+        tid,
+        actor_telegram_id=update.effective_user.id,
+        actor_username=update.effective_user.username,
+        action="repair_tour_numbers",
+        details=f"moved {len(moves)} match(es) from tour_number=0 "
+                f"to real tours; "
+                f"unplaceable={len(unplaceable)}",
+    )
+
+    await send(
+        update,
+        f"✅ Перенесено матчей: <b>{len(moves)}</b>\n"
+        + (
+            f"⚠ Без свободного тура осталось: {len(unplaceable)}\n"
+            if unplaceable
+            else ""
+        )
+        + f"Проверь: <code>/tour_diag {tid}</code>",
+    )
 
 
 async def cmd_drop_ghost_matches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
