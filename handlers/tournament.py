@@ -8149,7 +8149,7 @@ async def cmd_drop_ghost_matches(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         p["player_id"] for p in players if not p.get("eliminated")
     }
 
-    conn = get_conn()
+    conn = db.get_conn()
     rows = conn.execute(
         "SELECT id, player1_id, player2_id, score1, score2, status, tour_number "
         "FROM matches WHERE tournament_id=? AND stage='group' "
@@ -8329,12 +8329,12 @@ def _delete_match_with_revert(match_id: int) -> bool:
             # Continue to deletion regardless — keeping a stale row
             # would leave the schedule in a worse state.
 
-    conn = get_conn()
+    conn = db.get_conn()
     conn.execute("DELETE FROM match_goals WHERE match_id=?", (match_id,))
     conn.commit()
     conn.close()
 
-    conn = get_conn()
+    conn = db.get_conn()
     conn.execute("DELETE FROM matches WHERE id=?", (match_id,))
     conn.commit()
     conn.close()
