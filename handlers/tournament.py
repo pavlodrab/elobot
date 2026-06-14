@@ -8106,6 +8106,321 @@ async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # admins didn't want every tour creation echoed there.
 
 
+async def cmd_post_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/post_tours <ID> <range> [deadline...]`` — publish a tour-set
+    announcement to the chat bound to the tournament (admin only).
+
+    What it sends to the bound chat:
+
+      1. A media group: one PNG per tour in ``range`` (same renderer as
+         ``/tours``). For ranges > 10 the album is auto-chunked.
+      2. A text message with:
+
+         ::
+
+           ТУРЫ <first>-<last>
+           Играем по 1 матчу с соперником в туре. Домашний хост
+           определяем рандомом (монетка, кубик и т.д.)
+           ДД до <deadline>     ← omitted if no deadline given
+
+           🇦🇷Argentina - @agent_47_07
+           🇦🇹Austria - @freshl7
+           …
+
+         The roster line uses ``team_tag`` from ``tournament_players``
+         so the country label and flag come from the per-tournament
+         setup, not a hard-coded mapping.
+
+    The bot remembers the ``(chat_id, message_id)`` of the text message
+    in the caller's ``user_data`` so ``/edit_announce`` can rewrite it
+    later without copy-pasting links.
+
+    Examples::
+
+        /post_tours 14 9-16
+        /post_tours 14 9-16 18.06 22:00
+        /post_tours 14 9                  ← single tour
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    args = list(ctx.args or [])
+    t, err = _resolve_tournament_from_args(update, ctx, args=args)
+    if t is None:
+        await send(update, err or "❌ Не нашёл турнир.")
+        return
+    if not _can_manage_tournament(update.effective_user.id, t):
+        await send(update, "❌ Только админ турнира.")
+        return
+    if not int(t.get("tours_enabled") or 0):
+        await send(
+            update,
+            f"❌ В турнире «{html.escape(t['name'])}» (ID {t['id']}) "
+            f"не включены туры.",
+        )
+        return
+
+    target_chat_id = t.get("chat_id")
+    if not target_chat_id:
+        await send(
+            update,
+            f"❌ К турниру не привязан канал. Привяжи через "
+            f"<code>/bind_chat {t['id']}</code> в нужном чате/канале.",
+        )
+        return
+
+    # Strip the consumed tournament-id arg, then expect the next plain
+    # positional to be the tour range. Anything after the range is the
+    # deadline (joined with spaces — admins are used to writing
+    # "18.06 22:00" with a space).
+    range_search_args = args
+    if args:
+        try:
+            int(args[0])
+        except ValueError:
+            pass
+        else:
+            range_search_args = args[1:]
+
+    range_arg = None
+    deadline_parts: list[str] = []
+    for a in range_search_args:
+        if range_arg is None and a.replace("-", "").replace(",", "").isdigit():
+            range_arg = a
+            continue
+        if range_arg is not None:
+            deadline_parts.append(a)
+    deadline_str = " ".join(deadline_parts).strip()
+
+    if range_arg is None:
+        await send(
+            update,
+            "❌ Укажи диапазон туров: <code>/post_tours "
+            f"{t['id']} 9-16 [дедлайн]</code>",
+        )
+        return
+
+    try:
+        tour_numbers = _parse_tour_range(range_arg, t)
+    except Exception:
+        tour_numbers = []
+    if not tour_numbers:
+        await send(update, f"❌ Не понял диапазон туров: {range_arg!r}")
+        return
+
+    first, last = tour_numbers[0], tour_numbers[-1]
+    range_label = f"{first}-{last}" if first != last else f"{first}"
+
+    # ── Build the roster lines (flag + @username) ────────────────────
+    rows = get_tournament_players(t["id"])
+    roster_lines: list[str] = []
+    seen: set = set()
+    # Sort by team_tag so the country list reads alphabetically.
+    rows_sorted = sorted(
+        rows,
+        key=lambda r: (
+            (r.get("team_tag") or "").lower(),
+            (r.get("username") or "").lower(),
+        ),
+    )
+    for r in rows_sorted:
+        if int(r.get("eliminated") or 0):
+            continue
+        pid = r.get("player_id")
+        if pid in seen:
+            continue
+        seen.add(pid)
+        username = (r.get("username") or "").strip()
+        team_tag = (r.get("team_tag") or "").strip()
+        if not username:
+            # Fallback: skip ghost / synthetic rows without a real handle.
+            continue
+        if team_tag:
+            line = f"{team_tag} - @{username}"
+        else:
+            line = f"@{username}"
+        roster_lines.append(line)
+
+    # ── Compose the text body ────────────────────────────────────────
+    body_lines = [
+        f"<b>ТУРЫ {range_label}</b>",
+        "",
+        "Играем по 1 матчу с соперником в туре. Домашний хост "
+        "определяем рандомом (монетка, кубик и т.д.)",
+    ]
+    if deadline_str:
+        body_lines.append("")
+        body_lines.append(f"<b>ДД до {html.escape(deadline_str)}</b>")
+    body_lines.append("")
+    body_lines.extend(roster_lines)
+    text_body = "\n".join(body_lines)
+
+    await send(update, "⏳ Рендерю туры и публикую в канал…")
+
+    try:
+        from tour_image import render_tour_png
+        from telegram import InputMediaPhoto
+
+        # Render all tours upfront (sequential — PIL holds the GIL).
+        per_tour_bytes: list[tuple[int, bytes]] = []
+        for tn in tour_numbers:
+            png = await asyncio.to_thread(render_tour_png, t["id"], [tn])
+            per_tour_bytes.append((tn, png))
+
+        # ── Send the media group(s) ──────────────────────────────────
+        TG_ALBUM_LIMIT = 10
+        media_msgs = []
+        chunk: list[InputMediaPhoto] = []
+        for tn, png in per_tour_bytes:
+            bio = io.BytesIO(png)
+            bio.name = f"tour_{t['id']}_{tn}.png"
+            chunk.append(InputMediaPhoto(media=bio))
+            if len(chunk) == TG_ALBUM_LIMIT:
+                media_msgs.extend(
+                    await ctx.bot.send_media_group(
+                        chat_id=target_chat_id, media=chunk,
+                        write_timeout=180,
+                    )
+                )
+                chunk = []
+        if chunk:
+            media_msgs.extend(
+                await ctx.bot.send_media_group(
+                    chat_id=target_chat_id, media=chunk,
+                    write_timeout=180,
+                )
+            )
+
+        # ── Send the text body separately so /edit_announce has a
+        #    target message that supports editMessageText.
+        sent = await ctx.bot.send_message(
+            chat_id=target_chat_id,
+            text=text_body,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.exception("cmd_post_tours failed")
+        await send(update, f"❌ Не получилось опубликовать: {e}")
+        return
+
+    # Remember the post so /edit_announce can rewrite it without
+    # the admin having to copy a link or message id.
+    ctx.user_data["last_announce"] = {
+        "chat_id": int(target_chat_id),
+        "message_id": int(sent.message_id),
+        "tid": int(t["id"]),
+        "range_label": range_label,
+    }
+
+    log_tournament_action(
+        t["id"],
+        actor_telegram_id=update.effective_user.id,
+        actor_username=update.effective_user.username,
+        action="post_tours",
+        details=f"range={range_label} chat={target_chat_id} "
+                f"msg={sent.message_id}",
+    )
+
+    chat_link = (
+        f"https://t.me/c/{str(target_chat_id).replace('-100', '', 1)}"
+        f"/{sent.message_id}"
+    )
+    await send(
+        update,
+        f"✅ Опубликовано: туры {range_label} → "
+        f"chat={target_chat_id}, msg={sent.message_id}\n"
+        f"<a href=\"{chat_link}\">Открыть пост</a>\n\n"
+        f"Чтобы переписать текст: ответь команде "
+        f"<code>/edit_announce</code> с новым текстом, или явно "
+        f"<code>/edit_announce {target_chat_id}:{sent.message_id} "
+        f"новый текст</code>",
+    )
+
+
+async def cmd_edit_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/edit_announce [chat:msg] <new text>`` — rewrite a tour
+    announcement that this admin posted earlier (admin only).
+
+    Two argument shapes:
+
+    * ``/edit_announce <new text>`` — edits the LAST post made by this
+      admin via ``/post_tours`` (looked up from ``user_data``).
+    * ``/edit_announce <chat_id>:<message_id> <new text>`` — explicit
+      target. Useful when the admin posted multiple announcements and
+      wants to edit an older one.
+
+    The new text replaces the body verbatim and uses ``parse_mode=HTML``,
+    so basic markup (``<b>``, ``<i>``, ``<a href>``) works the same way
+    as in the original ``/post_tours`` template.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    raw = (update.effective_message.text or "").strip()
+    # Drop the leading command token (handles "/edit_announce" and
+    # "/edit_announce@BotName"). Whatever follows is the body.
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        await send(
+            update,
+            "Использование:\n"
+            "<code>/edit_announce новый текст</code> — редактирует последний пост\n"
+            "<code>/edit_announce &lt;chat&gt;:&lt;msg&gt; новый текст</code> "
+            "— редактирует конкретное сообщение",
+        )
+        return
+    body = parts[1].strip()
+
+    # Detect explicit target prefix "chat:msg "
+    chat_id: int | None = None
+    msg_id: int | None = None
+    target_match = re.match(
+        r"^(-?\d+):(\d+)\s+(.*)$", body, re.DOTALL
+    )
+    if target_match:
+        chat_id = int(target_match.group(1))
+        msg_id = int(target_match.group(2))
+        body = target_match.group(3).strip()
+    else:
+        last = (ctx.user_data or {}).get("last_announce")
+        if not last:
+            await send(
+                update,
+                "❌ Не нашёл недавний пост этого админа. Используй "
+                "явную форму: <code>/edit_announce &lt;chat&gt;:&lt;msg&gt; "
+                "текст</code>",
+            )
+            return
+        chat_id = int(last["chat_id"])
+        msg_id = int(last["message_id"])
+
+    if not body:
+        await send(update, "❌ Нужен новый текст.")
+        return
+
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=msg_id,
+            text=body,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.exception("cmd_edit_announce failed")
+        await send(update, f"❌ Не получилось отредактировать: {e}")
+        return
+
+    chat_link = (
+        f"https://t.me/c/{str(chat_id).replace('-100', '', 1)}/{msg_id}"
+    )
+    await send(
+        update,
+        f"✏️ Сообщение обновлено. <a href=\"{chat_link}\">Открыть</a>",
+    )
+
+
 async def cmd_repair_tour_numbers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """``/repair_tour_numbers [ID] [confirm]`` — assign a real tour to
     confirmed group-stage matches that ended up with ``tour_number=0``
