@@ -1662,7 +1662,18 @@ def _build_repeat_free_tour(
                 return [(first, partner)] + res
         return None
 
+    # The deterministic heuristic finds a matching quickly when one exists,
+    # but on tightly-constrained graphs a single ordering may dead-end.
+    # Try a few random shuffles as insurance — cheap and very effective.
     pairing = match(players)
+    if pairing is None:
+        rng = random.Random(0xC0FFEE)
+        for _ in range(8):
+            shuffled = list(players)
+            rng.shuffle(shuffled)
+            pairing = match(shuffled)
+            if pairing is not None:
+                break
     if pairing is None:
         return None
     # Drop the bye pseudo-pair.
@@ -1762,13 +1773,14 @@ def generate_next_tour(tid: int) -> list[int]:
 
 
 def regenerate_unplayed_tours(tid: int) -> dict:
-    """Rebuild every not-yet-played tour without repeated fixtures.
+    """Wipe every not-yet-played tour so the league can pick up cleanly.
 
     Tours that already have at least one **confirmed** result are kept
     exactly as they are (you can't un-play a game). Every tour after the
-    last played one is deleted and regenerated with the repeat-free
-    generator, so any duplicate pairings that were baked in by an old
-    roster change disappear from the future schedule.
+    last played one is deleted and ``current_tour`` is reset back to that
+    point. The next press of the "Создать матчи следующего тура" button
+    (or ``/next_tour``) will then build a fresh tour with the repeat-free
+    generator, and so on for each subsequent tour.
 
     Returns a summary dict::
 
@@ -1776,8 +1788,7 @@ def regenerate_unplayed_tours(tid: int) -> dict:
             "kept_through": <last tour with a confirmed result>,
             "removed_tours": <int>,
             "removed_matches": <int>,
-            "created_tours": <int>,
-            "created_matches": <int>,
+            "next_tour": <int>,        # number of the tour the next click will create
         }
     """
     t = get_tournament(tid)
@@ -1835,26 +1846,14 @@ def regenerate_unplayed_tours(tid: int) -> dict:
     conn.commit()
     conn.close()
 
-    # Reset the pointer so generation continues right after the kept tours.
+    # Reset the pointer so the next button press starts at last_played + 1.
     set_current_tour(tid, last_played)
-
-    # Regenerate the rest. Each call avoids every pair already on record
-    # (confirmed results AND any pending matches left in kept tours).
-    created_tours = 0
-    created_matches = 0
-    while True:
-        mids = generate_next_tour(tid)
-        if not mids:
-            break
-        created_tours += 1
-        created_matches += len(mids)
 
     return {
         "kept_through": last_played,
         "removed_tours": removed_tours,
         "removed_matches": removed_matches,
-        "created_tours": created_tours,
-        "created_matches": created_matches,
+        "next_tour": last_played + 1,
     }
 
 
