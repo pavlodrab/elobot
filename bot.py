@@ -348,6 +348,7 @@ from handlers.tournament import (  # noqa: E402
     cmd_tours,
     cmd_tourstext,
     cmd_next_tour,
+    cmd_regen_tours,
     cmd_export_db,
     cmd_import_db,
     cmd_export_bot,
@@ -7688,6 +7689,9 @@ def main():
     app.add_handler(CommandHandler("tourstext", cmd_tourstext))
     app.add_handler(CommandHandler("next_tour", cmd_next_tour))
     app.add_handler(CommandHandler("nexttour", cmd_next_tour))
+    app.add_handler(CommandHandler("regen_tours", cmd_regen_tours))
+    app.add_handler(CommandHandler("regentours", cmd_regen_tours))
+    app.add_handler(CommandHandler("regen", cmd_regen_tours))
     app.add_handler(CommandHandler("export_db", cmd_export_db))
     app.add_handler(CommandHandler("exportdb", cmd_export_db))
     app.add_handler(CommandHandler("backup_db", cmd_export_db))
