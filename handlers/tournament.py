@@ -8105,6 +8105,242 @@ async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # admins didn't want every tour creation echoed there.
 
 
+async def cmd_drop_ghost_matches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/drop_ghost_matches [ID] [confirm]`` — find and remove confirmed
+    group-stage matches whose participants are no longer on the active
+    roster, then re-plan the schedule (admin only).
+
+    "Ghost" matches happen when a player gets removed from a tournament
+    after they've already played a round or two. Their old confirmed
+    matches stay in the DB; the matcher honours them in pair-counts so
+    the remaining real-vs-real real schedule must skip a few real pairs
+    to fit. This command surgically removes those ghost rows so the
+    schedule can be re-built without that structural shortage.
+
+    Without a trailing ``confirm`` argument, runs in **dry-run** mode:
+    lists every match that would be touched (and the ELO/stat reversals
+    that would be applied) without modifying anything. Pass ``confirm``
+    to actually delete + regenerate.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    args = list(ctx.args or [])
+    apply_changes = False
+    if args and args[-1].lower() in ("confirm", "yes", "да"):
+        apply_changes = True
+        args = args[:-1]
+
+    t, err = _resolve_tournament_from_args(update, ctx, args=args)
+    if t is None:
+        await send(update, err or "❌ Не нашёл турнир.")
+        return
+    if not _can_manage_tournament(update.effective_user.id, t):
+        await send(update, "❌ Только админ турнира может это делать.")
+        return
+
+    tid = t["id"]
+
+    # Active roster (not eliminated). Anyone NOT in this set who appears
+    # in a confirmed group-stage match counts as a ghost.
+    players = get_tournament_players(tid)
+    active_pids: set[int] = {
+        p["player_id"] for p in players if not p.get("eliminated")
+    }
+
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, player1_id, player2_id, score1, score2, status, tour_number "
+        "FROM matches WHERE tournament_id=? AND stage='group' "
+        "AND status='confirmed' "
+        "ORDER BY tour_number, id",
+        (tid,),
+    ).fetchall()
+    conn.close()
+
+    ghost_rows: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        p1 = d.get("player1_id")
+        p2 = d.get("player2_id")
+        if p1 is None or p2 is None:
+            continue
+        if (p1 not in active_pids) or (p2 not in active_pids):
+            ghost_rows.append(d)
+
+    if not ghost_rows:
+        await send(
+            update,
+            f"✅ В турнире <b>{html.escape(t['name'])}</b> (ID {tid}) "
+            f"нет confirmed-матчей с игроками вне активного ростера.",
+        )
+        return
+
+    # Build the description for the response.
+    lines = [
+        f"👻 <b>Ghost-матчи в {html.escape(t['name'])}</b> (ID {tid}): "
+        f"{len(ghost_rows)}",
+    ]
+    for d in ghost_rows[:20]:
+        from database import get_player_by_id
+        p1 = get_player_by_id(d["player1_id"]) or {}
+        p2 = get_player_by_id(d["player2_id"]) or {}
+        u1 = p1.get("username") or f"id={d['player1_id']}"
+        u2 = p2.get("username") or f"id={d['player2_id']}"
+        # Mark ghosts (those NOT in active roster).
+        if d["player1_id"] not in active_pids:
+            u1 = f"👻{u1}"
+        if d["player2_id"] not in active_pids:
+            u2 = f"👻{u2}"
+        score = f"{d.get('score1')}:{d.get('score2')}"
+        lines.append(
+            f"  • #{d['id']} тур {d.get('tour_number') or '?'}: "
+            f"{html.escape(u1)} {score} {html.escape(u2)}"
+        )
+    if len(ghost_rows) > 20:
+        lines.append(f"  … и ещё {len(ghost_rows) - 20}")
+
+    if not apply_changes:
+        lines.append("")
+        lines.append(
+            "ℹ️ Это <b>dry-run</b>. Чтобы реально удалить матчи и "
+            "перезапустить расписание, повтори команду с "
+            "<code>confirm</code> в конце:"
+        )
+        lines.append(
+            f"<code>/drop_ghost_matches {tid} confirm</code>"
+        )
+        lines.append("")
+        lines.append(
+            "♻️ ELO, статистика и таблица откатятся для каждого матча "
+            "(как при <code>/delete_match</code>)."
+        )
+        await send(update, "\n".join(lines))
+        return
+
+    # ── Apply: delete each ghost match (with stat reversal) ────────────
+    deleted = 0
+    failed: list[int] = []
+    for d in ghost_rows:
+        try:
+            ok = _delete_match_with_revert(d["id"])
+            if ok:
+                deleted += 1
+                log_tournament_action(
+                    tid,
+                    actor_telegram_id=update.effective_user.id,
+                    actor_username=update.effective_user.username,
+                    action="delete_match",
+                    details=(
+                        f"match={d['id']} (ghost) "
+                        f"tour={d.get('tour_number')} "
+                        f"score={d.get('score1')}:{d.get('score2')}"
+                    ),
+                )
+            else:
+                failed.append(d["id"])
+        except Exception:
+            log.exception(
+                "cmd_drop_ghost_matches: delete failed for match %s",
+                d["id"],
+            )
+            failed.append(d["id"])
+
+    # ── Re-plan the schedule ───────────────────────────────────────────
+    regen_summary: dict | None = None
+    if int(t.get("tours_enabled") or 0):
+        try:
+            from tournament import regenerate_unplayed_tours
+            regen_summary = regenerate_unplayed_tours(tid)
+        except Exception:
+            log.exception(
+                "cmd_drop_ghost_matches: regenerate_unplayed_tours failed"
+            )
+
+    # ── Response ───────────────────────────────────────────────────────
+    out = [
+        "🗑 <b>Ghost-матчи удалены</b>",
+        f"Удалено матчей: <b>{deleted}</b> из {len(ghost_rows)}",
+    ]
+    if failed:
+        out.append(
+            f"⚠ Не получилось удалить: {', '.join('#' + str(i) for i in failed[:10])}"
+        )
+    if regen_summary is None:
+        if int(t.get("tours_enabled") or 0):
+            out.append("⚠ Перепланирование не запустилось (см. логи).")
+    else:
+        if regen_summary.get("error"):
+            out.append(
+                f"⚠ Перепланирование вернуло ошибку: {regen_summary['error']}"
+            )
+        else:
+            pre_matches = regen_summary.get("pre_filled_matches", 0)
+            pre_tours = regen_summary.get("pre_filled_tours", 0)
+            skipped = regen_summary.get("skipped_pairs", 0)
+            out.append(
+                f"♻️ Расписание дозаполнено: <b>{pre_matches}</b> матчей "
+                f"в {pre_tours} тур(ах)"
+                + (
+                    f", скипнуто {skipped} пар(ы)"
+                    if skipped
+                    else " ✨"
+                )
+            )
+
+    await send(update, "\n".join(out))
+
+
+def _delete_match_with_revert(match_id: int) -> bool:
+    """Delete a single match row, reversing ELO/stat changes if it was
+    confirmed & processed.
+
+    Uses ``match_processor.revert_match`` for the actual ELO/stats
+    rollback (which leaves the row at ``status='pending'``) and then
+    deletes both the goal records and the match row itself. Mirrors the
+    body of ``cmd_delete_match`` but without any user-interaction so it
+    can be reused by batch helpers.
+
+    Returns True on success, False if the match couldn't be found.
+    """
+    from database import get_match
+    from match_processor import revert_match
+
+    m = get_match(match_id)
+    if not m:
+        return False
+
+    was_processed = bool(m.get("played_at"))
+    status = m.get("status") or "?"
+
+    if was_processed and status == "confirmed":
+        try:
+            revert_match(match_id)
+        except ValueError:
+            # Match exists but isn't in a revertable state (already
+            # pending, etc.) — fine, we just delete it.
+            pass
+        except Exception:
+            log.exception(
+                "_delete_match_with_revert: revert failed for match %s",
+                match_id,
+            )
+            # Continue to deletion regardless — keeping a stale row
+            # would leave the schedule in a worse state.
+
+    conn = get_conn()
+    conn.execute("DELETE FROM match_goals WHERE match_id=?", (match_id,))
+    conn.commit()
+    conn.close()
+
+    conn = get_conn()
+    conn.execute("DELETE FROM matches WHERE id=?", (match_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
 async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """``/regen_tours [ID]`` — wipe every not-yet-played tour so the next
 
