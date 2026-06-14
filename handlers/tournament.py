@@ -8135,6 +8135,33 @@ async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send(update, f"❌ Не получилось: {res['error']}")
         return
 
+    pre_tours = res.get("pre_filled_tours", 0)
+    pre_matches = res.get("pre_filled_matches", 0)
+    relax = res.get("relax_used", 0)
+    if pre_tours:
+        if relax:
+            schedule_line = (
+                f"📋 Расписание построено: <b>{pre_tours}</b> туров / "
+                f"{pre_matches} матчей (точная 1-факторизация не нашлась "
+                f"за бюджет, последние пары могут повторяться)"
+            )
+        else:
+            schedule_line = (
+                f"📋 Расписание построено: <b>{pre_tours}</b> туров / "
+                f"{pre_matches} матчей, без повторов ✨"
+            )
+        tail = (
+            f"{schedule_line}\n\n"
+            f"Туры {res['next_tour']}–{res['next_tour'] + pre_tours - 1} уже в БД, "
+            f"можно играть. Кнопка «Создать матчи следующего тура» "
+            f"тебе больше не нужна."
+        )
+    else:
+        tail = (
+            f"Жми «⚡ Создать матчи следующего тура», чтобы построить тур "
+            f"<b>{res['next_tour']}</b> уже без повторов."
+        )
+
     await send(
         update,
         "♻️ <b>Несыгранные туры очищены</b>\n"
@@ -8142,8 +8169,7 @@ async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Удалено: {res['removed_tours']} туров / {res['removed_matches']} матчей\n"
         f"Удалено дубликатов матчей: <b>{res.get('removed_dupes', 0)}</b>\n"
         f"Удалено матчей-сирот без тура: <b>{res.get('removed_orphans', 0)}</b>\n\n"
-        f"Жми «⚡ Создать матчи следующего тура», чтобы построить тур "
-        f"<b>{res['next_tour']}</b> уже без повторов.",
+        f"{tail}",
     )
 
 
