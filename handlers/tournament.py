@@ -5761,20 +5761,26 @@ async def _handle_tournament_settings_cb(
         if not mids:
             await query.message.reply_text("❌ Все туры уже сыграны.")
             return
-        msg = f"✅ Создан тур {int(t.get('current_tour') or 0) + 1} (матчей: {len(mids)})."
+        # ``current_tour`` may have been hand-edited via the picker or
+        # left stale by an earlier failed run, so the displayed number
+        # has to come from the row generate_next_tour just wrote, not
+        # from the cached ``t`` we loaded before the call.
+        t_after = get_tournament(tid) or t
+        created_tour = int(t_after.get("current_tour") or 0)
+        msg = f"✅ Создан тур {created_tour} (матчей: {len(mids)})."
         # Try to announce in bound chat
         bound_chat = t.get("chat_id")
         if bound_chat:
             try:
                 await ctx.bot.send_message(
                     int(bound_chat),
-                    f"⚡ <b>Тур {int(t.get('current_tour') or 0) + 1} начался!</b>\n"
+                    f"⚡ <b>Тур {created_tour} начался!</b>\n"
                     f"Все матчи созданы, ждём результаты.",
                     parse_mode="HTML",
                 )
             except Exception:
                 pass
-        t = get_tournament(tid)
+        t = t_after
         from bot import _submenu_ts_tours
         await query.edit_message_text(
             f"📅 <b>Туры</b> — {html.escape(t['name'])} (ID {tid})",
@@ -8094,10 +8100,15 @@ async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send(update, "❌ Все туры уже сыграны.")
         return
 
-    cur = int(t.get("current_tour") or 0)
+    # Use the tour number actually created (set by generate_next_tour),
+    # not the stale current_tour from before the call — the two can drift
+    # when current_tour was hand-edited via the picker or left over from
+    # an earlier failed run.
+    t_after = get_tournament(t["id"]) or t
+    created_tour = int(t_after.get("current_tour") or 0)
     await send(
         update,
-        f"✅ Создан тур {cur + 1} ({len(mids)} матчей).\n"
+        f"✅ Создан тур {created_tour} ({len(mids)} матчей).\n"
         f"Используй /tours {t['id']} чтобы увидеть.",
     )
     bound_chat = t.get("chat_id")
@@ -8105,7 +8116,7 @@ async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await ctx.bot.send_message(
                 int(bound_chat),
-                f"⚡ <b>Тур {cur + 1} начался!</b>\n"
+                f"⚡ <b>Тур {created_tour} начался!</b>\n"
                 f"Создано {len(mids)} матчей. Удачи!",
                 parse_mode="HTML",
             )
