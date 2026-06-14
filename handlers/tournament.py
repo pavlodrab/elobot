@@ -8290,9 +8290,17 @@ async def cmd_repair_tour_numbers(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             p2 = d.get("player2_id")
             u1 = (get_player_by_id(p1) or {}).get("username") or f"id={p1}"
             u2 = (get_player_by_id(p2) or {}).get("username") or f"id={p2}"
+            status = d.get("status") or "?"
+            s1 = d.get("score1")
+            s2 = d.get("score2")
+            score_part = (
+                f" {s1}:{s2}"
+                if s1 is not None and s2 is not None
+                else " (без счёта)"
+            )
             lines.append(
                 f"  #{mid}: {html.escape(u1)} vs {html.escape(u2)} "
-                f"(оба committed во всех турах)"
+                f"[{status}{score_part}] (оба committed во всех турах)"
             )
 
     if not apply_changes:
