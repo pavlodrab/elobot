@@ -432,6 +432,8 @@ from handlers.tournament import (  # noqa: E402
     cmd_regen_tours,
     cmd_drop_ghost_matches,
     cmd_repair_tour_numbers,
+    cmd_post_tours,
+    cmd_edit_announce,
     cmd_tour_diag,
     cmd_export_db,
     cmd_import_db,
@@ -7818,6 +7820,11 @@ def main():
     app.add_handler(CommandHandler("repair_tour_numbers", cmd_repair_tour_numbers))
     app.add_handler(CommandHandler("repairtournumbers", cmd_repair_tour_numbers))
     app.add_handler(CommandHandler("repair_tours", cmd_repair_tour_numbers))
+    app.add_handler(CommandHandler("post_tours", cmd_post_tours))
+    app.add_handler(CommandHandler("posttours", cmd_post_tours))
+    app.add_handler(CommandHandler("announce_tours", cmd_post_tours))
+    app.add_handler(CommandHandler("edit_announce", cmd_edit_announce))
+    app.add_handler(CommandHandler("editannounce", cmd_edit_announce))
     app.add_handler(CommandHandler("tour_diag", cmd_tour_diag))
     app.add_handler(CommandHandler("tourdiag", cmd_tour_diag))
     app.add_handler(CommandHandler("export_db", cmd_export_db))
