@@ -1586,12 +1586,102 @@ def circle_method_schedule(player_ids: list[int], mpp: int = 1) -> list[list[tup
     return schedule
 
 
+def _played_pair_counts(tid: int) -> dict[frozenset, int]:
+    """How many times each pair of players has already been scheduled in
+    this tournament's group stage (any status). Keyed by ``frozenset({a, b})``.
+
+    This is the "memory" the tour generator needs so it never re-creates a
+    pairing that already exists, regardless of how the roster changed
+    between tours.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT player1_id, player2_id FROM matches "
+        "WHERE tournament_id=? AND stage='group'",
+        (tid,),
+    ).fetchall()
+    conn.close()
+    counts: dict[frozenset, int] = {}
+    for r in rows:
+        try:
+            a, b = r["player1_id"], r["player2_id"]
+        except (KeyError, TypeError, IndexError):
+            a, b = r[0], r[1]
+        if a is None or b is None:
+            continue
+        key = frozenset((a, b))
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _build_repeat_free_tour(
+    pids: list[int],
+    pair_counts: dict[frozenset, int],
+    mpp: int,
+) -> list[tuple[int, int]] | None:
+    """Pair up ``pids`` for a single tour so that:
+
+    - every player appears at most once (one sits out if the count is odd),
+    - no pair is used more than ``mpp`` times across the whole tournament
+      (``pair_counts`` carries the already-played tally).
+
+    Returns the list of ``(a, b)`` pairs, or ``None`` when no full pairing
+    exists (i.e. the round-robin is exhausted — everyone has already played
+    everyone the allowed number of times).
+    """
+    players: list = list(pids)
+    # Pad with a bye sentinel when odd so exactly one player sits out.
+    if len(players) % 2 == 1:
+        players.append(None)
+
+    def allowed(a, b) -> bool:
+        if a is None or b is None:
+            return True  # the bye can fall to anyone
+        return pair_counts.get(frozenset((a, b)), 0) < mpp
+
+    def match(remaining: list):
+        if not remaining:
+            return []
+        # Pair the most constrained player first (fewest legal partners),
+        # which keeps the backtracking search small and reliable.
+        first = min(
+            remaining,
+            key=lambda x: sum(1 for y in remaining if y != x and allowed(x, y)),
+        )
+        rest = [p for p in remaining if p != first]
+        cands = [y for y in rest if allowed(first, y)]
+        # Try the least-flexible partner first to avoid painting ourselves
+        # into a corner later in the tour.
+        cands.sort(
+            key=lambda y: sum(1 for z in rest if z != y and allowed(y, z))
+        )
+        for partner in cands:
+            sub = [p for p in rest if p != partner]
+            res = match(sub)
+            if res is not None:
+                return [(first, partner)] + res
+        return None
+
+    pairing = match(players)
+    if pairing is None:
+        return None
+    # Drop the bye pseudo-pair.
+    return [(a, b) for (a, b) in pairing if a is not None and b is not None]
+
+
 def generate_next_tour(tid: int) -> list[int]:
     """
     Create matches for the next tour of a league-format tournament.
 
+    The pairing is built so it **never repeats** a fixture that already
+    exists in the tournament (see ``_build_repeat_free_tour``). This is
+    deliberately not the old purely-positional circle method: that approach
+    reshuffled every player's slot whenever the roster changed between tours
+    (late joins, drop-outs, eliminations), which caused already-played
+    pairings to reappear in later tours.
+
     - Determines the next tour number
-    - Computes the schedule via circle_method_schedule (lazy/cached)
+    - Builds a repeat-free pairing for the current, non-eliminated roster
     - Creates match rows with ``tour_number`` set
     - Records the tour in ``tournament_tours``
     - Updates ``current_tour`` on the tournament row
@@ -1603,6 +1693,9 @@ def generate_next_tour(tid: int) -> list[int]:
         return []
 
     players = get_tournament_players(tid)
+    # Deterministic ordering; correctness no longer depends on it because
+    # repeats are prevented explicitly, but a stable order keeps the
+    # generated schedule tidy.
     pids = sorted(
         [p["player_id"] for p in players if not p.get("eliminated")]
     )
@@ -1612,14 +1705,14 @@ def generate_next_tour(tid: int) -> list[int]:
     mpp = max(1, int(t.get("group_matches_per_pair") or 1))
     total_tours = int(t.get("total_tours") or 0)
 
-    # Generate full schedule
-    schedule = circle_method_schedule(pids, mpp=mpp)
-    max_tours = len(schedule)
+    n = len(pids)
+    # Theoretical maximum number of tours for a (double) round-robin.
+    max_tours = (n - 1 if n % 2 == 0 else n) * mpp
 
     # Determine next tour number (1-based)
     next_tour = get_next_tour_number(tid)
 
-    # If total_tours is auto (0) or larger than possible, cap at schedule
+    # If total_tours is auto (0) or larger than possible, cap at the max.
     if total_tours == 0 or total_tours > max_tours:
         total_tours = max_tours
         # Persist so the UI shows the correct number
@@ -1628,17 +1721,25 @@ def generate_next_tour(tid: int) -> list[int]:
     if next_tour > total_tours:
         return []
 
-    tour_matches = schedule[next_tour - 1]
-    if not tour_matches:
+    # Build a pairing that avoids every fixture already played in this
+    # tournament (up to ``mpp`` meetings per pair).
+    pair_counts = _played_pair_counts(tid)
+    tour_pairs = _build_repeat_free_tour(pids, pair_counts, mpp)
+    if not tour_pairs:
+        # Round-robin exhausted — nothing left to schedule without repeats.
         return []
 
-    midpoint = len(pids)
     deadline = (datetime.utcnow() + timedelta(hours=MATCH_DEADLINE_HOURS)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
     mids = []
-    for a, b, leg in tour_matches:
+    for a, b in tour_pairs:
+        # leg = how many times this pair has met so far + 1
+        leg = pair_counts.get(frozenset((a, b)), 0) + 1
+        # On even legs swap home/away so it reads as the "return" fixture.
+        if leg % 2 == 0:
+            a, b = b, a
         mid = create_match(
             tid, a, b,
             stage="group",
@@ -1658,6 +1759,103 @@ def generate_next_tour(tid: int) -> list[int]:
     set_current_tour(tid, next_tour)
 
     return mids
+
+
+def regenerate_unplayed_tours(tid: int) -> dict:
+    """Rebuild every not-yet-played tour without repeated fixtures.
+
+    Tours that already have at least one **confirmed** result are kept
+    exactly as they are (you can't un-play a game). Every tour after the
+    last played one is deleted and regenerated with the repeat-free
+    generator, so any duplicate pairings that were baked in by an old
+    roster change disappear from the future schedule.
+
+    Returns a summary dict::
+
+        {
+            "kept_through": <last tour with a confirmed result>,
+            "removed_tours": <int>,
+            "removed_matches": <int>,
+            "created_tours": <int>,
+            "created_matches": <int>,
+        }
+    """
+    t = get_tournament(tid)
+    if not t:
+        return {"error": "not_found"}
+    if not int(t.get("tours_enabled") or 0):
+        return {"error": "tours_disabled"}
+
+    def _scalar(row):
+        if row is None:
+            return 0
+        try:
+            return int(row[0])
+        except (KeyError, TypeError, IndexError):
+            try:
+                return int(list(row.values())[0])
+            except Exception:
+                return 0
+
+    conn = get_conn()
+    # Highest tour number that contains at least one confirmed match.
+    last_played = _scalar(
+        conn.execute(
+            "SELECT COALESCE(MAX(tour_number), 0) FROM matches "
+            "WHERE tournament_id=? AND status='confirmed'",
+            (tid,),
+        ).fetchone()
+    )
+
+    # Count what we're about to drop (purely for the report).
+    removed_matches = _scalar(
+        conn.execute(
+            "SELECT COUNT(*) FROM matches "
+            "WHERE tournament_id=? AND tour_number > ?",
+            (tid, last_played),
+        ).fetchone()
+    )
+    removed_tours = _scalar(
+        conn.execute(
+            "SELECT COUNT(*) FROM tournament_tours "
+            "WHERE tournament_id=? AND tour_number > ?",
+            (tid, last_played),
+        ).fetchone()
+    )
+
+    # Drop the unplayed tail.
+    conn.execute(
+        "DELETE FROM matches WHERE tournament_id=? AND tour_number > ?",
+        (tid, last_played),
+    )
+    conn.execute(
+        "DELETE FROM tournament_tours WHERE tournament_id=? AND tour_number > ?",
+        (tid, last_played),
+    )
+    conn.commit()
+    conn.close()
+
+    # Reset the pointer so generation continues right after the kept tours.
+    set_current_tour(tid, last_played)
+
+    # Regenerate the rest. Each call avoids every pair already on record
+    # (confirmed results AND any pending matches left in kept tours).
+    created_tours = 0
+    created_matches = 0
+    while True:
+        mids = generate_next_tour(tid)
+        if not mids:
+            break
+        created_tours += 1
+        created_matches += len(mids)
+
+    return {
+        "kept_through": last_played,
+        "removed_tours": removed_tours,
+        "removed_matches": removed_matches,
+        "created_tours": created_tours,
+        "created_matches": created_matches,
+    }
 
 
 

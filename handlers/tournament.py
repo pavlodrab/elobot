@@ -8113,6 +8113,46 @@ async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/regen_tours [ID]`` — rebuild all not-yet-played tours without
+
+    repeated fixtures (admin only). Tours that already have a confirmed
+    result are kept; everything after them is regenerated cleanly.
+    """
+    args = list(ctx.args or [])
+    t, err = _resolve_tournament_from_args(update, ctx, args=args)
+    if t is None:
+        await send(update, err or "❌ Не нашёл турнир.")
+        return
+    if not _can_manage_tournament(update.effective_user.id, t):
+        await send(update, "❌ Только админ может пересоздавать туры.")
+        return
+    if not int(t.get("tours_enabled") or 0):
+        await send(update, "❌ В этом турнире не включены туры.")
+        return
+
+    try:
+        from tournament import regenerate_unplayed_tours
+        res = regenerate_unplayed_tours(t["id"])
+    except Exception as e:
+        log.exception("cmd_regen_tours failed")
+        await send(update, f"❌ Ошибка: {e}")
+        return
+
+    if res.get("error"):
+        await send(update, f"❌ Не получилось: {res['error']}")
+        return
+
+    await send(
+        update,
+        "♻️ <b>Туры пересозданы без повторов</b>\n"
+        f"Сохранено сыгранных туров: <b>{res['kept_through']}</b>\n"
+        f"Удалено несыгранных: {res['removed_tours']} туров / {res['removed_matches']} матчей\n"
+        f"Создано заново: <b>{res['created_tours']}</b> туров / {res['created_matches']} матчей\n\n"
+        f"Проверить: /tours {t['id']}",
+    )
+
+
 def _parse_tour_range(range_str: str | None, t: dict) -> list[int]:
     """Parse a range string like '1', '1-4', '1,3,5' into tour numbers."""
     total = int(t.get("total_tours") or 0)
