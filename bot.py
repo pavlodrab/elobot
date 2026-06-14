@@ -125,6 +125,87 @@ log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Build / version metadata so ``/version`` can prove which deploy is live.
+# We try multiple sources because Railway and other PaaS strip the ``.git``
+# directory from runtime images by design. In order of preference:
+#
+# 1. Env vars set by the platform (Railway: RAILWAY_GIT_COMMIT_SHA, etc.).
+# 2. ``git rev-parse HEAD`` if a checkout is available (local/dev).
+# 3. A static fallback so the command always returns *something*.
+# ─────────────────────────────────────────────────────────────────────────────
+
+BOT_STARTED_AT = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _resolve_build_info() -> dict:
+    info: dict = {
+        "commit": "unknown",
+        "branch": os.environ.get("RAILWAY_GIT_BRANCH")
+        or os.environ.get("GIT_BRANCH")
+        or "unknown",
+        "message": "",
+        "source": "fallback",
+    }
+    for env_key in (
+        "RAILWAY_GIT_COMMIT_SHA",
+        "RAILWAY_GIT_COMMIT_HASH",
+        "GIT_COMMIT",
+        "COMMIT_SHA",
+        "VERCEL_GIT_COMMIT_SHA",
+    ):
+        v = os.environ.get(env_key)
+        if v:
+            info["commit"] = v[:12]
+            info["source"] = f"env:{env_key}"
+            msg = (
+                os.environ.get("RAILWAY_GIT_COMMIT_MESSAGE")
+                or os.environ.get("GIT_COMMIT_MESSAGE")
+                or ""
+            )
+            if msg:
+                info["message"] = msg.splitlines()[0][:140]
+            return info
+    # Local / dev fallback: try git
+    try:
+        import subprocess
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo_dir, timeout=2,
+        ).decode().strip()
+        if commit:
+            info["commit"] = commit[:12]
+            info["source"] = "git"
+        try:
+            branch = subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=repo_dir, timeout=2,
+            ).decode().strip()
+            if branch and branch != "HEAD":
+                info["branch"] = branch
+        except Exception:
+            pass
+        try:
+            msg = subprocess.check_output(
+                ["git", "log", "-1", "--pretty=%s"],
+                cwd=repo_dir, timeout=2,
+            ).decode().strip()
+            if msg:
+                info["message"] = msg[:140]
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return info
+
+
+BUILD_INFO = _resolve_build_info()
+log.info(
+    "Bot build: commit=%s branch=%s source=%s",
+    BUILD_INFO["commit"], BUILD_INFO["branch"], BUILD_INFO["source"],
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 #
 # Phase 1 of the bot.py split: small, dependency-light helpers and the
@@ -1578,6 +1659,39 @@ WELCOME_TEXT = (
     "так что можешь и ими.\n"
     "Подсказку по командам — <code>/help</code> или кнопка ℹ️."
 )
+
+
+async def cmd_version(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/version`` — show the running deploy's git commit and start time.
+
+    Use this to confirm a freshly merged PR is actually the one running.
+    """
+    chat = update.effective_chat
+    if chat is None:
+        return
+    commit = BUILD_INFO.get("commit") or "unknown"
+    branch = BUILD_INFO.get("branch") or "unknown"
+    msg = BUILD_INFO.get("message") or ""
+    source = BUILD_INFO.get("source") or "unknown"
+    lines = [
+        "🔧 <b>Build info</b>",
+        f"Commit: <code>{html.escape(str(commit))}</code>",
+        f"Branch: <code>{html.escape(str(branch))}</code>",
+    ]
+    if msg:
+        lines.append(f"Message: {html.escape(msg)}")
+    lines.append(f"Source: <code>{html.escape(source)}</code>")
+    lines.append(f"Started: <code>{BOT_STARTED_AT}</code>")
+    lines.append(
+        "\nProject: https://github.com/pavlodrab/elobot\n"
+        f"Open commit: https://github.com/pavlodrab/elobot/commit/{commit}"
+    )
+    await ctx.bot.send_message(
+        chat.id,
+        "\n".join(lines),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -7316,6 +7430,9 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("version", cmd_version))
+    app.add_handler(CommandHandler("ver", cmd_version))
+    app.add_handler(CommandHandler("build", cmd_version))
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("id", cmd_myid))
     app.add_handler(CommandHandler("whoami", cmd_myid))
