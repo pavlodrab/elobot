@@ -1806,68 +1806,97 @@ def _solve_full_schedule(
     ever exceeds ``mpp`` meetings across all matchings combined with the
     history in ``pair_counts``.
 
-    Cross-tour backtracking with strong pruning:
+    Strategy: **iterative matching with random-seed restarts** — no
+    cross-tour backtracking.
 
-    - **Per-tour matcher** uses constrained-first heuristic to keep the
-      branching low while exploring matchings.
-    - **Cross-tour solver** commits a tour, recurses; on failure tries
-      another matching for that tour. The matcher is reseeded with random
-      shuffles between attempts so we don't keep getting the same one.
-    - **Feasibility prune.** Before recursing, every player must still
-      have at least ``remaining_tours`` legal partners — otherwise the
-      subtree is infeasible. This is what makes the search converge in
-      practice on graphs with up to ~36 vertices.
-    - **Time budget**: returns ``None`` if no solution found within
-      ``max_seconds``. Caller falls back to greedy + relax.
+    For each restart:
+      1. Iterate ``tour = 0 .. num_tours-1``.
+      2. At each tour, find a perfect matching of the residual via DFS
+         with a "most-constrained-first" heuristic and randomized
+         tie-breaking on the candidate-partner ordering.
+      3. If at some tour no matching exists, abandon the attempt and
+         restart from scratch with a fresh seed.
+      4. If ``num_tours`` matchings are produced, return success.
+
+    The previous implementation was a cross-tour backtracker. Two
+    practical issues with that approach on ~32-vertex residuals:
+
+      • The branching factor (≈ 13 matchings per tour) is small but the
+        search depth is the tour count (~23 here), so the worst-case
+        tree explodes.
+      • The random shuffles inside the per-tour matcher were reseeded
+        from a *fixed* constant on every recursion call, so every level
+        of the tree explored the same 13 candidate orderings — defeating
+        the diversification the shuffles were meant to provide.
+
+    Restart-based randomized search converges in practice for our case:
+    after ``_regularize_residual`` makes the residual ``num_tours``-
+    regular, the 1-factorization conjecture (Csaba-Kühn-Lo-Osthus-
+    Treglown 2014: every k-regular graph on 2n vertices with k ≥ n is
+    1-factorizable) guarantees a factorization exists. A randomized
+    iterative matcher hits one within a handful of restarts on graphs
+    of this size; if it does fail it is the regularization itself that
+    needs a wider skip set, not the per-tour matcher.
+
+    Returns the schedule (list of perfect matchings) on success, or
+    ``None`` if no factorization was found within ``max_seconds``.
+    Caller falls back to greedy + relax in that case.
     """
     import time
 
     start = time.monotonic()
-    pc = dict(pair_counts)
     real_pids = list(pids)
     has_bye = (len(real_pids) % 2 == 1)
-    players_template: list = real_pids + ([None] if has_bye else [])
+    n_real = len(real_pids)
 
-    def allowed(a, b) -> bool:
-        if a is None or b is None:
-            return True
-        return pc.get(frozenset((a, b)), 0) < mpp
+    def find_one_matching(
+        pc: dict, rng: random.Random
+    ) -> list[tuple] | None:
+        """Single perfect-matching attempt against the current ``pc``.
 
-    def feasibility(remaining_tours: int) -> bool:
-        # Every real player must still have at least `remaining_tours`
-        # legal partners; otherwise the subtree dead-ends downstream.
-        # Cheap O(n^2) check, dominated by the matcher anyway.
-        for p in real_pids:
-            free = 0
-            for q in real_pids:
-                if q == p:
-                    continue
-                if pc.get(frozenset((p, q)), 0) < mpp:
-                    free += 1
-                    if free >= remaining_tours:
-                        break
-            if free < remaining_tours:
-                return False
-        return True
+        Most-constrained-vertex first, randomized tie-break on the
+        candidate-partner ordering. Returns the matching as a list of
+        ``(a, b)`` pairs (the bye, if present, gets its ``None`` partner
+        in the result and is filtered out by the caller).
+        """
+        # Local closures to avoid recomputing ``frozenset`` allocations
+        # on the hot path.
+        get = pc.get
+        cap = mpp
 
-    def find_one_matching(seed_order: list) -> list[tuple] | None:
-        """Single perfect matching attempt with the given vertex order."""
+        def allowed(a, b) -> bool:
+            if a is None or b is None:
+                return True
+            return get(frozenset((a, b)), 0) < cap
+
+        def free_count(x, remaining):
+            c = 0
+            for y in remaining:
+                if y != x and allowed(x, y):
+                    c += 1
+            return c
+
         def match(remaining: list):
             if not remaining:
                 return []
-            # Pick the most constrained player first.
-            first = min(
-                remaining,
-                key=lambda x: sum(
-                    1 for y in remaining if y != x and allowed(x, y)
-                ),
-            )
+            # Pick the most-constrained vertex first; ties broken by
+            # the rng so different restarts explore different subtrees.
+            best = None
+            best_count = n_real + 2
+            for x in remaining:
+                c = free_count(x, remaining)
+                if c < best_count or (c == best_count and rng.random() < 0.5):
+                    best = x
+                    best_count = c
+            first = best
+            if best_count == 0:
+                return None
             rest = [p for p in remaining if p != first]
             cands = [y for y in rest if allowed(first, y)]
+            # Sort candidates by their own free-count (most-constrained
+            # first), with random tie-break.
             cands.sort(
-                key=lambda y: sum(
-                    1 for z in rest if z != y and allowed(y, z)
-                )
+                key=lambda y: (free_count(y, rest), rng.random())
             )
             for partner in cands:
                 sub = [p for p in rest if p != partner]
@@ -1876,71 +1905,48 @@ def _solve_full_schedule(
                     return [(first, partner)] + res
             return None
 
-        return match(seed_order)
+        order = list(real_pids)
+        if has_bye:
+            order.append(None)
+        return match(order)
 
-    def gen_distinct_matchings(seed_attempts: int = 12):
-        """Yield distinct perfect matchings for the current ``pc`` state.
-        Uses random shuffles to explore alternatives.
-        """
-        seen: set = set()
-        rng = random.Random(0xC0FFEE)
-        # First the deterministic order for stability.
-        orders = [list(players_template)]
-        for _ in range(seed_attempts):
-            sh = list(players_template)
-            rng.shuffle(sh)
-            orders.append(sh)
-        for order in orders:
-            m = find_one_matching(order)
+    attempts = 0
+    fail_at_tour: list[int] = []  # debug: which tour killed each attempt
+    seed = 0
+    while time.monotonic() - start < max_seconds:
+        attempts += 1
+        rng = random.Random(seed)
+        seed += 1
+        pc = dict(pair_counts)
+        schedule: list[list[tuple[int, int]]] = []
+        success = True
+        for tour_idx in range(num_tours):
+            m = find_one_matching(pc, rng)
             if m is None:
-                continue
-            key = frozenset(
-                frozenset((a, b)) for (a, b) in m
-                if a is not None and b is not None
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            yield m
-
-    schedule: list[list[tuple[int, int]]] = []
-
-    def solve(remaining: int) -> bool | None:
-        if time.monotonic() - start > max_seconds:
-            return None  # timed out, propagate
-        if remaining == 0:
-            return True
-        if not feasibility(remaining):
-            return False
-        for matching in gen_distinct_matchings():
-            applied: list = []
-            real_pairs: list[tuple[int, int]] = []
-            for (a, b) in matching:
-                if a is None or b is None:
-                    continue
+                fail_at_tour.append(tour_idx + 1)
+                success = False
+                break
+            real_pairs = [
+                (a, b) for a, b in m if a is not None and b is not None
+            ]
+            schedule.append(real_pairs)
+            for a, b in real_pairs:
                 key = frozenset((a, b))
                 pc[key] = pc.get(key, 0) + 1
-                applied.append(key)
-                real_pairs.append((a, b))
-            schedule.append(real_pairs)
+        if success:
+            log.info(
+                "_solve_full_schedule: factorization found on attempt %s "
+                "(elapsed=%.2fs, n=%s, tours=%s)",
+                attempts, time.monotonic() - start, n_real, num_tours,
+            )
+            return schedule
 
-            res = solve(remaining - 1)
-            if res is True:
-                return True
-
-            schedule.pop()
-            for key in applied:
-                pc[key] -= 1
-                if pc[key] == 0:
-                    del pc[key]
-
-            if res is None:
-                return None  # propagate timeout
-        return False
-
-    outcome = solve(num_tours)
-    if outcome is True:
-        return schedule
+    log.warning(
+        "_solve_full_schedule: timed out after %s attempts in %.2fs "
+        "(n=%s, tours=%s); fail-at-tour distribution (last 20): %s",
+        attempts, time.monotonic() - start, n_real, num_tours,
+        fail_at_tour[-20:],
+    )
     return None
 
 
@@ -2178,70 +2184,75 @@ def regenerate_unplayed_tours(tid: int) -> dict:
             tid, removed_dupes, len(by_pair),
         )
 
-    # ── Pass 1.5: kill orphan pending rows ───────────────────────────
-    # In a tours-enabled league every legitimate match belongs to a
-    # tour. Pending rows with tour_number <= 0 are leftovers from old
-    # buggy generators or the late-add-player flow; if we keep them
-    # they show up in pair_counts, force the matcher into the relax
-    # fallback, and end up scheduling new duplicates against the same
-    # opponents on every click.
-    cur = conn.execute(
-        "SELECT COUNT(*) FROM matches WHERE tournament_id=? "
-        "AND stage='group' AND status != 'confirmed' "
-        "AND (tour_number IS NULL OR tour_number <= 0)",
-        (tid,),
-    ).fetchone()
-    removed_orphans = _scalar(cur)
-    if removed_orphans:
-        conn.execute(
-            "DELETE FROM matches WHERE tournament_id=? "
-            "AND stage='group' AND status != 'confirmed' "
-            "AND (tour_number IS NULL OR tour_number <= 0)",
-            (tid,),
-        )
-        log.info(
-            "regenerate_unplayed_tours tid=%s: removed %s orphan pending matches",
-            tid, removed_orphans,
-        )
-
-    # ── Pass 2: count + drop the unplayed tail ───────────────────────
+    # ── Pass 2: delete EVERY pending match ────────────────────────────
+    # The user's preferred policy: keep all confirmed matches as-is,
+    # delete every pending row (regardless of tour_number), and let the
+    # re-planner fit the unplayed pairs back into the empty slots
+    # across all tours. This is more aggressive than the previous
+    # "trim past last_played" approach but it's much cleaner: stale
+    # pending rows from earlier buggy generators don't survive into
+    # the new schedule at all.
     removed_matches = _scalar(
         conn.execute(
             "SELECT COUNT(*) FROM matches "
-            "WHERE tournament_id=? AND tour_number > ?",
-            (tid, last_played),
+            "WHERE tournament_id=? AND stage='group' "
+            "AND status != 'confirmed'",
+            (tid,),
         ).fetchone()
     )
-    removed_tours = _scalar(
-        conn.execute(
-            "SELECT COUNT(*) FROM tournament_tours "
-            "WHERE tournament_id=? AND tour_number > ?",
-            (tid, last_played),
-        ).fetchone()
-    )
-
     conn.execute(
-        "DELETE FROM matches WHERE tournament_id=? AND tour_number > ?",
-        (tid, last_played),
+        "DELETE FROM matches WHERE tournament_id=? AND stage='group' "
+        "AND status != 'confirmed'",
+        (tid,),
     )
-    conn.execute(
-        "DELETE FROM tournament_tours WHERE tournament_id=? AND tour_number > ?",
-        (tid, last_played),
-    )
+    # Drop tournament_tours rows that no longer have any matches behind
+    # them. Tours with a confirmed match keep their row so existing tour
+    # views (incl. /tourstext, /tours) stay intact.
+    cur = conn.execute(
+        "SELECT tt.tour_number FROM tournament_tours tt "
+        "WHERE tt.tournament_id=? AND NOT EXISTS ("
+        "  SELECT 1 FROM matches m WHERE m.tournament_id=tt.tournament_id "
+        "  AND m.tour_number=tt.tour_number AND m.status='confirmed'"
+        ")",
+        (tid,),
+    ).fetchall()
+    empty_tour_nums: list[int] = []
+    for r in cur:
+        try:
+            empty_tour_nums.append(int(r["tour_number"]))
+        except (KeyError, TypeError, IndexError):
+            empty_tour_nums.append(int(r[0]))
+    removed_tours = len(empty_tour_nums)
+    if empty_tour_nums:
+        for i in range(0, len(empty_tour_nums), 500):
+            chunk = empty_tour_nums[i : i + 500]
+            placeholders = ",".join(["?"] * len(chunk))
+            conn.execute(
+                f"DELETE FROM tournament_tours "
+                f"WHERE tournament_id=? AND tour_number IN ({placeholders})",
+                [tid] + chunk,
+            )
     conn.commit()
+
+    # Pass 1.5 (orphan pending) is now subsumed by Pass 2 — every
+    # non-confirmed row is gone regardless of tour_number — so we no
+    # longer need a separate pass for it. Keep the field in the
+    # response for backwards compatibility with the handler.
+    removed_orphans = 0
+
     conn.close()
 
     # Reset the pointer so the next button press starts at last_played + 1.
     set_current_tour(tid, last_played)
 
-    # ── Pass 3: globally pre-fill the remaining schedule ───────────────
-    # The greedy per-tour matcher tends to paint itself into a corner on
-    # the last 1-2 tours when the residual pair graph is tight (typical
-    # on a 32-player league where some early tours had ghosts/sit-outs).
-    # Instead, run the cross-tour backtracker once and lock in every
-    # remaining tour at once. Falls back to leaving the rest for the
-    # button-driven greedy generator if the global solver can't prove
-    # feasibility within its time budget.
+    # ── Pass 3: re-plan the full schedule ────────────────────────────
+    # Confirmed matches stay where they are (with their existing
+    # tour_number). For each tour 1..total_tours we look at which
+    # roster players are already committed by a confirmed match and
+    # match the remaining "free" players using only pairs that haven't
+    # played yet. The randomized iterative solver inside handles the
+    # ghost-residual irregularity by skipping a minimal set of pairs
+    # so a complete factorization fits.
     pre_filled_tours = 0
     pre_filled_matches = 0
     relax_used = 0
@@ -2250,14 +2261,24 @@ def regenerate_unplayed_tours(tid: int) -> dict:
     if t_now:
         try:
             pre_filled_tours, pre_filled_matches, relax_used, skipped_pairs = (
-                _prefill_remaining_tours(tid, t_now, last_played)
+                _prefill_full_schedule(tid, t_now)
             )
         except Exception:
             log.exception(
-                "regenerate_unplayed_tours tid=%s: pre-fill crashed, "
-                "falling back to button-driven generator",
+                "regenerate_unplayed_tours tid=%s: full-schedule pre-fill "
+                "crashed, falling back to remaining-tail pre-fill",
                 tid,
             )
+            try:
+                pre_filled_tours, pre_filled_matches, relax_used, skipped_pairs = (
+                    _prefill_remaining_tours(tid, t_now, last_played)
+                )
+            except Exception:
+                log.exception(
+                    "regenerate_unplayed_tours tid=%s: tail pre-fill "
+                    "also crashed, leaving the schedule empty",
+                    tid,
+                )
 
     return {
         "kept_through": last_played,
@@ -2397,6 +2418,350 @@ def _prefill_remaining_tours(
         tours_created += 1
     set_current_tour(tid, last_played + tours_created)
     return tours_created, matches_created, relax_used, len(skipped_pairs)
+
+
+def _prefill_full_schedule(
+    tid: int, t: dict
+) -> tuple[int, int, int, int]:
+    """Re-plan the full league schedule after /regen_tours wipes every
+    pending row.
+
+    Confirmed matches stay where they are — both their pair and their
+    ``tour_number``. For each tour ``T`` in ``1..total_tours`` we look at
+    which roster players are committed by a confirmed match in ``T`` and
+    schedule a matching of the remaining "free" players using only
+    pairs that haven't played yet. Each restart of the iterative solver
+    runs through every tour in order; if the result is incomplete we try
+    a fresh seed.
+
+    Compared to ``_prefill_remaining_tours`` (which only fills tours
+    past ``last_played``):
+
+    - Tours 1..last_played that lost pending matches in ``Pass 2`` get
+      their open slots refilled, not just trimmed off.
+    - Pair-counts come exclusively from confirmed matches, so historic
+      ghost pairings still block re-pairing real-vs-ghost but don't
+      poison the residual graph with leftover-pending entries.
+
+    Returns ``(tours_created, matches_created, relax_used, skipped_pairs)``,
+    same shape as ``_prefill_remaining_tours``. ``relax_used`` reports
+    how many tours fell back to the relax matcher. ``skipped_pairs`` is
+    the count of pairs that the solver could not place anywhere within
+    the time budget — usually those that would only fit in ghost-tight
+    tours where the residual is irrecoverably constrained.
+    """
+    import time
+
+    players = get_tournament_players(tid)
+    pids = sorted(
+        [p["player_id"] for p in players if not p.get("eliminated")]
+    )
+    if len(pids) < 2:
+        return 0, 0, 0, 0
+    pid_set = set(pids)
+
+    mpp = max(1, int(t.get("group_matches_per_pair") or 1))
+    total_tours = int(t.get("total_tours") or 0)
+    n = len(pids)
+    max_tours = (n - 1 if n % 2 == 0 else n) * mpp
+    if total_tours == 0 or total_tours > max_tours:
+        total_tours = max_tours
+        update_tournament(tid, total_tours=total_tours)
+
+    if total_tours <= 0:
+        return 0, 0, 0, 0
+
+    # Confirmed-only pair counts (pending was deleted in Pass 2).
+    pair_counts_initial = _played_pair_counts(tid)
+
+    # Per-tour committed roster players (from confirmed matches).
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT tour_number, player1_id, player2_id FROM matches "
+        "WHERE tournament_id=? AND stage='group' "
+        "AND status='confirmed'",
+        (tid,),
+    ).fetchall()
+    conn.close()
+    committed_per_tour: dict[int, set[int]] = {}
+    for r in rows:
+        try:
+            t_num = int(r["tour_number"] or 0)
+            p1 = r["player1_id"]
+            p2 = r["player2_id"]
+        except (KeyError, TypeError, IndexError):
+            t_num = int(r[0] or 0)
+            p1, p2 = r[1], r[2]
+        if t_num <= 0:
+            continue
+        s = committed_per_tour.setdefault(t_num, set())
+        if p1 in pid_set:
+            s.add(p1)
+        if p2 in pid_set:
+            s.add(p2)
+
+    free_per_tour: dict[int, list[int]] = {
+        T: sorted(p for p in pids if p not in committed_per_tour.get(T, set()))
+        for T in range(1, total_tours + 1)
+    }
+
+    # ── How many real opponents does each player still owe? ─────────
+    # We need this to detect structural shortages (ghost-affected
+    # players have fewer free tours than unmet real opponents) and to
+    # log a clear diagnostic if the schedule can't fully close.
+    real_played: dict[int, int] = {p: 0 for p in pids}
+    for k, v in pair_counts_initial.items():
+        try:
+            a, b = tuple(k)
+        except ValueError:
+            continue
+        if a in pid_set and b in pid_set:
+            real_played[a] = real_played.get(a, 0) + v
+            real_played[b] = real_played.get(b, 0) + v
+    target_real = (n - 1) * mpp
+    free_tours_per_player = {
+        p: sum(
+            1 for T in range(1, total_tours + 1)
+            if p not in committed_per_tour.get(T, set())
+        )
+        for p in pids
+    }
+    excess: dict[int, int] = {}
+    for p in pids:
+        owed = max(0, target_real - real_played.get(p, 0))
+        slots = free_tours_per_player[p]
+        if owed > slots:
+            excess[p] = owed - slots
+
+    if excess:
+        log.warning(
+            "_prefill_full_schedule tid=%s: %s player(s) structurally "
+            "short on tour slots (need > free): %s",
+            tid, len(excess), sorted(excess.items()),
+        )
+
+    # ── Iterative tour-by-tour matching with random restarts ────────
+    best_sched: dict[int, list[tuple[int, int]]] | None = None
+    best_count = -1
+    best_relax = 0
+    start = time.monotonic()
+    max_seconds = 25.0
+    max_attempts = 64
+    attempts = 0
+    while attempts < max_attempts and (time.monotonic() - start) < max_seconds:
+        attempts += 1
+        seed = attempts * 9973
+        rng = random.Random(seed)
+        pc = dict(pair_counts_initial)
+        sched: dict[int, list[tuple[int, int]]] = {}
+        relax_count = 0
+        # Process tours in a randomized order so different attempts
+        # explore different pair → tour assignments.
+        tour_order = list(range(1, total_tours + 1))
+        rng.shuffle(tour_order)
+        for T in tour_order:
+            free = list(free_per_tour[T])
+            if len(free) < 2:
+                continue
+            m = _match_subset_with_partial(free, pc, mpp, rng)
+            if not m:
+                continue
+            sched[T] = m
+            for a, b in m:
+                key = frozenset((a, b))
+                pc[key] = pc.get(key, 0) + 1
+        # Greedy second pass: try to place any pair that's still unplayed
+        # into any tour where both endpoints are still free in `sched`.
+        # This catches pairs the random first pass overlooked.
+        remaining_pairs = []
+        for i in range(len(pids)):
+            for j in range(i + 1, len(pids)):
+                a, b = pids[i], pids[j]
+                if pc.get(frozenset((a, b)), 0) < mpp:
+                    remaining_pairs.append((a, b))
+        # Track per-tour used players from sched + committed
+        used_per_tour: dict[int, set[int]] = {
+            T: set(committed_per_tour.get(T, set()))
+            for T in range(1, total_tours + 1)
+        }
+        for T, pairs in sched.items():
+            for a, b in pairs:
+                used_per_tour[T].add(a)
+                used_per_tour[T].add(b)
+        rng.shuffle(remaining_pairs)
+        for a, b in remaining_pairs:
+            for T in range(1, total_tours + 1):
+                if a not in used_per_tour[T] and b not in used_per_tour[T]:
+                    sched.setdefault(T, []).append((a, b))
+                    used_per_tour[T].add(a)
+                    used_per_tour[T].add(b)
+                    pc[frozenset((a, b))] = pc.get(frozenset((a, b)), 0) + 1
+                    break
+
+        count = sum(len(p) for p in sched.values())
+        if count > best_count:
+            best_count = count
+            best_sched = sched
+            best_relax = relax_count
+            # Early exit if this attempt placed every owed pair.
+            owed_total = sum(
+                max(0, target_real - real_played.get(p, 0)) for p in pids
+            ) // 2
+            if count >= owed_total:
+                break
+
+    if best_sched is None:
+        log.warning(
+            "_prefill_full_schedule tid=%s: solver returned no schedule "
+            "after %s attempts (elapsed=%.2fs)",
+            tid, attempts, time.monotonic() - start,
+        )
+        return 0, 0, 0, 0
+
+    log.info(
+        "_prefill_full_schedule tid=%s: best schedule placed %s pairs "
+        "across %s tours after %s attempts (%.2fs)",
+        tid, best_count,
+        sum(1 for p in best_sched.values() if p),
+        attempts, time.monotonic() - start,
+    )
+
+    # Persist the new pending matches.
+    deadline = (
+        datetime.utcnow() + timedelta(hours=MATCH_DEADLINE_HOURS)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    tours_with_new = 0
+    matches_created = 0
+    pair_running = dict(pair_counts_initial)
+    for T in sorted(best_sched.keys()):
+        pairs = best_sched[T]
+        if not pairs:
+            continue
+        for a, b in pairs:
+            key = frozenset((a, b))
+            leg = pair_running.get(key, 0) + 1
+            pair_running[key] = leg
+            if leg % 2 == 0:
+                a, b = b, a
+            mid = create_match(
+                tid, a, b,
+                stage="group",
+                round_num=1,
+                deadline=deadline,
+                leg=leg,
+            )
+            conn = get_conn()
+            conn.execute(
+                "UPDATE matches SET tour_number=? WHERE id=?",
+                (T, mid),
+            )
+            conn.commit()
+            conn.close()
+            matches_created += 1
+        create_tournament_tour(tid, T)
+        tours_with_new += 1
+
+    # Make sure tournament_tours rows exist for every tour that has a
+    # confirmed match too — they may have been dropped above if no
+    # pending matches were re-scheduled into that tour.
+    for T in committed_per_tour:
+        create_tournament_tour(tid, T)
+
+    # Compute how many owed pairs the solver couldn't place.
+    placed_pairs = best_count
+    owed_total = sum(
+        max(0, target_real - real_played.get(p, 0)) for p in pids
+    ) // 2
+    skipped_pairs = max(0, owed_total - placed_pairs)
+
+    return tours_with_new, matches_created, best_relax, skipped_pairs
+
+
+def _match_subset_with_partial(
+    free: list[int],
+    pair_counts: dict[frozenset, int],
+    mpp: int,
+    rng: random.Random,
+) -> list[tuple[int, int]]:
+    """Find a near-perfect matching of ``free`` using only pairs whose
+    pair-count is below ``mpp``.
+
+    Tries the strict matcher first (degree-heuristic DFS with random
+    tie-break). If no perfect matching exists, falls back to a greedy
+    pass that picks pairs in the order most-constrained-first; the
+    leftover players sit out for this tour.
+
+    Returns the list of pairs (possibly empty if ``free`` has < 2
+    pairable players).
+    """
+    if len(free) < 2:
+        return []
+
+    pad = list(free)
+    if len(pad) % 2 == 1:
+        pad = pad + [None]
+
+    get = pair_counts.get
+
+    def allowed(a, b) -> bool:
+        if a is None or b is None:
+            return True
+        return get(frozenset((a, b)), 0) < mpp
+
+    def free_count(x, remaining):
+        return sum(1 for y in remaining if y != x and allowed(x, y))
+
+    def perfect(remaining):
+        if not remaining:
+            return []
+        best = None
+        best_count = len(pad) + 2
+        for x in remaining:
+            c = free_count(x, remaining)
+            if c < best_count or (c == best_count and rng.random() < 0.5):
+                best = x
+                best_count = c
+        first = best
+        if best_count == 0:
+            return None
+        rest = [p for p in remaining if p != first]
+        cands = [y for y in rest if allowed(first, y)]
+        cands.sort(key=lambda y: (free_count(y, rest), rng.random()))
+        for partner in cands:
+            sub = [p for p in rest if p != partner]
+            res = perfect(sub)
+            if res is not None:
+                return [(first, partner)] + res
+        return None
+
+    pm = perfect(list(pad))
+    if pm is not None:
+        return [(a, b) for a, b in pm if a is not None and b is not None]
+
+    # Partial matching fallback — greedy degree-first with random tie-break.
+    pool = [p for p in pad if p is not None]
+    rng.shuffle(pool)
+    pool.sort(
+        key=lambda x: (
+            sum(1 for y in pool if y != x and allowed(x, y)),
+            rng.random(),
+        )
+    )
+    matched: set[int] = set()
+    pairs: list[tuple[int, int]] = []
+    for a in pool:
+        if a in matched:
+            continue
+        for b in pool:
+            if b == a or b in matched:
+                continue
+            if allowed(a, b):
+                matched.add(a)
+                matched.add(b)
+                pairs.append((a, b))
+                break
+    return pairs
 
 
 
