@@ -943,25 +943,12 @@ async def _finalize_match_after_admin(
                 if cur_tour > 0 and db.is_tour_complete(int(tid), cur_tour):
                     db.set_tour_status(int(tid), cur_tour, "completed")
                     if int(t_obj.get("auto_next_tour") or 0):
-                        # Auto-advance
+                        # Auto-advance silently — we don't blast the
+                        # bound chat with a "tour X started" message
+                        # every time a tour rolls over.
                         try:
                             from tournament import generate_next_tour
-                            mids = generate_next_tour(int(tid))
-                            if mids:
-                                t_after = get_tournament(int(tid))
-                                new_tour = int(t_after.get("current_tour") or 0)
-                                bound = t_after.get("chat_id")
-                                if bound:
-                                    try:
-                                        await ctx.bot.send_message(
-                                            int(bound),
-                                            f"⚡ <b>Тур {cur_tour} завершён! "
-                                            f"Тур {new_tour} начался.</b>\n"
-                                            f"Создано {len(mids)} матчей.",
-                                            parse_mode="HTML",
-                                        )
-                                    except Exception:
-                                        pass
+                            generate_next_tour(int(tid))
                         except Exception:
                             log.exception("auto_next_tour failed")
                     else:
