@@ -1824,22 +1824,34 @@ def generate_next_tour(tid: int) -> list[int]:
 
 
 def regenerate_unplayed_tours(tid: int) -> dict:
-    """Wipe every not-yet-played tour so the league can pick up cleanly.
+    """Wipe every not-yet-played tour and dedupe orphan match rows so
+    the league can pick up cleanly.
 
-    Tours that already have at least one **confirmed** result are kept
-    exactly as they are (you can't un-play a game). Every tour after the
-    last played one is deleted and ``current_tour`` is reset back to that
-    point. The next press of the "Создать матчи следующего тура" button
-    (or ``/next_tour``) will then build a fresh tour with the repeat-free
-    generator, and so on for each subsequent tour.
+    Two passes happen here:
+
+    1. **Dedupe.** Old buggy code, late-add-player flows, or partial
+       runs of earlier regen attempts can leave multiple rows in
+       ``matches`` for the same pair of players (e.g. one ``confirmed``
+       and several ``pending``). These duplicates inflate the
+       pair-counts the round-robin matcher reads and force it into the
+       relax fallback, which then schedules even more duplicates. Per
+       pair we keep all confirmed rows + at most one pending row
+       (smallest id wins); everything else is deleted.
+    2. **Trim tail.** Tours that already have at least one confirmed
+       result are kept; matches and tour rows beyond ``last_played``
+       are dropped, and ``current_tour`` is reset to ``last_played``.
+
+    The next press of the "Создать матчи следующего тура" button will
+    then build a fresh repeat-free tour over a clean schedule.
 
     Returns a summary dict::
 
         {
-            "kept_through": <last tour with a confirmed result>,
-            "removed_tours": <int>,
-            "removed_matches": <int>,
-            "next_tour": <int>,        # number of the tour the next click will create
+            "kept_through":    <last tour with a confirmed result>,
+            "removed_tours":   <int>,
+            "removed_matches": <int>,  # from the tail
+            "removed_dupes":   <int>,  # extra pending rows for already-scheduled pairs
+            "next_tour":       <int>,  # number of the tour the next click will create
         }
     """
     t = get_tournament(tid)
@@ -1869,7 +1881,65 @@ def regenerate_unplayed_tours(tid: int) -> dict:
         ).fetchone()
     )
 
-    # Count what we're about to drop (purely for the report).
+    # ── Pass 1: dedupe ───────────────────────────────────────────────
+    # Walk every group-stage match in this tournament, group by the
+    # unordered pair of players, and figure out which rows are
+    # redundant. Confirmed rows are sacred; pending rows for a pair
+    # that already has a confirmed match are deleted; if a pair has
+    # only pending rows we keep the one with the smallest id and drop
+    # the rest.
+    rows = conn.execute(
+        "SELECT id, player1_id, player2_id, status "
+        "FROM matches WHERE tournament_id=? AND stage='group' "
+        "ORDER BY id",
+        (tid,),
+    ).fetchall()
+
+    by_pair: dict[frozenset, dict] = {}
+    for r in rows:
+        try:
+            mid = r["id"]
+            p1 = r["player1_id"]
+            p2 = r["player2_id"]
+            status = r["status"]
+        except (KeyError, TypeError, IndexError):
+            mid, p1, p2, status = r[0], r[1], r[2], r[3]
+        if p1 is None or p2 is None or p1 == p2:
+            continue
+        key = frozenset((p1, p2))
+        bucket = by_pair.setdefault(key, {"confirmed": [], "pending": []})
+        if status == "confirmed":
+            bucket["confirmed"].append(mid)
+        else:
+            bucket["pending"].append(mid)
+
+    dupe_ids: list[int] = []
+    for bucket in by_pair.values():
+        if bucket["confirmed"]:
+            # Confirmed exists — drop every pending row for this pair.
+            dupe_ids.extend(bucket["pending"])
+        elif len(bucket["pending"]) > 1:
+            # Multiple pending — keep first (smallest id), drop rest.
+            dupe_ids.extend(bucket["pending"][1:])
+
+    removed_dupes = 0
+    if dupe_ids:
+        # Delete in chunks so very long IN clauses don't blow up.
+        for i in range(0, len(dupe_ids), 500):
+            chunk = dupe_ids[i : i + 500]
+            placeholders = ",".join(["?"] * len(chunk))
+            conn.execute(
+                f"DELETE FROM matches WHERE id IN ({placeholders})",
+                chunk,
+            )
+        removed_dupes = len(dupe_ids)
+        log.info(
+            "regenerate_unplayed_tours tid=%s: removed %s duplicate "
+            "match rows across %s pairs",
+            tid, removed_dupes, len(by_pair),
+        )
+
+    # ── Pass 2: count + drop the unplayed tail ───────────────────────
     removed_matches = _scalar(
         conn.execute(
             "SELECT COUNT(*) FROM matches "
@@ -1885,7 +1955,6 @@ def regenerate_unplayed_tours(tid: int) -> dict:
         ).fetchone()
     )
 
-    # Drop the unplayed tail.
     conn.execute(
         "DELETE FROM matches WHERE tournament_id=? AND tour_number > ?",
         (tid, last_played),
@@ -1904,6 +1973,7 @@ def regenerate_unplayed_tours(tid: int) -> dict:
         "kept_through": last_played,
         "removed_tours": removed_tours,
         "removed_matches": removed_matches,
+        "removed_dupes": removed_dupes,
         "next_tour": last_played + 1,
     }
 

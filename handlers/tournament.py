@@ -8158,7 +8158,8 @@ async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         update,
         "♻️ <b>Несыгранные туры очищены</b>\n"
         f"Сохранено сыгранных туров: <b>{res['kept_through']}</b>\n"
-        f"Удалено: {res['removed_tours']} туров / {res['removed_matches']} матчей\n\n"
+        f"Удалено: {res['removed_tours']} туров / {res['removed_matches']} матчей\n"
+        f"Удалено дубликатов матчей: <b>{res.get('removed_dupes', 0)}</b>\n\n"
         f"Жми «⚡ Создать матчи следующего тура», чтобы построить тур "
         f"<b>{res['next_tour']}</b> уже без повторов.",
     )
