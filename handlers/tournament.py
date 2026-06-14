@@ -8139,31 +8139,30 @@ async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pre_matches = res.get("pre_filled_matches", 0)
     relax = res.get("relax_used", 0)
     skipped = res.get("skipped_pairs", 0)
-    if pre_tours:
+    if pre_matches:
         if relax:
             schedule_line = (
-                f"📋 Расписание построено: <b>{pre_tours}</b> туров / "
-                f"{pre_matches} матчей (точная 1-факторизация не нашлась "
+                f"📋 Расписание дозаполнено: <b>{pre_matches}</b> матчей "
+                f"в {pre_tours} тур(ах) (точная 1-факторизация не нашлась "
                 f"за бюджет, последние пары могут повторяться)"
             )
         elif skipped:
             schedule_line = (
-                f"📋 Расписание построено: <b>{pre_tours}</b> туров / "
-                f"{pre_matches} матчей, без повторов ✨\n"
-                f"⚠ {skipped} пар(ы) не сыграют в этой части турнира — "
-                f"граф остатка нерегулярен из-за матчей с гостевыми игроками "
-                f"в ранних турах."
+                f"📋 Расписание дозаполнено: <b>{pre_matches}</b> матчей "
+                f"в {pre_tours} тур(ах), без повторов ✨\n"
+                f"⚠ {skipped} пар(ы) не получится впихнуть — граф остатка "
+                f"нерегулярен из-за матчей с гостевыми игроками в ранних турах."
             )
         else:
             schedule_line = (
-                f"📋 Расписание построено: <b>{pre_tours}</b> туров / "
-                f"{pre_matches} матчей, без повторов ✨"
+                f"📋 Расписание дозаполнено: <b>{pre_matches}</b> матчей "
+                f"в {pre_tours} тур(ах), без повторов ✨"
             )
         tail = (
             f"{schedule_line}\n\n"
-            f"Туры {res['next_tour']}–{res['next_tour'] + pre_tours - 1} уже в БД, "
-            f"можно играть. Кнопка «Создать матчи следующего тура» "
-            f"тебе больше не нужна."
+            f"Confirmed-матчи остались на своих местах, новые pending "
+            f"распределены по свободным слотам всех туров. Можно играть "
+            f"в любом порядке."
         )
     else:
         tail = (
@@ -8175,9 +8174,9 @@ async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         update,
         "♻️ <b>Несыгранные туры очищены</b>\n"
         f"Сохранено сыгранных туров: <b>{res['kept_through']}</b>\n"
-        f"Удалено: {res['removed_tours']} туров / {res['removed_matches']} матчей\n"
-        f"Удалено дубликатов матчей: <b>{res.get('removed_dupes', 0)}</b>\n"
-        f"Удалено матчей-сирот без тура: <b>{res.get('removed_orphans', 0)}</b>\n\n"
+        f"Удалено пустых туров: {res['removed_tours']} / "
+        f"pending-матчей: {res['removed_matches']}\n"
+        f"Удалено дубликатов матчей: <b>{res.get('removed_dupes', 0)}</b>\n\n"
         f"{tail}",
     )
 
