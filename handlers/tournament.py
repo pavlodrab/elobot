@@ -8107,14 +8107,19 @@ async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_post_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """``/post_tours <ID> <range> [deadline...]`` — publish a tour-set
-    announcement to the chat bound to the tournament (admin only).
+    """``/post_tours <ID> <range> [deadline...]`` — DM the tour-set
+    announcement to the admin who issued the command (admin only).
 
-    What it sends to the bound chat:
+    Posts ONLY to the caller's private chat, never to the bound
+    channel. Use it as a "preview / personal copy" workflow: the admin
+    can review the rendered tours + roster in their DMs and then
+    forward / copy-paste the post into whatever channel they want.
 
-      1. A media group: one PNG per tour in ``range`` (same renderer as
-         ``/tours``). For ranges > 10 the album is auto-chunked.
-      2. A text message with:
+    Output:
+
+      1. A media group: one PNG per tour in ``range`` (same renderer
+         as ``/tours``). Auto-chunks for ranges > 10.
+      2. A message with:
 
          ::
 
@@ -8123,23 +8128,22 @@ async def cmd_post_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
            определяем рандомом (монетка, кубик и т.д.)
            ДД до <deadline>     ← omitted if no deadline given
 
+           [expandable blockquote]
            🇦🇷Argentina - @agent_47_07
            🇦🇹Austria - @freshl7
            …
+           [/blockquote]
 
-         The roster line uses ``team_tag`` from ``tournament_players``
-         so the country label and flag come from the per-tournament
-         setup, not a hard-coded mapping.
+         The roster is wrapped in a Telegram ``<blockquote expandable>``
+         so the post stays compact in chat lists — clients render it
+         collapsed with a "развернуть" affordance. ``team_tag`` from
+         ``tournament_players`` provides the country label / flag.
 
-    The bot remembers the ``(chat_id, message_id)`` of the text message
-    in the caller's ``user_data`` so ``/edit_announce`` can rewrite it
-    later without copy-pasting links.
-
-    Examples::
-
-        /post_tours 14 9-16
-        /post_tours 14 9-16 18.06 22:00
-        /post_tours 14 9                  ← single tour
+    If the full text fits inside Telegram's 1024-char caption limit,
+    everything is delivered as one message: the album with the body
+    set as the leading photo's caption. Otherwise the album goes first
+    and the body follows as a separate text message (fallback for very
+    long rosters).
     """
     if not is_admin(update.effective_user.id):
         await send(update, "❌ Только админ.")
@@ -8161,14 +8165,8 @@ async def cmd_post_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    target_chat_id = t.get("chat_id")
-    if not target_chat_id:
-        await send(
-            update,
-            f"❌ К турниру не привязан канал. Привяжи через "
-            f"<code>/bind_chat {t['id']}</code> в нужном чате/канале.",
-        )
-        return
+    # Target = the admin's private chat with the bot. No channel posting.
+    target_chat_id = update.effective_user.id
 
     # Strip the consumed tournament-id arg, then expect the next plain
     # positional to be the tour range. Anything after the range is the
@@ -8216,7 +8214,6 @@ async def cmd_post_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows = get_tournament_players(t["id"])
     roster_lines: list[str] = []
     seen: set = set()
-    # Sort by team_tag so the country list reads alphabetically.
     rows_sorted = sorted(
         rows,
         key=lambda r: (
@@ -8234,83 +8231,118 @@ async def cmd_post_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         username = (r.get("username") or "").strip()
         team_tag = (r.get("team_tag") or "").strip()
         if not username:
-            # Fallback: skip ghost / synthetic rows without a real handle.
             continue
         if team_tag:
-            line = f"{team_tag} - @{username}"
+            line = f"{html.escape(team_tag)} - @{html.escape(username)}"
         else:
-            line = f"@{username}"
+            line = f"@{html.escape(username)}"
         roster_lines.append(line)
 
     # ── Compose the text body ────────────────────────────────────────
-    body_lines = [
+    header_lines = [
         f"<b>ТУРЫ {range_label}</b>",
         "",
         "Играем по 1 матчу с соперником в туре. Домашний хост "
         "определяем рандомом (монетка, кубик и т.д.)",
     ]
     if deadline_str:
-        body_lines.append("")
-        body_lines.append(f"<b>ДД до {html.escape(deadline_str)}</b>")
-    body_lines.append("")
-    body_lines.extend(roster_lines)
-    text_body = "\n".join(body_lines)
+        header_lines.append("")
+        header_lines.append(f"<b>ДД до {html.escape(deadline_str)}</b>")
+    header_block = "\n".join(header_lines)
+    roster_block = (
+        "<blockquote expandable>"
+        + "\n".join(roster_lines)
+        + "</blockquote>"
+    )
+    text_body = f"{header_block}\n\n{roster_block}"
 
-    await send(update, "⏳ Рендерю туры и публикую в канал…")
+    # Telegram caps photo captions at 1024 chars (entities). When the
+    # body fits, the album carries the caption on its first photo so
+    # the admin sees one post. Otherwise the album sends without a
+    # caption and the body follows as a separate text message.
+    TG_CAPTION_LIMIT = 1024
+    fits_in_caption = len(text_body) <= TG_CAPTION_LIMIT
+
+    await send(update, "⏳ Рендерю туры и шлю в ЛС…")
 
     try:
         from tour_image import render_tour_png
         from telegram import InputMediaPhoto
 
-        # Render all tours upfront (sequential — PIL holds the GIL).
         per_tour_bytes: list[tuple[int, bytes]] = []
         for tn in tour_numbers:
             png = await asyncio.to_thread(render_tour_png, t["id"], [tn])
             per_tour_bytes.append((tn, png))
 
-        # ── Send the media group(s) ──────────────────────────────────
         TG_ALBUM_LIMIT = 10
-        media_msgs = []
-        chunk: list[InputMediaPhoto] = []
-        for tn, png in per_tour_bytes:
+        # Build chunks of ≤10 photos. The very first photo of the very
+        # first chunk gets the caption (single-message case); when the
+        # caption can't fit the body we send it later as plain text.
+        chunks: list[list[InputMediaPhoto]] = []
+        cur: list[InputMediaPhoto] = []
+        for idx, (tn, png) in enumerate(per_tour_bytes):
             bio = io.BytesIO(png)
             bio.name = f"tour_{t['id']}_{tn}.png"
-            chunk.append(InputMediaPhoto(media=bio))
-            if len(chunk) == TG_ALBUM_LIMIT:
-                media_msgs.extend(
-                    await ctx.bot.send_media_group(
-                        chat_id=target_chat_id, media=chunk,
-                        write_timeout=180,
-                    )
-                )
-                chunk = []
-        if chunk:
-            media_msgs.extend(
-                await ctx.bot.send_media_group(
-                    chat_id=target_chat_id, media=chunk,
-                    write_timeout=180,
+            caption = None
+            parse_mode = None
+            if fits_in_caption and idx == 0:
+                caption = text_body
+                parse_mode = "HTML"
+            cur.append(
+                InputMediaPhoto(
+                    media=bio,
+                    caption=caption,
+                    parse_mode=parse_mode,
                 )
             )
+            if len(cur) == TG_ALBUM_LIMIT:
+                chunks.append(cur)
+                cur = []
+        if cur:
+            chunks.append(cur)
 
-        # ── Send the text body separately so /edit_announce has a
-        #    target message that supports editMessageText.
-        sent = await ctx.bot.send_message(
-            chat_id=target_chat_id,
-            text=text_body,
-            parse_mode="HTML",
-        )
+        last_msgs = []
+        for chunk in chunks:
+            sent_chunk = await ctx.bot.send_media_group(
+                chat_id=target_chat_id, media=chunk, write_timeout=180,
+            )
+            last_msgs.extend(sent_chunk)
+
+        # If the body didn't fit into the caption, send it as a
+        # follow-up text message the admin can edit later.
+        body_msg = None
+        if not fits_in_caption:
+            body_msg = await ctx.bot.send_message(
+                chat_id=target_chat_id,
+                text=text_body,
+                parse_mode="HTML",
+            )
+
+        # The "edit target" is the message that owns the body. Whichever
+        # of (caption on first photo) / (separate text message) carries
+        # the body is what /edit_announce rewrites.
+        if fits_in_caption:
+            edit_target = last_msgs[0] if last_msgs else None
+            edit_kind = "caption"
+        else:
+            edit_target = body_msg
+            edit_kind = "text"
+
     except Exception as e:
         log.exception("cmd_post_tours failed")
-        await send(update, f"❌ Не получилось опубликовать: {e}")
+        await send(update, f"❌ Не получилось отправить: {e}")
         return
 
-    # Remember the post so /edit_announce can rewrite it without
-    # the admin having to copy a link or message id.
+    if edit_target is None:
+        await send(update, "❌ Сообщение не отправилось.")
+        return
+
     ctx.user_data["last_announce"] = {
         "chat_id": int(target_chat_id),
-        "message_id": int(sent.message_id),
+        "message_id": int(edit_target.message_id),
         "tid": int(t["id"]),
         "range_label": range_label,
+        "kind": edit_kind,
     }
 
     log_tournament_action(
@@ -8318,23 +8350,15 @@ async def cmd_post_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         actor_telegram_id=update.effective_user.id,
         actor_username=update.effective_user.username,
         action="post_tours",
-        details=f"range={range_label} chat={target_chat_id} "
-                f"msg={sent.message_id}",
+        details=f"range={range_label} dm_to={target_chat_id} "
+                f"msg={edit_target.message_id} kind={edit_kind}",
     )
 
-    chat_link = (
-        f"https://t.me/c/{str(target_chat_id).replace('-100', '', 1)}"
-        f"/{sent.message_id}"
-    )
     await send(
         update,
-        f"✅ Опубликовано: туры {range_label} → "
-        f"chat={target_chat_id}, msg={sent.message_id}\n"
-        f"<a href=\"{chat_link}\">Открыть пост</a>\n\n"
-        f"Чтобы переписать текст: ответь команде "
-        f"<code>/edit_announce</code> с новым текстом, или явно "
-        f"<code>/edit_announce {target_chat_id}:{sent.message_id} "
-        f"новый текст</code>",
+        f"✅ Готово: туры {range_label} ушли тебе в ЛС "
+        f"({'caption на первом фото' if fits_in_caption else 'отдельный текст под альбомом'}).\n\n"
+        f"Чтобы переписать текст: <code>/edit_announce новый текст</code>",
     )
 
 
@@ -8400,25 +8424,54 @@ async def cmd_edit_announce(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send(update, "❌ Нужен новый текст.")
         return
 
-    try:
-        await ctx.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg_id,
-            text=body,
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        log.exception("cmd_edit_announce failed")
-        await send(update, f"❌ Не получилось отредактировать: {e}")
-        return
+    # If we have a saved last_announce, prefer its kind hint so we know
+    # whether the body is a photo caption or a plain text message.
+    edit_kind = "text"
+    last = (ctx.user_data or {}).get("last_announce") or {}
+    if (last.get("chat_id") == chat_id
+            and last.get("message_id") == msg_id):
+        edit_kind = last.get("kind") or "text"
 
-    chat_link = (
-        f"https://t.me/c/{str(chat_id).replace('-100', '', 1)}/{msg_id}"
-    )
-    await send(
-        update,
-        f"✏️ Сообщение обновлено. <a href=\"{chat_link}\">Открыть</a>",
-    )
+    try:
+        if edit_kind == "caption":
+            await ctx.bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=msg_id,
+                caption=body,
+                parse_mode="HTML",
+            )
+        else:
+            await ctx.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=body,
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        # If the kind hint was wrong (e.g. the user is editing an old
+        # explicit-target post made by another flow) try the other
+        # method before giving up.
+        try:
+            if edit_kind == "caption":
+                await ctx.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=body,
+                    parse_mode="HTML",
+                )
+            else:
+                await ctx.bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    caption=body,
+                    parse_mode="HTML",
+                )
+        except Exception:
+            log.exception("cmd_edit_announce failed")
+            await send(update, f"❌ Не получилось отредактировать: {e}")
+            return
+
+    await send(update, "✏️ Сообщение обновлено.")
 
 
 async def cmd_repair_tour_numbers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
