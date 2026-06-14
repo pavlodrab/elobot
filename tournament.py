@@ -1705,6 +1705,155 @@ def _build_repeat_free_tour(
     return None, cap
 
 
+def _solve_full_schedule(
+    pids: list[int],
+    num_tours: int,
+    pair_counts: dict[frozenset, int],
+    mpp: int = 1,
+    max_seconds: float = 12.0,
+) -> list[list[tuple[int, int]]] | None:
+    """Find ``num_tours`` perfect matchings on ``pids`` such that no pair
+    ever exceeds ``mpp`` meetings across all matchings combined with the
+    history in ``pair_counts``.
+
+    Cross-tour backtracking with strong pruning:
+
+    - **Per-tour matcher** uses constrained-first heuristic to keep the
+      branching low while exploring matchings.
+    - **Cross-tour solver** commits a tour, recurses; on failure tries
+      another matching for that tour. The matcher is reseeded with random
+      shuffles between attempts so we don't keep getting the same one.
+    - **Feasibility prune.** Before recursing, every player must still
+      have at least ``remaining_tours`` legal partners — otherwise the
+      subtree is infeasible. This is what makes the search converge in
+      practice on graphs with up to ~36 vertices.
+    - **Time budget**: returns ``None`` if no solution found within
+      ``max_seconds``. Caller falls back to greedy + relax.
+    """
+    import time
+
+    start = time.monotonic()
+    pc = dict(pair_counts)
+    real_pids = list(pids)
+    has_bye = (len(real_pids) % 2 == 1)
+    players_template: list = real_pids + ([None] if has_bye else [])
+
+    def allowed(a, b) -> bool:
+        if a is None or b is None:
+            return True
+        return pc.get(frozenset((a, b)), 0) < mpp
+
+    def feasibility(remaining_tours: int) -> bool:
+        # Every real player must still have at least `remaining_tours`
+        # legal partners; otherwise the subtree dead-ends downstream.
+        # Cheap O(n^2) check, dominated by the matcher anyway.
+        for p in real_pids:
+            free = 0
+            for q in real_pids:
+                if q == p:
+                    continue
+                if pc.get(frozenset((p, q)), 0) < mpp:
+                    free += 1
+                    if free >= remaining_tours:
+                        break
+            if free < remaining_tours:
+                return False
+        return True
+
+    def find_one_matching(seed_order: list) -> list[tuple] | None:
+        """Single perfect matching attempt with the given vertex order."""
+        def match(remaining: list):
+            if not remaining:
+                return []
+            # Pick the most constrained player first.
+            first = min(
+                remaining,
+                key=lambda x: sum(
+                    1 for y in remaining if y != x and allowed(x, y)
+                ),
+            )
+            rest = [p for p in remaining if p != first]
+            cands = [y for y in rest if allowed(first, y)]
+            cands.sort(
+                key=lambda y: sum(
+                    1 for z in rest if z != y and allowed(y, z)
+                )
+            )
+            for partner in cands:
+                sub = [p for p in rest if p != partner]
+                res = match(sub)
+                if res is not None:
+                    return [(first, partner)] + res
+            return None
+
+        return match(seed_order)
+
+    def gen_distinct_matchings(seed_attempts: int = 12):
+        """Yield distinct perfect matchings for the current ``pc`` state.
+        Uses random shuffles to explore alternatives.
+        """
+        seen: set = set()
+        rng = random.Random(0xC0FFEE)
+        # First the deterministic order for stability.
+        orders = [list(players_template)]
+        for _ in range(seed_attempts):
+            sh = list(players_template)
+            rng.shuffle(sh)
+            orders.append(sh)
+        for order in orders:
+            m = find_one_matching(order)
+            if m is None:
+                continue
+            key = frozenset(
+                frozenset((a, b)) for (a, b) in m
+                if a is not None and b is not None
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            yield m
+
+    schedule: list[list[tuple[int, int]]] = []
+
+    def solve(remaining: int) -> bool | None:
+        if time.monotonic() - start > max_seconds:
+            return None  # timed out, propagate
+        if remaining == 0:
+            return True
+        if not feasibility(remaining):
+            return False
+        for matching in gen_distinct_matchings():
+            applied: list = []
+            real_pairs: list[tuple[int, int]] = []
+            for (a, b) in matching:
+                if a is None or b is None:
+                    continue
+                key = frozenset((a, b))
+                pc[key] = pc.get(key, 0) + 1
+                applied.append(key)
+                real_pairs.append((a, b))
+            schedule.append(real_pairs)
+
+            res = solve(remaining - 1)
+            if res is True:
+                return True
+
+            schedule.pop()
+            for key in applied:
+                pc[key] -= 1
+                if pc[key] == 0:
+                    del pc[key]
+
+            if res is None:
+                return None  # propagate timeout
+        return False
+
+    outcome = solve(num_tours)
+    if outcome is True:
+        return schedule
+    return None
+
+
 def generate_next_tour(tid: int) -> list[int]:
     """
     Create matches for the next tour of a league-format tournament.
@@ -1995,6 +2144,30 @@ def regenerate_unplayed_tours(tid: int) -> dict:
     # Reset the pointer so the next button press starts at last_played + 1.
     set_current_tour(tid, last_played)
 
+    # ── Pass 3: globally pre-fill the remaining schedule ───────────────
+    # The greedy per-tour matcher tends to paint itself into a corner on
+    # the last 1-2 tours when the residual pair graph is tight (typical
+    # on a 32-player league where some early tours had ghosts/sit-outs).
+    # Instead, run the cross-tour backtracker once and lock in every
+    # remaining tour at once. Falls back to leaving the rest for the
+    # button-driven greedy generator if the global solver can't prove
+    # feasibility within its time budget.
+    pre_filled_tours = 0
+    pre_filled_matches = 0
+    relax_used = 0
+    t_now = get_tournament(tid)
+    if t_now:
+        try:
+            pre_filled_tours, pre_filled_matches, relax_used = (
+                _prefill_remaining_tours(tid, t_now, last_played)
+            )
+        except Exception:
+            log.exception(
+                "regenerate_unplayed_tours tid=%s: pre-fill crashed, "
+                "falling back to button-driven generator",
+                tid,
+            )
+
     return {
         "kept_through": last_played,
         "removed_tours": removed_tours,
@@ -2002,7 +2175,109 @@ def regenerate_unplayed_tours(tid: int) -> dict:
         "removed_dupes": removed_dupes,
         "removed_orphans": removed_orphans,
         "next_tour": last_played + 1,
+        "pre_filled_tours": pre_filled_tours,
+        "pre_filled_matches": pre_filled_matches,
+        "relax_used": relax_used,
     }
+
+
+def _prefill_remaining_tours(
+    tid: int, t: dict, last_played: int
+) -> tuple[int, int, int]:
+    """After /regen_tours has cleaned the slate, build every remaining
+    tour in one shot using the cross-tour solver.
+
+    Returns ``(tours_created, matches_created, relax_used)`` where
+    ``relax_used`` is 0 if the schedule is fully repeat-free and 1 if
+    the solver had to fall back to the per-tour relax matcher because
+    no clean 1-factorization fits the residual graph.
+    """
+    players = get_tournament_players(tid)
+    pids = sorted(
+        [p["player_id"] for p in players if not p.get("eliminated")]
+    )
+    if len(pids) < 2:
+        return 0, 0, 0
+
+    mpp = max(1, int(t.get("group_matches_per_pair") or 1))
+    total_tours = int(t.get("total_tours") or 0)
+    n = len(pids)
+    max_tours = (n - 1 if n % 2 == 0 else n) * mpp
+    if total_tours == 0 or total_tours > max_tours:
+        total_tours = max_tours
+        update_tournament(tid, total_tours=total_tours)
+
+    remaining = total_tours - last_played
+    if remaining <= 0:
+        return 0, 0, 0
+
+    pair_counts = _played_pair_counts(tid)
+
+    schedule: list[list[tuple[int, int]]] | None = _solve_full_schedule(
+        pids, remaining, pair_counts, mpp=mpp, max_seconds=12.0,
+    )
+    relax_used = 0
+
+    if schedule is None:
+        # Solver couldn't produce a fully repeat-free schedule within
+        # its time budget. Fall back to greedy + relax per tour so the
+        # league still has a complete schedule, even if a few pairs
+        # repeat at the very end.
+        log.warning(
+            "_prefill_remaining_tours tid=%s: global solver gave up, "
+            "falling back to greedy+relax for %s tours",
+            tid, remaining,
+        )
+        relax_used = 1
+        schedule = []
+        running = dict(pair_counts)
+        for _ in range(remaining):
+            tour_pairs, _cap = _build_repeat_free_tour(pids, running, mpp)
+            if not tour_pairs:
+                break
+            schedule.append(tour_pairs)
+            for a, b in tour_pairs:
+                key = frozenset((a, b))
+                running[key] = running.get(key, 0) + 1
+
+    if not schedule:
+        return 0, 0, relax_used
+
+    # Persist
+    deadline = (
+        datetime.utcnow() + timedelta(hours=MATCH_DEADLINE_HOURS)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    tours_created = 0
+    matches_created = 0
+    running = dict(pair_counts)
+    for offset, pairs in enumerate(schedule, start=1):
+        tour_no = last_played + offset
+        for a, b in pairs:
+            key = frozenset((a, b))
+            leg = running.get(key, 0) + 1
+            running[key] = leg
+            if leg % 2 == 0:
+                a, b = b, a
+            mid = create_match(
+                tid, a, b,
+                stage="group",
+                round_num=1,
+                deadline=deadline,
+                leg=leg,
+            )
+            conn = get_conn()
+            conn.execute(
+                "UPDATE matches SET tour_number=? WHERE id=?",
+                (tour_no, mid),
+            )
+            conn.commit()
+            conn.close()
+            matches_created += 1
+        create_tournament_tour(tid, tour_no)
+        tours_created += 1
+    set_current_tour(tid, last_played + tours_created)
+    return tours_created, matches_created, relax_used
 
 
 
