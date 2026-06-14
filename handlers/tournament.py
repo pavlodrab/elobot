@@ -8114,10 +8114,10 @@ async def cmd_next_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """``/regen_tours [ID]`` — rebuild all not-yet-played tours without
+    """``/regen_tours [ID]`` — wipe every not-yet-played tour so the next
 
-    repeated fixtures (admin only). Tours that already have a confirmed
-    result are kept; everything after them is regenerated cleanly.
+    button press can build a fresh, repeat-free tour (admin only). Tours
+    that already have a confirmed result are kept untouched.
     """
     args = list(ctx.args or [])
     t, err = _resolve_tournament_from_args(update, ctx, args=args)
@@ -8151,6 +8151,90 @@ async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Жми «⚡ Создать матчи следующего тура», чтобы построить тур "
         f"<b>{res['next_tour']}</b> уже без повторов.",
     )
+
+
+async def cmd_tour_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/tour_diag [ID]`` — dump the tour-generation state for debugging
+
+    (admin only). Prints player count, total/current tours, how many
+    matches and pair-instances are on record, and the most-constrained
+    players (those with the fewest free opponents left).
+    """
+    args = list(ctx.args or [])
+    t, err = _resolve_tournament_from_args(update, ctx, args=args)
+    if t is None:
+        await send(update, err or "❌ Не нашёл турнир.")
+        return
+    if not _can_manage_tournament(update.effective_user.id, t):
+        await send(update, "❌ Только админ.")
+        return
+
+    tid = t["id"]
+    from tournament import _played_pair_counts
+    from database import (
+        get_tournament_players, get_next_tour_number, get_conn,
+    )
+
+    players = get_tournament_players(tid)
+    pids = sorted([p["player_id"] for p in players if not p.get("eliminated")])
+    elim = sum(1 for p in players if p.get("eliminated"))
+    n = len(pids)
+    mpp = max(1, int(t.get("group_matches_per_pair") or 1))
+    total_tours = int(t.get("total_tours") or 0)
+    cur = int(t.get("current_tour") or 0)
+    max_tours = (n - 1 if n % 2 == 0 else n) * mpp
+    next_tour = get_next_tour_number(tid)
+
+    pair_counts = _played_pair_counts(tid)
+    pair_instances = sum(pair_counts.values())
+    over_quota = sum(1 for v in pair_counts.values() if v >= mpp)
+
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT tour_number, COUNT(*) AS cnt FROM matches "
+        "WHERE tournament_id=? AND stage='group' "
+        "GROUP BY tour_number ORDER BY tour_number",
+        (tid,),
+    ).fetchall()
+    conn.close()
+    per_tour = ", ".join(
+        f"{(r['tour_number'] if 'tour_number' in dict(r) else r[0])}:"
+        f"{(r['cnt'] if 'cnt' in dict(r) else r[1])}"
+        for r in rows
+    ) or "—"
+
+    # Per-player free partners (only useful when matcher fails)
+    free = {
+        p: sum(
+            1 for q in pids
+            if q != p and pair_counts.get(frozenset((p, q)), 0) < mpp
+        )
+        for p in pids
+    }
+    if free:
+        min_free = min(free.values())
+        zero_free = [p for p, v in free.items() if v == 0]
+        worst = sorted(free.items(), key=lambda kv: kv[1])[:5]
+    else:
+        min_free, zero_free, worst = None, [], []
+
+    lines = [
+        f"🔍 <b>Диагностика туров: {html.escape(t['name'])} (ID {tid})</b>",
+        f"Активных игроков: <b>{n}</b> (выбыло: {elim})",
+        f"mpp = {mpp}, max_tours = {max_tours}",
+        f"Всего туров (DB): <b>{total_tours}</b>, текущий: <b>{cur}</b>, "
+        f"следующий будет: <b>{next_tour}</b>",
+        f"Уникальных пар сыграно: <b>{len(pair_counts)}</b> "
+        f"(всего матчей: {pair_instances}, пар на лимите/выше: {over_quota})",
+        f"Матчей по турам: {per_tour}",
+        f"min свободных партнёров у игрока: <b>{min_free}</b>",
+    ]
+    if zero_free:
+        lines.append(f"❗ Игроки без свободных пар: {len(zero_free)} (id={zero_free[:10]})")
+    if worst:
+        lines.append("Самые зажатые: " + ", ".join(f"id={p}({v})" for p, v in worst))
+
+    await send(update, "\n".join(lines))
 
 
 def _parse_tour_range(range_str: str | None, t: dict) -> list[int]:

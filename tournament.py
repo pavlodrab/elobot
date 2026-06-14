@@ -2,6 +2,7 @@
 Tournament management: group draws, standings calculation, playoff bracket.
 """
 import json
+import logging
 import random
 from datetime import datetime, timedelta
 from database import (
@@ -21,6 +22,8 @@ from database import (
     set_current_tour,
     get_tour_matches,
 )
+
+log = logging.getLogger(__name__)
 
 GROUP_LETTERS = "ABCDEFGH"
 # Playoff round names from largest to smallest. ``r512`` = 1/256 финала
@@ -1614,44 +1617,35 @@ def _played_pair_counts(tid: int) -> dict[frozenset, int]:
     return counts
 
 
-def _build_repeat_free_tour(
+def _try_match_pairs(
     pids: list[int],
     pair_counts: dict[frozenset, int],
-    mpp: int,
+    cap: int,
 ) -> list[tuple[int, int]] | None:
-    """Pair up ``pids`` for a single tour so that:
+    """One matching attempt with each pair limited to ``cap`` total meetings.
 
-    - every player appears at most once (one sits out if the count is odd),
-    - no pair is used more than ``mpp`` times across the whole tournament
-      (``pair_counts`` carries the already-played tally).
-
-    Returns the list of ``(a, b)`` pairs, or ``None`` when no full pairing
-    exists (i.e. the round-robin is exhausted — everyone has already played
-    everyone the allowed number of times).
+    Returns the list of ``(a, b)`` pairs (one per slot, the bye drops out
+    if the count was odd), or ``None`` if no perfect matching exists at
+    this cap.
     """
     players: list = list(pids)
-    # Pad with a bye sentinel when odd so exactly one player sits out.
     if len(players) % 2 == 1:
         players.append(None)
 
     def allowed(a, b) -> bool:
         if a is None or b is None:
-            return True  # the bye can fall to anyone
-        return pair_counts.get(frozenset((a, b)), 0) < mpp
+            return True
+        return pair_counts.get(frozenset((a, b)), 0) < cap
 
     def match(remaining: list):
         if not remaining:
             return []
-        # Pair the most constrained player first (fewest legal partners),
-        # which keeps the backtracking search small and reliable.
         first = min(
             remaining,
             key=lambda x: sum(1 for y in remaining if y != x and allowed(x, y)),
         )
         rest = [p for p in remaining if p != first]
         cands = [y for y in rest if allowed(first, y)]
-        # Try the least-flexible partner first to avoid painting ourselves
-        # into a corner later in the tour.
         cands.sort(
             key=lambda y: sum(1 for z in rest if z != y and allowed(y, z))
         )
@@ -1662,11 +1656,10 @@ def _build_repeat_free_tour(
                 return [(first, partner)] + res
         return None
 
-    # The deterministic heuristic finds a matching quickly when one exists,
-    # but on tightly-constrained graphs a single ordering may dead-end.
-    # Try a few random shuffles as insurance — cheap and very effective.
     pairing = match(players)
     if pairing is None:
+        # Random shuffles as a safety net for tightly constrained graphs
+        # where the deterministic heuristic can dead-end.
         rng = random.Random(0xC0FFEE)
         for _ in range(8):
             shuffled = list(players)
@@ -1676,8 +1669,40 @@ def _build_repeat_free_tour(
                 break
     if pairing is None:
         return None
-    # Drop the bye pseudo-pair.
     return [(a, b) for (a, b) in pairing if a is not None and b is not None]
+
+
+def _build_repeat_free_tour(
+    pids: list[int],
+    pair_counts: dict[frozenset, int],
+    mpp: int,
+) -> tuple[list[tuple[int, int]] | None, int]:
+    """Build a single tour, preferring a repeat-free matching but falling
+    back to higher caps if no perfect repeat-free matching exists.
+
+    Returns ``(pairs, cap_used)``. ``cap_used == mpp`` means the result is
+    fully repeat-free for the configured matches-per-pair. ``cap_used >
+    mpp`` indicates we had to relax — some pairs in this tour are already
+    at or above their normal quota. ``pairs is None`` means no full pairing
+    is possible at any cap (e.g., fewer than two players).
+    """
+    if len(pids) < 2:
+        return None, mpp
+
+    # Try the strict cap first, then relax one step at a time. The relax
+    # path is only ever reached when the data has gotten into a state
+    # where the strict round-robin can't be completed (orphan match rows,
+    # eliminated-player history, leftover duplicates from earlier bugs,
+    # etc.). Better to schedule a slightly imperfect tour than to leave
+    # the league stuck.
+    max_cap = mpp + 8
+    cap = mpp
+    while cap <= max_cap:
+        result = _try_match_pairs(pids, pair_counts, cap)
+        if result is not None:
+            return result, cap
+        cap += 1
+    return None, cap
 
 
 def generate_next_tour(tid: int) -> list[int]:
@@ -1735,10 +1760,36 @@ def generate_next_tour(tid: int) -> list[int]:
     # Build a pairing that avoids every fixture already played in this
     # tournament (up to ``mpp`` meetings per pair).
     pair_counts = _played_pair_counts(tid)
-    tour_pairs = _build_repeat_free_tour(pids, pair_counts, mpp)
+    log.info(
+        "generate_next_tour tid=%s next_tour=%s n_players=%s "
+        "total_tours=%s max_tours=%s pair_count_entries=%s",
+        tid, next_tour, n, total_tours, max_tours, len(pair_counts),
+    )
+    tour_pairs, cap_used = _build_repeat_free_tour(pids, pair_counts, mpp)
     if not tour_pairs:
-        # Round-robin exhausted — nothing left to schedule without repeats.
+        # Last-ditch diagnostic: report each player's free-partner count
+        # so the logs make it obvious whether the matcher genuinely had
+        # no options or hit some other edge case.
+        free = {
+            p: sum(
+                1 for q in pids
+                if q != p and pair_counts.get(frozenset((p, q)), 0) < mpp
+            )
+            for p in pids
+        }
+        log.warning(
+            "generate_next_tour tid=%s: matcher returned no pairing "
+            "(mpp=%s, players=%s, min_free=%s, players_with_zero_free=%s)",
+            tid, mpp, n, min(free.values()) if free else None,
+            sum(1 for v in free.values() if v == 0),
+        )
         return []
+    if cap_used > mpp:
+        log.warning(
+            "generate_next_tour tid=%s: had to relax mpp from %s to %s "
+            "to find a complete tour — some pairs may repeat",
+            tid, mpp, cap_used,
+        )
 
     deadline = (datetime.utcnow() + timedelta(hours=MATCH_DEADLINE_HOURS)).strftime(
         "%Y-%m-%d %H:%M:%S"
