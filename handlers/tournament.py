@@ -8194,28 +8194,73 @@ async def cmd_repair_tour_numbers(update: Update, ctx: ContextTypes.DEFAULT_TYPE
             used_per_tour[T].add(p2)
 
     # ── Plan the moves ────────────────────────────────────────────────
-    moves: list[tuple[int, int, int, int]] = []  # (mid, p1, p2, target_tour)
-    unplaceable: list[dict] = []
+    # Naive greedy ("first untagged → first free tour") is order-sensitive
+    # — pair A might claim the only tour where pair B fits. Run a brute-
+    # force over all permutations (n ≤ ~8 in practice; 8! = 40k iterations
+    # at worst, each cheap) and keep the assignment that places the most
+    # rows. For larger n we'd need bipartite matching with disjoint
+    # endpoint constraints, but n stays tiny on real tournaments.
+    import itertools
+
+    placeable_rows: list[dict] = []
+    static_unplaceable: list[dict] = []
     for r in untagged_rows:
         d = dict(r)
-        mid = d["id"]
-        p1 = d.get("player1_id")
-        p2 = d.get("player2_id")
-        if p1 is None or p2 is None:
-            unplaceable.append(d)
+        if d.get("player1_id") is None or d.get("player2_id") is None:
+            static_unplaceable.append(d)
             continue
-        target = None
-        for T in range(1, total_tours + 1):
-            if p1 not in used_per_tour[T] and p2 not in used_per_tour[T]:
-                target = T
-                break
-        if target is None:
-            unplaceable.append(d)
-            continue
-        moves.append((mid, p1, p2, target))
-        # Reserve the slot so subsequent untagged rows don't claim it too.
+        placeable_rows.append(d)
+
+    if len(placeable_rows) > 8:
+        # Too many for brute permutation; fall back to greedy on the
+        # original DB order, preferring rows whose players have the
+        # fewest candidate tours (most-constrained first).
+        def candidate_tour_count(d):
+            cnt = 0
+            for T in range(1, total_tours + 1):
+                if (d["player1_id"] not in used_per_tour[T]
+                        and d["player2_id"] not in used_per_tour[T]):
+                    cnt += 1
+            return cnt
+        sorted_rows = sorted(placeable_rows, key=candidate_tour_count)
+        permutations = [sorted_rows]
+    else:
+        permutations = itertools.permutations(placeable_rows)
+
+    best_moves: list[tuple[int, int, int, int]] = []
+    best_unplaceable: list[dict] = []
+    for perm in permutations:
+        local_used = {T: set(used_per_tour[T]) for T in used_per_tour}
+        moves: list[tuple[int, int, int, int]] = []
+        unplaceable: list[dict] = []
+        for d in perm:
+            mid = d["id"]
+            p1 = d["player1_id"]
+            p2 = d["player2_id"]
+            target = None
+            for T in range(1, total_tours + 1):
+                if p1 not in local_used[T] and p2 not in local_used[T]:
+                    target = T
+                    break
+            if target is None:
+                unplaceable.append(d)
+                continue
+            moves.append((mid, p1, p2, target))
+            local_used[target].add(p1)
+            local_used[target].add(p2)
+        if len(moves) > len(best_moves):
+            best_moves = moves
+            best_unplaceable = unplaceable
+            if not unplaceable:
+                break  # perfect assignment found
+
+    # Sync used_per_tour with the chosen plan so downstream callers
+    # (and the audit log message) see a consistent picture.
+    for mid, p1, p2, target in best_moves:
         used_per_tour[target].add(p1)
         used_per_tour[target].add(p2)
+    moves = best_moves
+    unplaceable = static_unplaceable + best_unplaceable
 
     # ── Compose response ─────────────────────────────────────────────
     from database import get_player_by_id
