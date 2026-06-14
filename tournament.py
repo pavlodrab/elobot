@@ -1705,6 +1705,96 @@ def _build_repeat_free_tour(
     return None, cap
 
 
+def _regularize_residual(
+    pids: list[int],
+    pair_counts: dict[frozenset, int],
+    target_degree: int,
+    mpp: int = 1,
+) -> list[tuple[int, int]] | None:
+    """Make the residual graph ``target_degree``-regular on ``pids`` by
+    picking a few pairs that the remaining schedule will simply not play.
+
+    A round-robin tail of ``T`` tours can be 1-factorized only if every
+    vertex has *exactly* ``T`` legal partners left. Tournaments where
+    early tours had ghost matches (a real player paired with a guest who
+    isn't in the active roster) leave some vertices with one or more
+    extra free partners — making the residual graph irregular and
+    breaking 1-factorization.
+
+    This helper finds a b-matching on the excess-vertex subgraph using
+    backtracking: for each vertex ``v`` with excess ``k``, we add ``k``
+    edges from ``v`` to other excess vertices, decrementing their
+    excesses too. Net effect: those pairs **never** play in the upcoming
+    schedule, but in exchange every other pair fits cleanly with no
+    repeats.
+
+    Returns the list of pairs that were marked synthetic, or ``None`` if
+    no valid b-matching exists on the excess subgraph (rare — would mean
+    high-excess players already met each other in every legal way). The
+    caller should fall back to greedy in that case.
+    """
+    def degree(v: int) -> int:
+        return sum(
+            1 for q in pids
+            if q != v and pair_counts.get(frozenset((v, q)), 0) < mpp
+        )
+
+    excess: dict[int, int] = {}
+    for p in pids:
+        d = degree(p)
+        if d > target_degree:
+            excess[p] = d - target_degree
+
+    if not excess:
+        return []  # already regular
+
+    # Try to find a b-matching on the excess subgraph using backtracking.
+    # State: a copy of `excess` we mutate. Pick the player with the
+    # highest residual excess, find a partner with excess > 0 and a
+    # legal residual edge; recurse.
+    chosen: list[tuple[int, int]] = []
+
+    def can_pair(a: int, b: int) -> bool:
+        return pair_counts.get(frozenset((a, b)), 0) < mpp
+
+    def solve(state: dict[int, int]) -> bool:
+        # Trim zeros
+        active = {p: k for p, k in state.items() if k > 0}
+        if not active:
+            return True
+        # Pick the most-constrained player (highest excess; tiebreak by
+        # smallest id so the search is deterministic).
+        v = max(active, key=lambda x: (active[x], -x))
+        # Candidate partners: other players with excess > 0 connected by
+        # a legal residual edge. Try the highest-excess partner first.
+        partners = sorted(
+            (u for u in active if u != v and can_pair(v, u)),
+            key=lambda u: (active[u], -u),
+            reverse=True,
+        )
+        for u in partners:
+            new_state = dict(state)
+            new_state[v] -= 1
+            new_state[u] -= 1
+            chosen.append((v, u))
+            # Tentatively bump pair_counts so subsequent can_pair calls
+            # see the synthetic edge.
+            key = frozenset((v, u))
+            pair_counts[key] = pair_counts.get(key, 0) + 1
+            if solve(new_state):
+                return True
+            # Undo
+            chosen.pop()
+            pair_counts[key] -= 1
+            if pair_counts[key] == 0:
+                del pair_counts[key]
+        return False
+
+    if not solve(dict(excess)):
+        return None
+    return list(chosen)
+
+
 def _solve_full_schedule(
     pids: list[int],
     num_tours: int,
@@ -2155,10 +2245,11 @@ def regenerate_unplayed_tours(tid: int) -> dict:
     pre_filled_tours = 0
     pre_filled_matches = 0
     relax_used = 0
+    skipped_pairs = 0
     t_now = get_tournament(tid)
     if t_now:
         try:
-            pre_filled_tours, pre_filled_matches, relax_used = (
+            pre_filled_tours, pre_filled_matches, relax_used, skipped_pairs = (
                 _prefill_remaining_tours(tid, t_now, last_played)
             )
         except Exception:
@@ -2178,26 +2269,32 @@ def regenerate_unplayed_tours(tid: int) -> dict:
         "pre_filled_tours": pre_filled_tours,
         "pre_filled_matches": pre_filled_matches,
         "relax_used": relax_used,
+        "skipped_pairs": skipped_pairs,
     }
 
 
 def _prefill_remaining_tours(
     tid: int, t: dict, last_played: int
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     """After /regen_tours has cleaned the slate, build every remaining
     tour in one shot using the cross-tour solver.
 
-    Returns ``(tours_created, matches_created, relax_used)`` where
-    ``relax_used`` is 0 if the schedule is fully repeat-free and 1 if
-    the solver had to fall back to the per-tour relax matcher because
-    no clean 1-factorization fits the residual graph.
+    Returns ``(tours_created, matches_created, relax_used, skipped_pairs)``:
+
+    - ``relax_used`` is 0 if the schedule is fully repeat-free and 1 if
+      the solver had to fall back to the per-tour relax matcher because
+      no clean 1-factorization fits the residual graph.
+    - ``skipped_pairs`` is the count of pairs the regularization step
+      explicitly chose not to schedule so the solver could find a
+      perfect repeat-free factorization. Inevitable when early tours
+      had ghost matches; those pairs simply will not play in the league.
     """
     players = get_tournament_players(tid)
     pids = sorted(
         [p["player_id"] for p in players if not p.get("eliminated")]
     )
     if len(pids) < 2:
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
     mpp = max(1, int(t.get("group_matches_per_pair") or 1))
     total_tours = int(t.get("total_tours") or 0)
@@ -2209,12 +2306,34 @@ def _prefill_remaining_tours(
 
     remaining = total_tours - last_played
     if remaining <= 0:
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
     pair_counts = _played_pair_counts(tid)
 
+    # ── Regularize the residual graph if needed ─────────────────────
+    # If early tours had ghost matches, some players have an extra free
+    # partner left. The strict 1-factorization solver can't handle that
+    # without help — make the residual ``remaining``-regular by marking
+    # a few pairs as 'won't play in the upcoming tours'.
+    skipped_pairs = _regularize_residual(
+        pids, pair_counts, target_degree=remaining, mpp=mpp,
+    )
+    if skipped_pairs is None:
+        log.warning(
+            "_prefill_remaining_tours tid=%s: residual graph couldn't be "
+            "regularized — will fall back to greedy if solver fails",
+            tid,
+        )
+        skipped_pairs = []
+    elif skipped_pairs:
+        log.info(
+            "_prefill_remaining_tours tid=%s: marked %s pair(s) as "
+            "'won't play' to make the residual %s-regular: %s",
+            tid, len(skipped_pairs), remaining, skipped_pairs,
+        )
+
     schedule: list[list[tuple[int, int]]] | None = _solve_full_schedule(
-        pids, remaining, pair_counts, mpp=mpp, max_seconds=12.0,
+        pids, remaining, pair_counts, mpp=mpp, max_seconds=20.0,
     )
     relax_used = 0
 
@@ -2241,7 +2360,7 @@ def _prefill_remaining_tours(
                 running[key] = running.get(key, 0) + 1
 
     if not schedule:
-        return 0, 0, relax_used
+        return 0, 0, relax_used, len(skipped_pairs)
 
     # Persist
     deadline = (
@@ -2277,7 +2396,7 @@ def _prefill_remaining_tours(
         create_tournament_tour(tid, tour_no)
         tours_created += 1
     set_current_tour(tid, last_played + tours_created)
-    return tours_created, matches_created, relax_used
+    return tours_created, matches_created, relax_used, len(skipped_pairs)
 
 
 

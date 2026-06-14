@@ -8138,12 +8138,21 @@ async def cmd_regen_tours(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pre_tours = res.get("pre_filled_tours", 0)
     pre_matches = res.get("pre_filled_matches", 0)
     relax = res.get("relax_used", 0)
+    skipped = res.get("skipped_pairs", 0)
     if pre_tours:
         if relax:
             schedule_line = (
                 f"📋 Расписание построено: <b>{pre_tours}</b> туров / "
                 f"{pre_matches} матчей (точная 1-факторизация не нашлась "
                 f"за бюджет, последние пары могут повторяться)"
+            )
+        elif skipped:
+            schedule_line = (
+                f"📋 Расписание построено: <b>{pre_tours}</b> туров / "
+                f"{pre_matches} матчей, без повторов ✨\n"
+                f"⚠ {skipped} пар(ы) не сыграют в этой части турнира — "
+                f"граф остатка нерегулярен из-за матчей с гостевыми игроками "
+                f"в ранних турах."
             )
         else:
             schedule_line = (
