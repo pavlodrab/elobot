@@ -31,6 +31,7 @@ from database import (
     get_active_tournaments,
     get_all_players,
     get_all_players_by_elo_field,
+    get_goals_vs_opponents_for_tournament,
     get_player_by_id,
     get_tournament,
     get_tournament_leaderboard,
@@ -464,6 +465,167 @@ def _merge_footballer_rows(rows: list[dict]) -> list[dict]:
     return merged
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Telegraph publishing for detailed bombardiers (long stats + "кому забил")
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_bombardier_telegraph_nodes(
+    t: dict,
+    rows: list[dict],
+    footballer_rows: list[dict],
+    footballers_by_player: dict[int, list[tuple[str, int]]],
+    vs_data: list[dict],
+) -> list[dict]:
+    """Build Telegra.ph Node[] for the full bombardier stats page.
+
+    Sections:
+    1. Header with tournament info
+    2. Player bombardier ranking (goals per player with footballer breakdown)
+    3. "Кому забил" — who scored against whom (grouped by scorer)
+    """
+    from collections import defaultdict
+    from datetime import datetime
+
+    nodes: list[dict] = []
+
+    # Header
+    t_name = t.get("name") or "Турнир"
+    nodes.append({"tag": "h3", "children": [f"⚽ Бомбардиры — {t_name}"]})
+    nodes.append({"tag": "p", "children": [
+        f"ID турнира: {t['id']} · Тип: {t.get('tournament_type', '—')}"
+    ]})
+
+    # Section 1: Player ranking
+    if rows:
+        nodes.append({"tag": "h3", "children": ["🏆 Рейтинг бомбардиров"]})
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        items: list[dict] = []
+        for i, r in enumerate(rows, 1):
+            m = medals.get(i, f"{i}.")
+            uname = f"@{r['username']}" if r.get("username") else "—"
+            nick = f" ({r['game_nickname']})" if r.get("game_nickname") else ""
+            line = (
+                f"{m} {uname}{nick} — {r['total_goals']} ⚽ "
+                f"({r['home_goals']}🟢 / {r['away_goals']}🔵)"
+            )
+            items.append({"tag": "li", "children": [line]})
+
+            # Sub-list: footballer breakdown for this player
+            flist = footballers_by_player.get(r["player_id"], [])
+            if flist:
+                for fname, fgoals in flist:
+                    items.append({"tag": "p", "children": [
+                        f"    ⚽ {fname} — {fgoals}"
+                    ]})
+        nodes.append({"tag": "ol", "children": items})
+
+    # Section 2: Footballer overall ranking
+    if footballer_rows:
+        nodes.append({"tag": "h3", "children": ["⚽ Топ футболистов (по голам)"]})
+        fb_items: list[dict] = []
+        for fr in footballer_rows[:30]:
+            uname = f"@{fr['username']}" if fr.get("username") else "—"
+            fb_items.append({"tag": "li", "children": [
+                f"{fr['raw_name']} — {fr['total_goals']} гол(а) ({uname})"
+            ]})
+        nodes.append({"tag": "ol", "children": fb_items})
+
+    # Section 3: "Кому забил" — goals against specific opponents
+    if vs_data:
+        nodes.append({"tag": "hr"})
+        nodes.append({"tag": "h3", "children": ["🎯 Кому забил (голы по соперникам)"]})
+        nodes.append({"tag": "p", "children": [
+            "Подробная разбивка: какой футболист забивал конкретному "
+            "сопернику в турнире."
+        ]})
+
+        # Group by scorer
+        by_scorer: dict[int, list[dict]] = defaultdict(list)
+        for row in vs_data:
+            by_scorer[row["scorer_id"]].append(row)
+
+        # Sort scorers by total goals (sum across all opponents)
+        scorer_totals = sorted(
+            by_scorer.items(),
+            key=lambda kv: sum(r["goals"] for r in kv[1]),
+            reverse=True,
+        )
+
+        for scorer_id, opp_rows in scorer_totals:
+            scorer_name = opp_rows[0]["scorer_username"] or "—"
+            total = sum(r["goals"] for r in opp_rows)
+            nodes.append({"tag": "h4", "children": [
+                f"@{scorer_name} — {total} гол(а)"
+            ]})
+
+            # Group by opponent within this scorer
+            by_opp: dict[int, list[dict]] = defaultdict(list)
+            for r in opp_rows:
+                by_opp[r["opponent_id"]].append(r)
+
+            opp_items: list[dict] = []
+            for oid, goals_list in sorted(
+                by_opp.items(),
+                key=lambda kv: sum(r["goals"] for r in kv[1]),
+                reverse=True,
+            ):
+                opp_name = goals_list[0]["opponent_username"] or "—"
+                opp_total = sum(r["goals"] for r in goals_list)
+                # List footballers that scored against this opponent
+                fb_details = ", ".join(
+                    f"{r['raw_name']}×{r['goals']}" if r["goals"] > 1
+                    else r["raw_name"]
+                    for r in sorted(goals_list, key=lambda x: -x["goals"])
+                )
+                opp_items.append({"tag": "li", "children": [
+                    f"vs @{opp_name} — {opp_total} гол(а): {fb_details}"
+                ]})
+            nodes.append({"tag": "ul", "children": opp_items})
+
+    # Footer
+    nodes.append({"tag": "hr"})
+    nodes.append({"tag": "p", "children": [
+        f"Сгенерировано ботом GovNL · "
+        f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+    ]})
+    return nodes
+
+
+def _publish_bombardiers_telegraph(
+    t: dict,
+    rows: list[dict],
+    footballer_rows: list[dict],
+    footballers_by_player: dict[int, list[tuple[str, int]]],
+    vs_data: list[dict],
+) -> str | None:
+    """Publish full bombardier stats to Telegraph. Returns URL or None."""
+    from tournament_summary import _telegraph_account_token, _telegraph_call
+
+    token = _telegraph_account_token()
+    if not token:
+        log.warning("Telegraph: no token available for bombardiers publish")
+        return None
+
+    nodes = _build_bombardier_telegraph_nodes(
+        t, rows, footballer_rows, footballers_by_player, vs_data
+    )
+    if not nodes:
+        return None
+
+    title = f"⚽ Бомбардиры — {(t.get('name') or 'Турнир').strip()}"[:256]
+    res = _telegraph_call("createPage", {
+        "access_token": token,
+        "title":        title,
+        "author_name":  "GovNL bot",
+        "author_url":   "",
+        "content":      nodes,
+        "return_content": "false",
+    })
+    if not res:
+        return None
+    return res.get("url")
+
+
 async def cmd_table_bomb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/tablebomb [ID|вса|ри] [text] — таблица бомбардиров одного турнира.
 
@@ -614,7 +776,7 @@ async def cmd_table_bomb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     caption=short_caption,
                     parse_mode="HTML",
                 )
-                # Send full details as a separate message
+                # Build full details text
                 full_lines = list(header)
                 if detail_lines:
                     full_lines.append(
@@ -624,7 +786,35 @@ async def cmd_table_bomb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 _tb_footer3 = get_random_footer(t, FOOTER_CTX_TABLE)
                 if _tb_footer3:
                     full_lines.append(_tb_footer3)
-                await send(update, "\n".join(full_lines))
+                full_text = "\n".join(full_lines)
+
+                # If even the separate message is too long for Telegram
+                # (4096 char limit), publish full stats to Telegraph
+                if len(full_text) > 4000:
+                    vs_data = get_goals_vs_opponents_for_tournament(t["id"])
+                    tg_url = _publish_bombardiers_telegraph(
+                        t, rows, footballer_rows,
+                        footballers_by_player, vs_data,
+                    )
+                    if tg_url:
+                        short_msg = list(header)
+                        # Include top-5 in Telegram as a teaser
+                        if detail_lines:
+                            teaser = "\n".join(detail_lines[:5])
+                            short_msg.append(
+                                f"\n<blockquote expandable>"
+                                f"{teaser}\n…</blockquote>"
+                            )
+                        short_msg.append(
+                            f'\n📊 <a href="{tg_url}">Полная статистика '
+                            f'бомбардиров + кому забил</a>'
+                        )
+                        if _tb_footer3:
+                            short_msg.append(_tb_footer3)
+                        await send(update, "\n".join(short_msg))
+                        return
+
+                await send(update, full_text)
                 return
         except Exception as exc:
             log.warning("tablebomb image generation failed: %s", exc)
@@ -640,8 +830,36 @@ async def cmd_table_bomb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if _tb_footer2:
         lines.append(_tb_footer2)
     lines.append("<i>Для текстовой версии: /tablebomb текст</i>")
+    full_text = "\n".join(lines)
+
+    # If text exceeds Telegram limit, publish to Telegraph
+    if len(full_text) > 4000:
+        vs_data = get_goals_vs_opponents_for_tournament(t["id"])
+        tg_url = _publish_bombardiers_telegraph(
+            t, rows, footballer_rows,
+            footballers_by_player, vs_data,
+        )
+        if tg_url:
+            short_msg = list(header)
+            if detail_lines:
+                teaser = "\n".join(detail_lines[:5])
+                short_msg.append(
+                    f"\n<blockquote expandable>{teaser}\n…</blockquote>"
+                )
+            short_msg.append(
+                f'\n📊 <a href="{tg_url}">Полная статистика '
+                f'бомбардиров + кому забил</a>'
+            )
+            if _tb_footer2:
+                short_msg.append(_tb_footer2)
+            try:
+                await send(update, "\n".join(short_msg))
+            except Exception:
+                pass
+            return
+
     try:
-        await send(update, "\n".join(lines))
+        await send(update, full_text)
     except Exception:
         pass  # original message may have been deleted
 

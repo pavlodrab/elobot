@@ -80,6 +80,7 @@ __all__ = [
     "get_tournament_leaderboard",
     "get_top_scorers_by_side_for_tournament",
     "get_footballer_scorers_for_tournament",
+    "get_goals_vs_opponents_for_tournament",
     "add_match_goal",
     "delete_match_goal",
     "get_match_goal",
@@ -2251,6 +2252,68 @@ def get_footballer_scorers_for_tournament(
         })
     conn.close()
     out = out[:limit]
+    return out
+
+
+def get_goals_vs_opponents_for_tournament(tournament_id: int) -> list[dict]:
+    """Per-tournament breakdown: who scored against whom.
+
+    Returns rows ``{scorer_id, scorer_username, opponent_id,
+    opponent_username, raw_name, goals}`` sorted by scorer goals desc,
+    then opponent.
+
+    Each row represents goals scored by ``scorer_id`` (using footballer
+    ``raw_name``) against ``opponent_id`` in confirmed matches of the
+    given tournament.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT
+               CASE WHEN mg.side='home' THEN m.player1_id
+                    WHEN mg.side='away' THEN m.player2_id
+                    ELSE NULL END                         AS scorer_id,
+               CASE WHEN mg.side='home' THEN m.player2_id
+                    WHEN mg.side='away' THEN m.player1_id
+                    ELSE NULL END                         AS opponent_id,
+               mg.raw_name,
+               COUNT(*)                                  AS goals
+           FROM match_goals mg
+           JOIN matches m ON m.id = mg.match_id
+          WHERE mg.tournament_id = ?
+            AND m.status = 'confirmed'
+            AND mg.side IN ('home','away')
+            AND mg.raw_name IS NOT NULL
+            AND mg.raw_name != ''
+       GROUP BY 1, 2, mg.raw_name
+       ORDER BY goals DESC""",
+        (tournament_id,),
+    ).fetchall()
+
+    out: list[dict] = []
+    # Cache player lookups
+    player_cache: dict[int, dict | None] = {}
+    for r in rows:
+        sid = r["scorer_id"]
+        oid = r["opponent_id"]
+        if sid is None or oid is None:
+            continue
+        for pid in (sid, oid):
+            if pid not in player_cache:
+                player_cache[pid] = conn.execute(
+                    "SELECT username, game_nickname FROM players WHERE id=?",
+                    (pid,),
+                ).fetchone()
+        sp = player_cache.get(sid)
+        op = player_cache.get(oid)
+        out.append({
+            "scorer_id":         sid,
+            "scorer_username":   (sp["username"] if sp else None),
+            "opponent_id":       oid,
+            "opponent_username": (op["username"] if op else None),
+            "raw_name":          r["raw_name"],
+            "goals":             int(r["goals"]),
+        })
+    conn.close()
     return out
 
 
