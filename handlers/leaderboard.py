@@ -499,36 +499,37 @@ def _build_bombardier_telegraph_nodes(
     if rows:
         nodes.append({"tag": "h3", "children": ["🏆 Рейтинг бомбардиров"]})
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-        items: list[dict] = []
         for i, r in enumerate(rows, 1):
             m = medals.get(i, f"{i}.")
             uname = f"@{r['username']}" if r.get("username") else "—"
             nick = f" ({r['game_nickname']})" if r.get("game_nickname") else ""
-            line = (
-                f"{m} {uname}{nick} — {r['total_goals']} ⚽ "
-                f"({r['home_goals']}🟢 / {r['away_goals']}🔵)"
-            )
-            items.append({"tag": "li", "children": [line]})
-
-            # Sub-list: footballer breakdown for this player
+            # Player header line
+            nodes.append({"tag": "p", "children": [
+                {"tag": "b", "children": [
+                    f"{m} {uname}{nick} — {r['total_goals']} ⚽ "
+                    f"({r['home_goals']}🟢 / {r['away_goals']}🔵)"
+                ]}
+            ]})
+            # Footballer sub-list for this player
             flist = footballers_by_player.get(r["player_id"], [])
             if flist:
+                fb_sub: list[dict] = []
                 for fname, fgoals in flist:
-                    items.append({"tag": "p", "children": [
-                        f"    ⚽ {fname} — {fgoals}"
+                    fb_sub.append({"tag": "li", "children": [
+                        f"⚽ {fname} — {fgoals}"
                     ]})
-        nodes.append({"tag": "ol", "children": items})
+                nodes.append({"tag": "ul", "children": fb_sub})
 
     # Section 2: Footballer overall ranking
     if footballer_rows:
         nodes.append({"tag": "h3", "children": ["⚽ Топ футболистов (по голам)"]})
         fb_items: list[dict] = []
-        for fr in footballer_rows[:30]:
+        for idx, fr in enumerate(footballer_rows[:30], 1):
             uname = f"@{fr['username']}" if fr.get("username") else "—"
             fb_items.append({"tag": "li", "children": [
-                f"{fr['raw_name']} — {fr['total_goals']} гол(а) ({uname})"
+                f"{idx}. {fr['raw_name']} — {fr['total_goals']} гол(а) ({uname})"
             ]})
-        nodes.append({"tag": "ol", "children": fb_items})
+        nodes.append({"tag": "ul", "children": fb_items})
 
     # Section 3: "Кому забил" — goals against specific opponents
     if vs_data:
