@@ -1801,35 +1801,83 @@ def get_player_by_game_nickname(nick: str | None):
     return dict(p) if p else None
 
 
-def find_players_by_fuzzy_game_nickname(query: str) -> list[tuple[dict, float]]:
-    """Return ``[(player_dict, score), ...]`` whose ``game_nickname``
-    contains ``query`` (case-insensitive). ``score`` is a 0..1
-    similarity ranking — exact match → 1.0, otherwise a simple
-    containment ratio.
+def _normalize_nick_for_match(s: str) -> str:
+    """Normalize a nickname for fuzzy OCR matching.
+
+    Collapses the differences that make OCR'd opponent nicks miss a
+    registered player:
+      * lowercase + strip diacritics
+      * drop separator / bullet / dash / space / dot glyphs that OCR
+        renders inconsistently (``•``, ``·``, ``–``, ``—``, ``-``,
+        ``_``, space, ``.``, …) — so "GL•Dron4ik", "GL·Dron4ik" and
+        "GL-Dron4ik" all collapse to "gldron4ik"
+      * unify the O↔0 OCR confusion (both → "o")
     """
-    if not query:
+    import unicodedata
+    s = (s or "").strip().lower()
+    # strip diacritics (é→e, š→s, …)
+    nfkd = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in nfkd if not unicodedata.combining(c))
+    # drop separator / punctuation glyphs (bullets, dashes, dots, …)
+    drop = set("•·∙‧⋅・･‐‑‒–—―-_ .,:;|/\\\t†‡*")
+    s = "".join(ch for ch in s if ch not in drop)
+    # OCR confusion: digit 0 ↔ letter o
+    s = s.replace("0", "o")
+    return s
+
+
+def find_players_by_fuzzy_game_nickname(query: str) -> list[tuple[dict, float]]:
+    """Return ``[(player_dict, score), ...]`` matching ``query`` against
+    every player's ``game_nickname`` using normalized fuzzy matching.
+
+    ``score`` is a 0..1 similarity ranking — exact (after normalization)
+    → 1.0. Normalization unifies separator glyphs (``•·–-_`` space dot)
+    and the O↔0 OCR confusion, then scoring uses
+    ``difflib.SequenceMatcher`` with a containment boost. Only results
+    at or above a 0.60 similarity floor are returned (the caller's
+    auto-submit gate is also 60%).
+    """
+    if not query or not query.strip():
         return []
+    from difflib import SequenceMatcher
+
+    nq = _normalize_nick_for_match(query)
+    if not nq:
+        return []
+
     conn = get_conn()
     rows = conn.execute(
         """SELECT * FROM players
-           WHERE LOWER(game_nickname) LIKE LOWER(?)
-           ORDER BY elo DESC LIMIT 20""",
-        (f"%{query.strip()}%",),
+           WHERE game_nickname IS NOT NULL
+             AND TRIM(game_nickname) != ''
+           ORDER BY elo DESC LIMIT 500"""
     ).fetchall()
     conn.close()
-    q = query.strip().lower()
+
+    THRESHOLD = 0.60
     out: list[tuple[dict, float]] = []
     for r in rows:
         p = dict(r)
-        nick = (p.get("game_nickname") or "").lower()
-        if nick == q:
+        nick = p.get("game_nickname") or ""
+        nn = _normalize_nick_for_match(nick)
+        if not nn:
+            continue
+        if nn == nq:
             score = 1.0
-        elif q in nick:
-            score = len(q) / max(len(nick), 1)
         else:
-            score = 0.0
-        out.append((p, score))
-    return out
+            ratio = SequenceMatcher(None, nq, nn).ratio()
+            # Containment boost: when one normalized form is a clean
+            # substring of the other (prefix/suffix OCR truncation such
+            # as "Dron4ik" ↔ "GLDron4ik"), treat it as a strong match.
+            if nq in nn or nn in nq:
+                contain = min(len(nq), len(nn)) / max(len(nq), len(nn), 1)
+                ratio = max(ratio, 0.60 + 0.40 * contain)
+            score = ratio
+        if score >= THRESHOLD:
+            out.append((p, round(score, 3)))
+
+    out.sort(key=lambda t: t[1], reverse=True)
+    return out[:20]
 
 
 def get_all_players_by_elo_field(field: str) -> list[dict]:
