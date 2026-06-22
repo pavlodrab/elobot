@@ -2281,6 +2281,52 @@ async def cmd_owners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await send(update, "\n".join(lines))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# /recompute_standings — rebuild group-table counters from confirmed matches
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_recompute_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """``/recompute_standings [ID]`` — пересчитать турнирную таблицу.
+
+    Перестраивает счётчики группы (И/В/Н/П/Г/О) из реальных
+    подтверждённых матчей. Чинит расхождения, когда у игрока показано
+    больше игр, чем матчей на самом деле (бывает, если результат
+    переписывали через /admin_report, /admin_photo или /edit_match и
+    счётчик задвоился).
+
+    Только создатель турнира или админ.
+    """
+    t, err = _resolve_tournament_from_args(update, ctx)
+    if not t:
+        await send(update, err or "❌ Не нашёл турнир. Укажи ID: <code>/recompute_standings 14</code>")
+        return
+    if not _can_manage_tournament(update.effective_user.id, t):
+        await send(update, "❌ Пересчёт таблицы — только создатель или админ.")
+        return
+
+    try:
+        stats = db.recompute_group_standings(t["id"])
+    except Exception as e:
+        log.exception("recompute_group_standings failed for %s: %s", t["id"], e)
+        await send(update, f"❌ Не удалось пересчитать: <code>{html.escape(str(e))}</code>")
+        return
+
+    log_tournament_action(
+        t["id"],
+        actor_telegram_id=update.effective_user.id,
+        actor_username=update.effective_user.username,
+        action="recompute_standings",
+        details=f"players={stats['players']} matches={stats['matches']}",
+    )
+    await send(
+        update,
+        f"✅ Таблица турнира <b>{html.escape(t['name'])}</b> (ID {t['id']}) "
+        f"пересчитана из подтверждённых матчей.\n"
+        f"Игроков: {stats['players']} · учтено матчей: {stats['matches']}\n\n"
+        f"Посмотреть: /standings",
+    )
+
+
 __all__ = [
     "cmd_admin_addplayer",
     "cmd_admin_setnick",
@@ -2584,3 +2630,4 @@ async def cmd_cl_spawn_cups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 __all__.append("cmd_cl_spawn_cups")
+__all__.append("cmd_recompute_standings")

@@ -71,6 +71,7 @@ __all__ = [
     "update_match",
     "get_tournament_matches",
     "get_real_tournament_matches",
+    "recompute_group_standings",
     "replace_tournament_player",
     "get_player_matches",
     "get_overdue_matches",
@@ -3167,6 +3168,70 @@ def get_real_tournament_matches(tid: int, stage: str | None = None) -> list[dict
         else:
             rest.append(m)
     return rest + list(best.values())
+
+
+def recompute_group_standings(tid: int) -> dict:
+    """Rebuild the cached group-table counters in ``tournament_players``
+    from the actual confirmed group-stage matches.
+
+    The standings table (``get_group_standings`` / ``/standings``) trusts
+    accumulated counters (``group_wins`` / ``group_draws`` /
+    ``group_losses`` / ``group_gf`` / ``group_ga`` / ``group_points``)
+    that ``apply_result`` increments per match. If a match is ever
+    applied more than once — e.g. an admin re-reports or edits a result
+    and a revert is missed — those counters drift, so a player can show
+    MORE games than matches actually exist (e.g. 34 games in a 31-match
+    round-robin).
+
+    This recompute is the self-healing fix: it zeroes the counters and
+    replays every confirmed, non-phantom group match exactly once
+    (win = 3 pts, draw = 1, loss = 0 — mirrors ``apply_result``).
+
+    Returns ``{"players": N, "matches": M}``.
+    """
+    players = get_tournament_players(tid)
+    acc: dict[int, dict] = {
+        p["player_id"]: {
+            "group_points": 0, "group_gf": 0, "group_ga": 0,
+            "group_wins": 0, "group_draws": 0, "group_losses": 0,
+        }
+        for p in players
+    }
+
+    matches = get_real_tournament_matches(tid, stage="group")
+    counted = 0
+    for m in matches:
+        if m.get("status") != "confirmed":
+            continue
+        s1, s2 = m.get("score1"), m.get("score2")
+        if s1 is None or s2 is None:
+            continue
+        p1, p2 = m["player1_id"], m["player2_id"]
+        if p1 not in acc or p2 not in acc:
+            continue
+        counted += 1
+        acc[p1]["group_gf"] += s1
+        acc[p1]["group_ga"] += s2
+        acc[p2]["group_gf"] += s2
+        acc[p2]["group_ga"] += s1
+        if s1 > s2:
+            acc[p1]["group_points"] += 3
+            acc[p1]["group_wins"] += 1
+            acc[p2]["group_losses"] += 1
+        elif s2 > s1:
+            acc[p2]["group_points"] += 3
+            acc[p2]["group_wins"] += 1
+            acc[p1]["group_losses"] += 1
+        else:
+            acc[p1]["group_points"] += 1
+            acc[p1]["group_draws"] += 1
+            acc[p2]["group_points"] += 1
+            acc[p2]["group_draws"] += 1
+
+    for pid, vals in acc.items():
+        update_tournament_player(tid, pid, **vals)
+
+    return {"players": len(acc), "matches": counted}
 
 
 def get_tournament_matches(tid: int, stage: str = None):
