@@ -1259,6 +1259,7 @@ async def cmd_admin_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     summary = apply_result(match_id)
+    summary = _align_summary_to_args(summary, match_id, p1)
     log_tournament_action(
         tid,
         actor_telegram_id=update.effective_user.id,
@@ -1302,6 +1303,34 @@ async def cmd_admin_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # /admin_photo — admin replies to a screenshot with player usernames,
 #                bot OCRs the score and registers the match
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _align_summary_to_args(summary: dict, match_id: int, p1: dict) -> dict:
+    """Re-key an ``apply_result`` summary to the caller's argument order.
+
+    ``apply_result`` builds ``player1`` / ``score1`` / ``elo1_*`` from the
+    MATCH row's stored ``player1_id``. For pre-created tournament pairings
+    that orientation often differs from the order an admin typed
+    (``/admin_report @u1 @u2`` or ``/admin_photo @u1 @u2``). The ratings
+    written to the DB are correct either way, but the response builders
+    pair ``mention(p1)`` with ``elo1_*`` — so when the orders differ the
+    ELO change is shown under the WRONG username (the winner appears to
+    lose points). Swap the ``*1``/``*2`` fields so ``elo1_*`` / ``score1``
+    always describe ``p1`` (the first @user argument).
+    """
+    m_final = get_match(match_id)
+    if not m_final or m_final.get("player1_id") == p1["id"]:
+        return summary
+    s = dict(summary)
+    for a, b in (
+        ("player1", "player2"),
+        ("score1", "score2"),
+        ("elo1_before", "elo2_before"),
+        ("elo1_after", "elo2_after"),
+        ("delta1", "delta2"),
+    ):
+        s[a], s[b] = s.get(b), s.get(a)
+    return s
 
 
 async def _admin_photo_ocr_one(ctx, file_id: str):
@@ -1393,6 +1422,7 @@ async def _admin_photo_register(
         update_match(match_id, **update_kwargs)
 
     summary = apply_result(match_id)
+    summary = _align_summary_to_args(summary, match_id, p1)
     log_tournament_action(
         tid,
         actor_telegram_id=update.effective_user.id,
