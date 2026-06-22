@@ -4020,6 +4020,34 @@ async def cmd_tmatches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if filter_group:
         header += f"\n📂 Группа: {html.escape(filter_group)}"
 
+    # ── Match-count summary (transparency) ──────────────────────────────
+    # Count the *unique* matches that pass the active filters so the user
+    # can verify nothing is missing. Without this, the by-player view
+    # (which lists every match under both participants) makes it hard to
+    # tell how many real matches there are.
+    def _passes_filter(m: dict) -> bool:
+        if filter_pid is not None and filter_pid not in (
+            m.get("player1_id"), m.get("player2_id")
+        ):
+            return False
+        if filter_group:
+            g = (
+                pid_to_group.get(m.get("player1_id"))
+                or pid_to_group.get(m.get("player2_id"))
+                or "?"
+            )
+            if g != filter_group:
+                return False
+        return True
+
+    _shown = [m for m in matches if _passes_filter(m)]
+    _played = sum(1 for m in _shown if (m.get("status") == "confirmed"))
+    _pending = len(_shown) - _played
+    header += (
+        f"\n📊 Матчей: <b>{len(_shown)}</b> "
+        f"(сыграно {_played} ✅ · ожидают {_pending} ⏳)"
+    )
+
     # We build a *flat* list of small atomic pieces — one per group header,
     # one per player's blockquote, one per playoff-stage block — and then
     # pack those pieces into Telegram-sized chunks. Building atomic pieces
@@ -4158,8 +4186,32 @@ async def cmd_tmatches(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if current:
         chunks.append(current)
 
+    # ── Send every chunk, resilient to Telegram flood control ───────────
+    # A large unfiltered listing can span a dozen+ messages. Sending them
+    # back-to-back can trip Telegram's per-chat flood limit, which raises
+    # RetryAfter. Previously that exception aborted the loop and every
+    # remaining chunk was silently dropped — the user saw FEWER matches
+    # than the tournament actually has. Now we honour the retry delay and
+    # keep a small inter-message gap so all chunks are delivered.
+    import asyncio
+    from telegram.error import RetryAfter
+
     for chunk in chunks:
-        await send(update, chunk)
+        for _attempt in range(3):
+            try:
+                await send(update, chunk)
+                break
+            except RetryAfter as exc:
+                wait = float(getattr(exc, "retry_after", 1.0)) + 0.5
+                log.warning("tmatches flood control: sleeping %.1fs", wait)
+                await asyncio.sleep(wait)
+            except TelegramError as exc:
+                # Don't let one bad chunk abort the rest of the listing.
+                log.warning("tmatches chunk send failed: %s", exc)
+                break
+        # Gentle pacing between messages to stay under the flood limit.
+        if len(chunks) > 3:
+            await asyncio.sleep(0.4)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
