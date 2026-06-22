@@ -294,6 +294,7 @@ from handlers.admin import (  # noqa: E402
     cmd_add_tadmin,
     cmd_relink_player,
     cmd_cl_spawn_cups,
+    cmd_recompute_standings,
     cmd_ban,
     cmd_banned,
     cmd_broadcast,
@@ -690,6 +691,8 @@ ADMIN_ONLY_HELP_TEXT = """
   Алиасы: /t_matches, /tournament_matches
 /fill_missing_matches [tid] — добить пропущенные pending-матчи группы
   Алиасы: /fillmissing, /fill_matches
+/recompute_standings [tid] — пересчитать таблицу из матчей (чинит лишние игры)
+  Алиасы: /recalc_standings, /recompute_table
 
 <b>ELO / баны / пользователи</b>
 /elo @user +50 [причина] — изменить ELO на дельту
@@ -7783,6 +7786,10 @@ def main():
     app.add_handler(CommandHandler("cl_spawn_cups", cmd_cl_spawn_cups))
     app.add_handler(CommandHandler("clspawncups", cmd_cl_spawn_cups))
     app.add_handler(CommandHandler("spawn_cups", cmd_cl_spawn_cups))
+    app.add_handler(CommandHandler("recompute_standings", cmd_recompute_standings))
+    app.add_handler(CommandHandler("recompute_table", cmd_recompute_standings))
+    app.add_handler(CommandHandler("recalc_standings", cmd_recompute_standings))
+    app.add_handler(CommandHandler("recalc_table", cmd_recompute_standings))
     app.add_handler(CommandHandler("finish_tournament", cmd_finish_tournament))
     app.add_handler(CommandHandler("finishtournament", cmd_finish_tournament))
     app.add_handler(CommandHandler("end_tournament", cmd_finish_tournament))
