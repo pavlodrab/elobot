@@ -11,6 +11,8 @@ import math
 import os
 import random
 import re
+
+from ocr import canonical_nick
 import tempfile
 import time
 from datetime import datetime, timedelta
@@ -2899,7 +2901,7 @@ def _resolve_ocr_goal(raw_name: str, p1: dict, p2: dict, side: str | None
     def _sim(a: str, b: str) -> float:
         if not a or not b:
             return 0.0
-        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+        return SequenceMatcher(None, canonical_nick(a), canonical_nick(b)).ratio()
 
     n1 = (p1.get("game_nickname") or p1.get("username") or "").strip()
     n2 = (p2.get("game_nickname") or p2.get("username") or "").strip()
@@ -3417,7 +3419,7 @@ async def _process_match_photo(
         def sim(a, b):
             if not a or not b:
                 return 0.0
-            return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+            return SequenceMatcher(None, canonical_nick(a), canonical_nick(b)).ratio()
 
         sim1 = sim(my_nick, side1)
         sim2 = sim(my_nick, side2)

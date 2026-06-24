@@ -633,6 +633,18 @@ def _ai_post_process(parsed: dict) -> None:
         parsed["pen1"] = None
         parsed["pen2"] = None
 
+    goals = parsed.get("goals")
+    if isinstance(goals, list) and goals:
+        sides = [g.get("side") for g in goals if isinstance(g, dict)]
+        if sides and len(sides) == len(goals) and all(x in ("home", "away") for x in sides):
+            g1 = sum(1 for x in sides if x == "home")
+            g2 = sum(1 for x in sides if x == "away")
+            if (g1, g2) != (parsed.get("score1"), parsed.get("score2")):
+                log.info("score/goals mismatch %s:%s vs goals %s:%s -> trusting goals",
+                         parsed.get("score1"), parsed.get("score2"), g1, g2)
+                parsed["score1"] = g1
+                parsed["score2"] = g2
+
 
 def _gemini_call_one(image_b64: str, model: str | None = None,
                      timeout: float = 30.0):
@@ -1312,35 +1324,36 @@ _BADGE_RE_TRAILING = re.compile(r"([A-Za-zА-Яа-яЁё])(\d{2,3})$")
 
 
 def _strip_badge_number(name: str) -> str:
-    """Remove leading/trailing badge level numbers (like 100, 57) that
-    Tesseract picks up from the level indicator next to the crest.
+    """Remove a badge/level number (like 100, 57) that OCR picks up from
+    the level indicator next to the crest.
 
-    Only strips when:
-      - The number is 2-3 digits (badges are 10-200 range)
-      - The remaining text is at least 3 characters (a real nickname)
-      - The junction is letter→digit or digit→letter (no separator)
+    The badge is a *separate* UI element, so once OCR'd it is separated
+    from the nickname by whitespace ("100 Kaef" / "Kaef 100"). Digits
+    *glued* to the nickname are almost always part of the gamer-tag
+    (e.g. "2.OS777", "AuraBroAura88888", "Zardes-27") and are kept.
     """
     if not name:
         return name
-    # Strip leading badge: "100Kaef" → "Kaef", "57OliverBax" → "OliverBax"
-    m = _BADGE_RE_LEADING.match(name)
-    if m:
-        badge_part = m.group(1)
-        if len(badge_part) >= 2:  # 2-3 digit badges only
-            remainder = name[len(badge_part):]
-            if len(remainder) >= 3:
-                name = remainder
-    # Strip trailing badge: "Kaef100" → "Kaef"
-    m = _BADGE_RE_TRAILING.search(name)
-    if m:
-        badge_part = m.group(2)
-        if len(badge_part) >= 2:
-            remainder = name[:-len(badge_part)]
-            # Only strip if the remainder looks like a name (has letters)
-            if len(remainder) >= 3 and any(c.isalpha() for c in remainder):
-                name = remainder
-    return name
+    s = name.strip()
+    if any(sep in s for sep in (".", "_", "-")):
+        return s
+    m = re.match(r"^\d{2,3}\s+(.+)$", s)
+    if m and len(m.group(1).strip()) >= 3 and any(c.isalpha() for c in m.group(1)):
+        return m.group(1).strip()
+    m = re.match(r"^(.+?)\s+\d{2,3}$", s)
+    if m and len(m.group(1).strip()) >= 3 and any(c.isalpha() for c in m.group(1)):
+        return m.group(1).strip()
+    return s
 
+
+
+def canonical_nick(s):
+    """Canonicalize a nickname for fuzzy match: casefold, O->0, I/l/|/!->1,
+    drop separators. So registered "2.0S77" matches on-screen "2.OS777"."""
+    if not s:
+        return ""
+    s = s.casefold().translate(str.maketrans("oil|!", "01111"))
+    return re.sub(r"[\s._\-]+", "", s)
 
 def _looks_like_gibberish(name: str) -> bool:
     """Heuristic: return True if a Tesseract-produced team name looks like
