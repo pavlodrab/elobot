@@ -1350,6 +1350,7 @@ def _render_image_mirrored(
     stages: list[tuple[str, list[list[dict]]]],
     *,
     compact: bool = False,
+    half_label: str = "",
     third_pairs: list[list[dict]] | None = None,
 ) -> bytes:
     """Mirrored bracket render: outermost stage on both sides, Final in
@@ -1509,6 +1510,8 @@ def _render_image_mirrored(
         sub_bits.append(t_type)
     sub_bits.append(scope)
     sub_bits.append("Сетка плей-офф")
+    if half_label:
+        sub_bits.append(half_label)
     sub_label = "  ·  ".join(sub_bits)
 
     title_clip = _truncate(name, title_font, width - s(pad) * 2, draw)
@@ -1740,8 +1743,16 @@ def render_playoff_pngs(tid: int) -> list[bytes]:
     if max_pairs <= 32:
         pieces = _split_stages_into_pieces(stages, 2)
         labels = ["верхняя половина", "нижняя половина"]
+        if layout == "linear":
+            return [
+                _render_image(
+                    t, pieces[i], half_label=labels[i],
+                    third_pairs=third_pairs if i == 0 else None,
+                )
+                for i in range(2)
+            ]
         return [
-            _render_image(
+            _render_image_mirrored(
                 t, pieces[i], half_label=labels[i],
                 third_pairs=third_pairs if i == 0 else None,
             )
