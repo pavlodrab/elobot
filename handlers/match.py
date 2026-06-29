@@ -2358,6 +2358,88 @@ async def cmd_walkover_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# /tech_nil_all — bulk 0:0 technical nil for all remaining matches in a tournament
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_tech_nil_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/tech_nil_all [tournament_id]
+
+    Apply 0:0 (технический ноль) to *every* pending match in the
+    given tournament (or the chat-bound tournament). Shows a
+    confirmation with the count first; bulk apply happens on click.
+    """
+    if not is_admin(update.effective_user.id):
+        await send(update, "❌ Только админ.")
+        return
+
+    tid_arg: int | None = None
+    if ctx.args:
+        try:
+            tid_arg = int(ctx.args[0])
+        except ValueError:
+            await send(update, "❌ tournament_id должен быть числом.")
+            return
+    if tid_arg is None:
+        chat = update.effective_chat
+        if chat is not None:
+            bound = get_tournament_by_chat(chat.id)
+            if bound:
+                tid_arg = int(bound["id"])
+    if tid_arg is None:
+        await send(
+            update,
+            "❌ Не могу определить турнир. Используй "
+            "<code>/tech_nil_all &lt;tournament_id&gt;</code> "
+            "или запускай команду в чате, привязанном к турниру "
+            "(/bind_tournament).",
+        )
+        return
+
+    all_ms = get_tournament_matches(tid_arg)
+    pendings = [
+        m for m in all_ms
+        if m.get("status") == "pending"
+        and m.get("player1_id") != m.get("player2_id")
+    ]
+    if not pendings:
+        await send(
+            update,
+            f"✅ В турнире ID {tid_arg} нет pending-матчей.",
+        )
+        return
+
+    t = get_tournament(tid_arg)
+    t_name = t["name"] if t else f"ID {tid_arg}"
+
+    lines = [
+        f"⚠️ Будет засчитан <b>технический ноль (0:0)</b> для "
+        f"<b>{len(pendings)}</b> матчей в турнире "
+        f"<b>{html.escape(t_name)}</b>:",
+        "",
+    ]
+    for m in pendings[:15]:
+        p1 = get_player_by_id(m["player1_id"])
+        p2 = get_player_by_id(m["player2_id"])
+        p1_lbl = p1["username"] if p1 else str(m["player1_id"])
+        p2_lbl = p2["username"] if p2 else str(m["player2_id"])
+        stage_lbl = m.get("stage") or "?"
+        lines.append(f"  • #{m['id']} @{p1_lbl} vs @{p2_lbl} ({stage_lbl})")
+    if len(pendings) > 15:
+        lines.append(f"  … и ещё {len(pendings) - 15}")
+    lines.append("")
+    lines.append("Подтверди:")
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"✅ Да, засчитать все {len(pendings)} матчей 0:0",
+            callback_data=f"tnall:{tid_arg}",
+        )],
+        [InlineKeyboardButton("❌ Отмена", callback_data="wo_cancel")],
+    ])
+    await send(update, "\n".join(lines), reply_markup=kb)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # /walkover_match — convenience alias for /walkover #<id>
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -5191,6 +5273,7 @@ __all__ = [
     "cmd_walkover",
     "cmd_walkover_match",
     "cmd_walkover_all",
+    "cmd_tech_nil_all",
     "cmd_promote",
     "cmd_withdraw",
     "cmd_tech_draw",
