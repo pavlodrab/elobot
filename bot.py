@@ -486,6 +486,7 @@ from handlers.match import (  # noqa: E402
     cmd_walkover,
     cmd_walkover_all,
     cmd_walkover_match,
+    cmd_tech_nil_all,
     cmd_withdraw,
 )
 
@@ -642,6 +643,8 @@ ADMIN_ONLY_HELP_TEXT = """
   Алиас: /walkovermatch
 /walkover_all @loser [tid] — ТП всем матчам игрока
   Алиасы: /walkoverall, /tp_all, /tpall
+/tech_nil_all [tid] — технический ноль (0:0) всем оставшимся матчам турнира
+  Алиасы: /tn_all, /tnall, /technilall
 /promote @player [tid] — принудительно продвинуть игрока
   Алиасы: /force_advance, /advance_player
 /po_stage_config &lt;stage&gt; &lt;bo3|bo5|bo7&gt; [wins|goals] [tid] — формат стадии плей-офф
@@ -4638,6 +4641,76 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    if data.startswith("tnall:"):
+        # tnall:<tournament_id> — bulk technical nil (0:0).
+        if not is_admin(update.effective_user.id):
+            await query.edit_message_text("❌ Только админ.")
+            return
+        parts = data.split(":")
+        try:
+            tid = int(parts[1])
+        except (IndexError, ValueError):
+            return
+        all_ms = get_tournament_matches(tid)
+        pendings = [
+            m for m in all_ms
+            if m.get("status") == "pending"
+            and m.get("player1_id") != m.get("player2_id")
+        ]
+        if not pendings:
+            await query.edit_message_text(
+                "✅ Нечего засчитывать — pending-матчей не осталось."
+            )
+            return
+        applied = 0
+        failed = 0
+        for m in pendings:
+            try:
+                update_match(
+                    m["id"],
+                    score1=0, score2=0,
+                    status="confirmed",
+                    reported_by=update.effective_user.id,
+                )
+                apply_result(m["id"])
+                applied += 1
+            except Exception as e:
+                log.warning("bulk tech-nil failed for match %s: %s", m["id"], e)
+                failed += 1
+        t = get_tournament(tid)
+        t_lbl = html.escape(t["name"]) if t else f"ID {tid}"
+        msg = (
+            f"⚠️ Технический ноль применён.\n\n"
+            f"Турнир: <b>{t_lbl}</b>\n"
+            f"Засчитано: <b>{applied}</b> матч(ей) (0:0)"
+        )
+        if failed:
+            msg += f"\n⚠️ Ошибок: {failed}"
+        try:
+            await query.edit_message_text(msg, parse_mode="HTML")
+        except TelegramError:
+            await send(update, msg)
+        try:
+            log_tournament_action(
+                tid,
+                actor_telegram_id=update.effective_user.id,
+                actor_username=update.effective_user.username,
+                action="tech_nil_bulk",
+                details=f"applied={applied} failed={failed} score=0:0",
+            )
+        except Exception:
+            pass
+        try:
+            advanced = _maybe_auto_advance(ctx, tid)
+        except Exception as e:
+            log.warning("auto-advance after bulk tech-nil failed: %s", e)
+            advanced = False
+        if advanced:
+            await _announce_stage_advance(
+                ctx, tid, _current_playoff_stage(tid)
+            )
+        return
+
     if data.startswith("audit_undo:"):
         from handlers.match import cb_audit_undo
         await cb_audit_undo(update, ctx)
@@ -7682,6 +7755,10 @@ def main():
     app.add_handler(CommandHandler("tp_all", cmd_walkover_all))
     app.add_handler(CommandHandler("tpall", cmd_walkover_all))
     app.add_handler(CommandHandler("tp", cmd_walkover))
+    app.add_handler(CommandHandler("tech_nil_all", cmd_tech_nil_all))
+    app.add_handler(CommandHandler("technilall", cmd_tech_nil_all))
+    app.add_handler(CommandHandler("tn_all", cmd_tech_nil_all))
+    app.add_handler(CommandHandler("tnall", cmd_tech_nil_all))
     app.add_handler(CommandHandler("promote", cmd_promote))
     app.add_handler(CommandHandler("force_advance", cmd_promote))
     app.add_handler(CommandHandler("forceadvance", cmd_promote))
