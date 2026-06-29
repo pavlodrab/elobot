@@ -105,8 +105,9 @@ BRONZE_LABEL  = (220, 170, 110)  # the "🥉 Матч за 3-е место" sub-
 
 # ── geometry (1× — multiplied by SCALE on render) ───────────────────────────
 # Small brackets (≤8 pairs): rich layout at 2× scale.
-# Big brackets (>8 pairs): split into halves or compact layout at 1×
-# scale so we fit the Telegram photo limit (width+height ≤ 10000 px).
+# Medium brackets (9-64 pairs): compact 1× single image — fits Telegram
+# in one picture so the mirrored diamond stays intact.
+# Big brackets (>64 pairs): split into compact pieces.
 SCALE         = 2
 
 PAD           = 24
@@ -1733,31 +1734,19 @@ def render_playoff_pngs(tid: int) -> list[bytes]:
     max_pairs = max(len(pairs) for _, pairs in stages)
     layout = (t.get("bracket_layout") or "mirrored").lower()
 
-    # Tier 1: small bracket — single image, layout from config.
+    # Tier 1: small bracket — single image at 2× scale, layout from config.
     if max_pairs <= 8:
         if layout == "linear":
             return [_render_image(t, stages, third_pairs=third_pairs)]
         return [_render_image_mirrored(t, stages, third_pairs=third_pairs)]
 
-    # Tier 2: medium bracket — two halves, rich layout still works.
-    if max_pairs <= 32:
-        pieces = _split_stages_into_pieces(stages, 2)
-        labels = ["верхняя половина", "нижняя половина"]
+    # Tier 2: medium bracket — single compact (1×) image so the
+    # mirrored diamond stays intact in one picture.  Up to 64 pairs
+    # fits Telegram's 10000-px limit at compact scale.
+    if max_pairs <= 64:
         if layout == "linear":
-            return [
-                _render_image(
-                    t, pieces[i], half_label=labels[i],
-                    third_pairs=third_pairs if i == 0 else None,
-                )
-                for i in range(2)
-            ]
-        return [
-            _render_image_mirrored(
-                t, pieces[i], half_label=labels[i],
-                third_pairs=third_pairs if i == 0 else None,
-            )
-            for i in range(2)
-        ]
+            return [_render_image(t, stages, compact=True, third_pairs=third_pairs)]
+        return [_render_image_mirrored(t, stages, compact=True, third_pairs=third_pairs)]
 
     # Tier 3: big bracket — compact layout, n_pieces chosen so each
     # piece carries ≤ 32 pairs in its largest stage. Always a power of
