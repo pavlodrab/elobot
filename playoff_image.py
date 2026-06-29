@@ -1358,6 +1358,9 @@ def _render_image_mirrored(
     the middle column. Classic sports-bracket "diamond" — quarters at
     the far left/right, semifinals one step inward, final dead center.
 
+    Both halves share the same vertical space (top half on the left,
+    bottom half on the right) so the image is wide rather than tall.
+
     Falls back to the linear ``_render_image`` layout when there's only
     a single non-final stage with one pair (nothing to mirror).
     """
@@ -1452,16 +1455,15 @@ def _render_image_mirrored(
 
     UNIT = s(card_h) + s(card_gap)
 
-    # How many "slots" the bracket needs vertically. The outermost
-    # stage has the most pairs; split into top + bottom halves.
+    # How many "slots" the bracket needs vertically. Both halves share
+    # the same vertical space (top half on the left, bottom half on the
+    # right) so the image height is driven by the LARGER half, not the
+    # sum of both.
     n_top = max(len(top) for _, top, _ in halves) if halves else 0
     n_bot = max(len(bot) for _, _, bot in halves) if halves else 0
-    n_slots = max(1, n_top + n_bot)
+    n_slots = max(1, max(n_top, n_bot))
 
-    # The Final sits centered between the top and bottom halves.
-    # Add a small gutter between halves so the Final doesn't squeeze
-    # right against the SF cards.
-    gutter = s(card_gap)
+    # No gutter needed — halves are side by side, not stacked.
     bracket_height = n_slots * UNIT - s(card_gap)
 
     # Column layout left → right:
@@ -1483,7 +1485,7 @@ def _render_image_mirrored(
         bronze_label_h + UNIT
     ) if has_third else 0
     height = (
-        s(title_block) + s(stage_head) + bracket_height + gutter
+        s(title_block) + s(stage_head) + bracket_height
         + bronze_block_h + s(pad)
     )
 
@@ -1548,13 +1550,15 @@ def _render_image_mirrored(
         return y0 + int(slot_center * UNIT)
 
     def card_y_bot_side(depth: int, idx: int, half_count_bot: int) -> int:
+        """Y position for a card on the BOTTOM half. Both halves share
+        the same vertical space (side by side, not stacked)."""
         if half_count_bot <= 0:
-            return y0 + n_top * UNIT + gutter
+            return y0
         slots_per_card = max(1, half_count_bot) // max(
             1, _cards_in_top_at_depth(depth, half_count_bot)
         )
         slot_center = idx * slots_per_card + (slots_per_card - 1) / 2.0
-        return y0 + (n_top * UNIT + gutter) + int(slot_center * UNIT)
+        return y0 + int(slot_center * UNIT)
 
     # Column draw loop. Columns left-to-right:
     #   0..n_other-1: top-half columns, deepest (outermost) first
@@ -1576,8 +1580,8 @@ def _render_image_mirrored(
             stage = _FINAL_STAGE
             pairs_here = final_pairs
             depth_label = _stage_label(stage)
-            # Final cards centered between top + bottom halves.
-            mid_y = y0 + (n_top * UNIT + gutter // 2) - s(card_h) // 2
+            # Final cards centered vertically in the bracket.
+            mid_y = y0 + (n_slots * UNIT - s(card_gap)) // 2 - s(card_h) // 2
             ys = [mid_y]
         elif col_idx < n_other:
             # Left side, top half. col_idx 0 = outermost top.
@@ -1702,18 +1706,16 @@ def render_playoff_pngs(tid: int) -> list[bytes]:
 
     * ``'mirrored'`` (default) — classic sports-bracket diamond with
       stages converging from both sides toward the Final in the middle.
-      Used for small brackets (≤ 16 pairs in the largest stage).
+      Top half on the left, bottom half on the right — wide, not tall.
     * ``'linear'`` — single left-to-right column flow (the layout in
       use before 2026-05). Stays available for admins who prefer the
       compact-looking single-column layout.
 
     Sizing rules apply on top of the layout choice:
 
-    * ≤ 16 pairs in the largest stage → 1 image.
-    * 17–32 pairs → 2 images (top + bottom half), rich layout.
-    * > 32 pairs → 2+ images in **compact** layout (smaller cards,
-      scale 1×) with as many splits as needed so each piece fits the
-      Telegram photo size limit (width + height ≤ 10000 px).
+    * ≤ 8 pairs in the largest stage → 1 image at 2× scale (rich).
+    * 9–64 pairs → 1 compact (1×) image, single picture.
+    * > 64 pairs → 2+ compact images, split so each fits Telegram.
 
     When a 3rd-place fixture exists it's rendered as an extra column
     on the FIRST image only (avoids duplicating the bronze match
