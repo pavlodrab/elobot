@@ -104,9 +104,9 @@ BRONZE_LABEL  = (220, 170, 110)  # the "🥉 Матч за 3-е место" sub-
 
 
 # ── geometry (1× — multiplied by SCALE on render) ───────────────────────────
-# Small brackets (≤16 pairs): rich layout at 2× scale.
-# Big brackets (>16 pairs): compact layout at 1× scale so we fit the
-# Telegram photo limit (width+height ≤ 10000 px).
+# Small brackets (≤8 pairs): rich layout at 2× scale.
+# Big brackets (>8 pairs): split into halves or compact layout at 1×
+# scale so we fit the Telegram photo limit (width+height ≤ 10000 px).
 SCALE         = 2
 
 PAD           = 24
@@ -1731,7 +1731,7 @@ def render_playoff_pngs(tid: int) -> list[bytes]:
     layout = (t.get("bracket_layout") or "mirrored").lower()
 
     # Tier 1: small bracket — single image, layout from config.
-    if max_pairs <= 16:
+    if max_pairs <= 8:
         if layout == "linear":
             return [_render_image(t, stages, third_pairs=third_pairs)]
         return [_render_image_mirrored(t, stages, third_pairs=third_pairs)]
