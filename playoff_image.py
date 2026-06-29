@@ -1580,8 +1580,11 @@ def _render_image_mirrored(
             stage = _FINAL_STAGE
             pairs_here = final_pairs
             depth_label = _stage_label(stage)
-            # Final cards centered vertically in the bracket.
-            mid_y = y0 + (n_slots * UNIT - s(card_gap)) // 2 - s(card_h) // 2
+            # Final sits slightly above the SF card centers — like a
+            # classic bracket where the final is "lifted" above the
+            # semifinal brackets converging into it.
+            sf_mid = y0 + (n_slots * UNIT - s(card_gap)) // 2 - s(card_h) // 2
+            mid_y = sf_mid - int(UNIT * 0.7)
             ys = [mid_y]
         elif col_idx < n_other:
             # Left side, top half. col_idx 0 = outermost top.
