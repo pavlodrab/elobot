@@ -72,6 +72,17 @@ def apply_result(match_id: int) -> dict:
     s1, s2 = m["score1"], m["score2"]
     tid = m["tournament_id"]
 
+    # Penalty shootout scores (present only for playoff matches in
+    # tournaments with playoff_penalties=1 where the regulation ended
+    # in a draw). When present, the shootout winner is the match winner.
+    pen1 = m.get("pen1")
+    pen2 = m.get("pen2")
+    has_pen = (
+        pen1 is not None and pen2 is not None
+        and s1 == s2
+        and pen1 != pen2
+    )
+
     # Tournament context
     t = None
     t_type = None
@@ -85,7 +96,15 @@ def apply_result(match_id: int) -> dict:
             is_official = bool(t.get("is_official", 1))
 
     # ── Outcome flags & streaks (used in both modes) ─────────────────────────
-    if s1 > s2:
+    # When penalties decided the match, the shootout winner gets the W.
+    if has_pen:
+        if pen1 > pen2:
+            new_ws1 = p1["win_streak"] + 1
+            new_ws2 = 0
+        else:
+            new_ws1 = 0
+            new_ws2 = p2["win_streak"] + 1
+    elif s1 > s2:
         new_ws1 = p1["win_streak"] + 1
         new_ws2 = 0
     elif s2 > s1:
@@ -95,9 +114,17 @@ def apply_result(match_id: int) -> dict:
         new_ws1 = p1["win_streak"]
         new_ws2 = p2["win_streak"]
 
-    is_w1 = 1 if s1 > s2 else 0
-    is_w2 = 1 if s2 > s1 else 0
-    is_dr = 1 if s1 == s2 else 0
+    # Outcome flags: when penalties decided the match, the shootout
+    # winner gets the W (and the loser gets the L) — regulation was a
+    # draw, but the match result is NOT a draw.
+    if has_pen:
+        is_w1 = 1 if pen1 > pen2 else 0
+        is_w2 = 1 if pen2 > pen1 else 0
+        is_dr = 0
+    else:
+        is_w1 = 1 if s1 > s2 else 0
+        is_w2 = 1 if s2 > s1 else 0
+        is_dr = 1 if s1 == s2 else 0
 
     # Defaults populated by either branch below — used to build the summary.
     elo1_before = p1["elo"]
@@ -117,7 +144,14 @@ def apply_result(match_id: int) -> dict:
         # ── Global pool ELO + per-type mirror ───────────────────────────────
         g1 = total_matches(p1["id"])
         g2 = total_matches(p2["id"])
-        new_elo1, new_elo2 = compute_elo_change(p1["elo"], p2["elo"], s1, s2, g1, g2)
+        # When penalties decided the match, pass the penalty winner as
+        # the match winner to the ELO engine (treat it as a 1-0 win so
+        # goal_factor doesn't inflate the delta for a shootout).
+        if has_pen:
+            elo_s1, elo_s2 = (1, 0) if pen1 > pen2 else (0, 1)
+        else:
+            elo_s1, elo_s2 = s1, s2
+        new_elo1, new_elo2 = compute_elo_change(p1["elo"], p2["elo"], elo_s1, elo_s2, g1, g2)
         delta1 = new_elo1 - p1["elo"]
         delta2 = new_elo2 - p2["elo"]
         elo1_after = new_elo1
@@ -167,8 +201,12 @@ def apply_result(match_id: int) -> dict:
         elo_scope = "local"
         local_p1 = get_tournament_elo(tid, p1["id"])
         local_p2 = get_tournament_elo(tid, p2["id"])
+        if has_pen:
+            elo_s1, elo_s2 = (1, 0) if pen1 > pen2 else (0, 1)
+        else:
+            elo_s1, elo_s2 = s1, s2
         new_e1, new_e2 = compute_elo_change(
-            local_p1["elo"], local_p2["elo"], s1, s2,
+            local_p1["elo"], local_p2["elo"], elo_s1, elo_s2,
             local_p1["games"], local_p2["games"],
         )
         delta1 = new_e1 - local_p1["elo"]
