@@ -4983,17 +4983,36 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 ns1, ns2 = s1, s2
             else:
                 ns1, ns2 = s2, s1
-            update_match(
-                existing["id"],
+            upd_apx = dict(
                 score1=ns1, score2=ns2,
                 status="confirmed",
                 reported_by=update.effective_user.id,
             )
+            # Retrieve pen1/pen2 from the ocr_extra stash (set by
+            # _process_match_photo when OCR detected penalties).
+            _apx_pen1 = None
+            _apx_pen2 = None
+            for k, v in list(ctx.user_data.items()):
+                if k.startswith("ocr_extra_") and isinstance(v, dict):
+                    _apx_pen1 = v.get("pen1")
+                    _apx_pen2 = v.get("pen2")
+                    break
+            if (
+                _apx_pen1 is not None
+                and _apx_pen2 is not None
+                and ns1 == ns2
+                and apx_t
+                and int(apx_t.get("playoff_penalties") or 0)
+            ):
+                if existing["player1_id"] == p1["id"]:
+                    upd_apx["pen1"] = _apx_pen1
+                    upd_apx["pen2"] = _apx_pen2
+                else:
+                    upd_apx["pen1"] = _apx_pen2
+                    upd_apx["pen2"] = _apx_pen1
+            update_match(existing["id"], **upd_apx)
             match_id = existing["id"]
         else:
-            # No empty leg — for a playoff tournament, spawn the next leg
-            # in the correct stage (e.g. ``sf``, leg 3) rather than the
-            # bogus ``stage='playoff'`` orphan the old code produced.
             apx_match_stage = "group" if apx_t_stage == "groups" else apx_t_stage
             apx_leg = 1
             if tid_apx and apx_t_stage == "playoff":
@@ -5004,12 +5023,28 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 tid_apx or 0, p1["id"], p2["id"],
                 stage=apx_match_stage, round_num=1, leg=apx_leg,
             )
-            update_match(
-                match_id,
+            upd_apx2 = dict(
                 score1=s1, score2=s2,
                 status="confirmed",
                 reported_by=update.effective_user.id,
             )
+            _apx_pen1 = None
+            _apx_pen2 = None
+            for k, v in list(ctx.user_data.items()):
+                if k.startswith("ocr_extra_") and isinstance(v, dict):
+                    _apx_pen1 = v.get("pen1")
+                    _apx_pen2 = v.get("pen2")
+                    break
+            if (
+                _apx_pen1 is not None
+                and _apx_pen2 is not None
+                and s1 == s2
+                and apx_t
+                and int(apx_t.get("playoff_penalties") or 0)
+            ):
+                upd_apx2["pen1"] = _apx_pen1
+                upd_apx2["pen2"] = _apx_pen2
+            update_match(match_id, **upd_apx2)
         # Pull extra stats / screenshot hash / goals if available.
         for k, v in list(ctx.user_data.items()):
             if k.startswith("ocr_extra_") and isinstance(v, dict):
@@ -5052,9 +5087,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         announce_stage_apx = _current_playoff_stage(tid_apx)
                 except Exception:
                     log.warning("auto-advance after apxconfirm failed", exc_info=True)
+        _apx_pen_label = ""
+        _m_row = db.get_match(match_id)
+        if _m_row and _m_row.get("pen1") is not None and _m_row.get("pen2") is not None:
+            _apx_pen_label = f" <i>(пен. {_m_row['pen1']}:{_m_row['pen2']})</i>"
         await query.edit_message_text(
             f"✅ Записано (админ-режим): {mention(p1['username'])} "
-            f"<b>{s1}:{s2}</b> {mention(p2['username'])}{scope}.\n"
+            f"<b>{s1}:{s2}</b>{_apx_pen_label} {mention(p2['username'])}{scope}.\n"
             f"📈 ELO: {mention(p1['username'])}: <b>{elo1_after}</b> "
             f"({arrow(d1)}) · {mention(p2['username'])}: <b>{elo2_after}</b> "
             f"({arrow(d2)})",
