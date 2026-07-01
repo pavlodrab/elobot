@@ -987,6 +987,9 @@ def _resolve_pair_winner(
     """
     if not matches:
         return None
+    # Exclude rejected matches — they don't count as "unfinished legs"
+    # and should not block series resolution.
+    matches = [m for m in matches if (m.get("status") or "") != "rejected"]
     confirmed = [m for m in matches if m["status"] == "confirmed"]
 
     # Determine the canonical pair from the first match (any leg works
@@ -1095,6 +1098,10 @@ def _dedup_playoff_legs(matches: list[dict]) -> list[dict]:
 
     best: dict[tuple, dict] = {}
     for m in matches:
+        # Skip rejected matches entirely — they should not block
+        # series resolution or count as "unfinished legs".
+        if (m.get("status") or "") == "rejected":
+            continue
         a, b = m["player1_id"], m["player2_id"]
         key = (min(a, b), max(a, b), m.get("stage"), int(m.get("leg") or 1))
         cur = best.get(key)
