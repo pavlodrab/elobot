@@ -3858,7 +3858,14 @@ async def _process_match_photo(
                 "👮 <b>Админ-режим</b> — ты не участник этого матча, "
                 "записываю как чужой.\n\n"
                 f"📋 Распознано:\n"
-                f"  Счёт: <b>{res.score1}:{res.score2}</b>\n"
+                f"  Счёт: <b>{res.score1}:{res.score2}</b>"
+                + (
+                    f" <i>(пен. {res.pen1}:{res.pen2})</i>"
+                    if getattr(res, "pen1", None) is not None
+                    and getattr(res, "pen2", None) is not None
+                    else ""
+                )
+                + "\n"
                 f"  Игрок 1: {mention(p1['username'])} "
                 f"(<i>{html.escape(p1.get('game_nickname','—'))}</i>, "
                 f"совпадение {int(r1*100)}%)\n"
@@ -3923,9 +3930,15 @@ async def _process_match_photo(
         # Trim noisy plate to first 60 chars so a long block of OCR garbage
         # doesn't blow up the message.
         league_line = (league_line[:60] + "…") if len(league_line) > 60 else (league_line or "—")
+        _pen_display = (
+            f" <i>(пен. {res.pen1}:{res.pen2})</i>"
+            if getattr(res, "pen1", None) is not None
+            and getattr(res, "pen2", None) is not None
+            else ""
+        )
         debug = (
             f"📋 Распознано:\n"
-            f"  Счёт: <b>{my_score}:{opp_score}</b>\n"
+            f"  Счёт: <b>{my_score}:{opp_score}</b>{_pen_display}\n"
             f"  Ты: <b>{html.escape(my_nick)}</b> "
             f"↔ {html.escape(repr(side1))} / {html.escape(repr(side2))}\n"
             f"  Соперник на скрине: <b>{html.escape(opp_text) or '?'}</b>\n"

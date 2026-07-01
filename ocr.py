@@ -1343,13 +1343,17 @@ def _tesseract_penalty_scan(img: Image.Image) -> Optional[tuple[int, int]]:
     """
     if not _OCR_AVAILABLE:
         return None
-    # Wider crop than REGIONS["score"] to capture the penalty parens
-    # that sit outside the big central digits.
-    crop = _crop_region(img, (0.26, 0.06, 0.76, 0.22))
+    # Very wide crop to capture the penalty parens that sit far left
+    # and right of the central score digits. On FC Mobile screens the
+    # layout is:  (P1) <crest> S1 - S2 <crest> (P2)
+    # The parens can be at x ≈ 0.12 and x ≈ 0.88, so we span almost
+    # the full width. We also go a bit taller (0.04–0.24) to catch
+    # the parens which sit at the same y as the big score digits.
+    crop = _crop_region(img, (0.08, 0.04, 0.92, 0.24))
     texts: list[str] = []
-    for thresh in (180, 200, 160, 220, 140):
+    for thresh in (180, 200, 160, 220, 140, 100):
         bw = _binarize_white_text(crop, thresh, scale=3)
-        for psm in (6, 11, 7):
+        for psm in (6, 11, 7, 4, 3):
             try:
                 t = pytesseract.image_to_string(
                     bw, config=f"--psm {psm} -l eng",
