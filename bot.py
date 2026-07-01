@@ -1899,6 +1899,8 @@ async def _do_report(
     ocr_goals: list[dict] | None = None,
     suppress_result_message: bool = False,
     force_new: bool = False,
+    pen1: int | None = None,
+    pen2: int | None = None,
 ) -> int | None:
     """Shared logic between /report and the photo handler.
 
@@ -2066,6 +2068,13 @@ async def _do_report(
             upd_kwargs["screenshot_hash"] = screenshot_hash
         if screenshot_file_id:
             upd_kwargs["screenshot_file_id"] = screenshot_file_id
+        if pen1 is not None and pen2 is not None:
+            if existing["player1_id"] == reporter["id"]:
+                upd_kwargs["pen1"] = pen1
+                upd_kwargs["pen2"] = pen2
+            else:
+                upd_kwargs["pen1"] = pen2
+                upd_kwargs["pen2"] = pen1
         update_match(existing["id"], **upd_kwargs)
         match_id = existing["id"]
     else:
@@ -2141,6 +2150,13 @@ async def _do_report(
                 upd_kwargs["screenshot_hash"] = screenshot_hash
             if screenshot_file_id:
                 upd_kwargs["screenshot_file_id"] = screenshot_file_id
+            if pen1 is not None and pen2 is not None:
+                if group_existing["player1_id"] == reporter["id"]:
+                    upd_kwargs["pen1"] = pen1
+                    upd_kwargs["pen2"] = pen2
+                else:
+                    upd_kwargs["pen1"] = pen2
+                    upd_kwargs["pen2"] = pen1
             update_match(group_existing["id"], **upd_kwargs)
             match_id = group_existing["id"]
             log.info(
@@ -2180,6 +2196,9 @@ async def _do_report(
                 upd_kwargs["screenshot_hash"] = screenshot_hash
             if screenshot_file_id:
                 upd_kwargs["screenshot_file_id"] = screenshot_file_id
+            if pen1 is not None and pen2 is not None:
+                upd_kwargs["pen1"] = pen1
+                upd_kwargs["pen2"] = pen2
             update_match(match_id, **upd_kwargs)
     if screenshot_hash:
         try:
@@ -3472,6 +3491,8 @@ async def _process_match_photo(
                 "team2": res.team2,
                 "score1": res.score1,
                 "score2": res.score2,
+                "pen1": getattr(res, "pen1", None),
+                "pen2": getattr(res, "pen2", None),
             }
 
             if caption_opp:
@@ -3676,6 +3697,19 @@ async def _process_match_photo(
             # ── Album mode: auto-confirm admin-proxy match ──────────
             if is_album and album_state_early is not None:
                 matches_a = album_state_early.setdefault("matches", [])
+                _apx_pen1 = getattr(res, "pen1", None)
+                _apx_pen2 = getattr(res, "pen2", None)
+                if (
+                    _apx_pen1 is not None
+                    and _apx_pen2 is not None
+                    and int(res.score1) == int(res.score2)
+                    and target_tournament
+                    and int(target_tournament.get("playoff_penalties") or 0)
+                ):
+                    pass
+                else:
+                    _apx_pen1 = None
+                    _apx_pen2 = None
                 try:
                     mid_apx = await _do_report(
                         update, ctx,
@@ -3692,6 +3726,8 @@ async def _process_match_photo(
                         ),
                         suppress_result_message=True,
                         force_new=True,
+                        pen1=_apx_pen1,
+                        pen2=_apx_pen2,
                     )
                 except Exception as e:
                     log.exception("album admin-proxy _do_report failed: %s", e)
@@ -3699,8 +3735,14 @@ async def _process_match_photo(
                 ctx.user_data.pop("_last_report_result_text", None)
                 short_apx = (
                     f"👮 {mention(p1['username'])} "
-                    f"<b>{res.score1}:{res.score2}</b> "
-                    f"{mention(p2['username'])}"
+                    f"<b>{res.score1}:{res.score2}</b>"
+                    + (
+                        f" <i>(пен. {res.pen1}:{res.pen2})</i>"
+                        if getattr(res, "pen1", None) is not None
+                        and getattr(res, "pen2", None) is not None
+                        else ""
+                    )
+                    + f" {mention(p2['username'])}"
                 )
                 _apx_model = _model_used_in(res) or "tesseract"
                 if mid_apx:
@@ -3834,6 +3876,8 @@ async def _process_match_photo(
                 "raw": res.raw_texts,
                 "screenshot_hash": screenshot_hash,
                 "goals": list(getattr(res, "goals", []) or []),
+                "pen1": getattr(res, "pen1", None),
+                "pen2": getattr(res, "pen2", None),
             }
             return
 
@@ -3942,6 +3986,8 @@ async def _process_match_photo(
                 "team2": res.team2,
                 "score1": res.score1,
                 "score2": res.score2,
+                "pen1": getattr(res, "pen1", None),
+                "pen2": getattr(res, "pen2", None),
             }
             # Make this photo the album's "primary" if it's the first
             # one with successful OCR (so later continuation photos can
@@ -3956,9 +4002,15 @@ async def _process_match_photo(
                 album_state["primary_file_id"] = file_id
 
             opp_safe = html.escape(opp_text or "?")
+            _pen_label_amb = (
+                f" <i>(пен. {res.pen1}:{res.pen2})</i>"
+                if getattr(res, "pen1", None) is not None
+                and getattr(res, "pen2", None) is not None
+                else ""
+            )
             short_summary = (
                 f"{mention(reporter['username'])} "
-                f"<b>{my_score}:{opp_score}</b> «{opp_safe}»"
+                f"<b>{my_score}:{opp_score}</b>{_pen_label_amb} «{opp_safe}»"
             )
             unambig = (
                 len(candidates) == 1
@@ -4010,6 +4062,19 @@ async def _process_match_photo(
                     )
                 )
                 try:
+                    _album_pen1 = getattr(res, "pen1", None)
+                    _album_pen2 = getattr(res, "pen2", None)
+                    if (
+                        _album_pen1 is not None
+                        and _album_pen2 is not None
+                        and my_score == opp_score
+                        and target_tournament
+                        and int(target_tournament.get("playoff_penalties") or 0)
+                    ):
+                        pass  # keep pens — tournament has penalties enabled
+                    else:
+                        _album_pen1 = None
+                        _album_pen2 = None
                     match_id_done = await _do_report(
                         update, ctx,
                         reporter=reporter,
@@ -4025,6 +4090,8 @@ async def _process_match_photo(
                         ),
                         suppress_result_message=True,
                         force_new=True,
+                        pen1=_album_pen1,
+                        pen2=_album_pen2,
                     )
                 except Exception as e:
                     log.exception("album auto-confirm failed: %s", e)
@@ -4033,11 +4100,18 @@ async def _process_match_photo(
                 # owns the user-visible summary now.
                 ctx.user_data.pop("_last_report_result_text", None)
                 if match_id_done:
+                    _pen_label = (
+                        f" <i>(пен. {res.pen1}:{res.pen2})</i>"
+                        if getattr(res, "pen1", None) is not None
+                        and getattr(res, "pen2", None) is not None
+                        else ""
+                    )
                     matches.append({
                         "status": "submitted",
                         "summary": (
                             f"{mention(reporter['username'])} "
-                            f"<b>{my_score}:{opp_score}</b> "
+                            f"<b>{my_score}:{opp_score}</b>"
+                            f"{_pen_label} "
                             f"{mention(opponent['username'])}"
                         ),
                         "match_id": match_id_done,
@@ -4160,7 +4234,22 @@ async def _process_match_photo(
                 "team2": res.team2,
                 "score1": res.score1,
                 "score2": res.score2,
+                "pen1": getattr(res, "pen1", None),
+                "pen2": getattr(res, "pen2", None),
             }
+            _auto_pen1 = getattr(res, "pen1", None)
+            _auto_pen2 = getattr(res, "pen2", None)
+            if (
+                _auto_pen1 is not None
+                and _auto_pen2 is not None
+                and my_score == opp_score
+                and target_tournament
+                and int(target_tournament.get("playoff_penalties") or 0)
+            ):
+                pass
+            else:
+                _auto_pen1 = None
+                _auto_pen2 = None
             match_id_auto = await _do_report(
                 update, ctx,
                 reporter=reporter,
@@ -4173,6 +4262,8 @@ async def _process_match_photo(
                 screenshot_file_id=file_id,
                 ocr_goals=list(getattr(res, "goals", []) or []),
                 suppress_result_message=False,
+                pen1=_auto_pen1,
+                pen2=_auto_pen2,
             )
             if match_id_auto and mgi:
                 st = _album_state(ctx, mgi)
@@ -4229,6 +4320,8 @@ async def _process_match_photo(
             "team2": res.team2,
             "score1": res.score1,
             "score2": res.score2,
+            "pen1": getattr(res, "pen1", None),
+            "pen2": getattr(res, "pen2", None),
         }
 
         # Record this photo as the album's "primary" so a subsequent
@@ -5678,6 +5771,8 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         screenshot_hash = None
         screenshot_file_id_pick: str | None = None
         ocr_goals: list[dict] | None = None
+        ocr_pen1: int | None = None
+        ocr_pen2: int | None = None
         consumed_mgi: str | None = None
         for k, v in list(ctx.user_data.items()):
             if not (k.startswith("ocr_extra_") and isinstance(v, dict)):
@@ -5691,10 +5786,25 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 continue
             screenshot_hash = v.get("screenshot_hash")
             ocr_goals = v.get("goals")
+            ocr_pen1 = v.get("pen1")
+            ocr_pen2 = v.get("pen2")
             consumed_mgi = v.get("mgi")
             screenshot_file_id_pick = candidate_fid or None
             ctx.user_data.pop(k, None)
             break
+        # Gate penalties: only pass through if tournament has them enabled
+        # and the regulation score is a draw.
+        if (
+            ocr_pen1 is not None
+            and ocr_pen2 is not None
+            and int(my_score) == int(opp_score)
+            and explicit_tournament
+            and int(explicit_tournament.get("playoff_penalties") or 0)
+        ):
+            pass
+        else:
+            ocr_pen1 = None
+            ocr_pen2 = None
         match_id_done = await _do_report(
             update, ctx,
             reporter=reporter, opponent=opponent,
@@ -5704,6 +5814,8 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             screenshot_hash=screenshot_hash,
             screenshot_file_id=screenshot_file_id_pick,
             ocr_goals=ocr_goals,
+            pen1=ocr_pen1,
+            pen2=ocr_pen2,
             # Don't post a separate "Результат матча …" message — we'll
             # show the same text by editing the picker message below
             # (one screenshot → exactly one bot message).

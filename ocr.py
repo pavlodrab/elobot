@@ -198,21 +198,31 @@ Schema:
   ]
 }
 
-PENALTIES (very important — most matches do NOT have penalties):
+PENALTIES (important — penalty shootouts happen in knockout matches
+that end in a draw after extra time):
 
 When a knockout-stage match goes to a penalty shootout, FC Mobile shows
 TWO extra numbers in parentheses next to the regular score, on the
 SAME row as the big digits. Layout:
 
       (P1)   S1   -   S2   (P2)
-            └big digits┘
-       └pen ┘           └pen┘
+             └big digits┘
+        └pen ┘           └pen┘
 
 Examples of what a penalty result looks like on screen:
   "(3) 3 - 3 (1)"   →  score1=3, score2=3, pen1=3, pen2=1
                        (regulation+ET 3:3, home wins on pens 3:1)
   "(2) 1 - 1 (4)"   →  score1=1, score2=1, pen1=2, pen2=4
                        (away wins on pens 4:2)
+  "(4) 0 - 0 (5)"   →  score1=0, score2=0, pen1=4, pen2=5
+                       (0:0 after ET, away wins on pens 5:4)
+
+CRITICAL — 120:00 RULE: If the match timer shows "120:00" (extra time)
+and the score is a DRAW (0:0, 1:1, 2:2, etc.), a penalty shootout HAS
+occurred. Look VERY carefully for the two small numbers in parentheses
+flanking the big score digits — they may be small but they are ALWAYS
+present in this scenario. Do NOT return pen1=null, pen2=null when you
+see 120:00 + a draw score.
 
 Rules for pen1 / pen2:
 - Output integers ONLY when BOTH parenthesised numbers are clearly
@@ -220,7 +230,10 @@ Rules for pen1 / pen2:
   regulation score is a draw (score1 == score2). Otherwise BOTH must be null.
 - The LEFT parenthesised number is pen1 (home), the RIGHT is pen2 (away).
 - Match-clock readings ("90:00", "120:00") are NOT penalty scores —
-  ignore the timer.
+  ignore the timer itself, but USE its presence (120:00) as a signal
+  that penalty numbers MUST be present.
+- When the timer shows 120:00 and the score is a draw, ALWAYS output
+  pen1 and pen2 — do NOT return null in this scenario.
 - If you cannot tell whether the small numbers in parens are penalty
   results, set pen1 and pen2 to null. Do not guess.
 - For a normal match without a shootout, set pen1=null and pen2=null.
@@ -1255,6 +1268,10 @@ def _cluster_rows(rows: list[int], gap: int = 5) -> list[tuple[int, int]]:
 # the in-game match clock uses ":", which can sneak into the score crop.
 _SCORE_RE = re.compile(r"(\d{1,2})\s*([-:—–])\s*(\d{1,2})")
 
+# Penalty-shootout scores in parentheses: "(4) 0 - 0 (5)" → pen1=4, pen2=5.
+# Used by the Tesseract fallback when AI OCR returns a draw but no pens.
+_PENALTY_PARENS_RE = re.compile(r"[\(\[]\s*(\d{1,2})\s*[\)\]]")
+
 
 def _is_match_score_pair(s1: int, s2: int, sep: str) -> bool:
     """
@@ -1313,7 +1330,41 @@ def _parse_score(text: str) -> Optional[tuple[int, int]]:
     return None
 
 
-_TEAM_NAME_CHAR = r"a-zA-Z0-9·\-\.@"   # letters, digits, mid-dot, hyphen, dot, @ — NO underscore
+def _tesseract_penalty_scan(img: Image.Image) -> Optional[tuple[int, int]]:
+    """Tesseract fallback: scan the score band for penalty-shootout numbers
+    in parentheses — e.g. ``(4) 0 - 0 (5)`` → ``(4, 5)``.
+
+    Used when AI OCR returns a draw but ``pen1``/``pen2`` are null, which
+    happens when the vision model misses the small parenthesised digits
+    flanking the big score. We crop a WIDE band around the score (wider
+    than ``REGIONS["score"]``) to include the parens, OCR it at several
+    binarisation thresholds and PSMs, then look for exactly two
+    parenthesised numbers on opposite sides of the score separator.
+    """
+    if not _OCR_AVAILABLE:
+        return None
+    # Wider crop than REGIONS["score"] to capture the penalty parens
+    # that sit outside the big central digits.
+    crop = _crop_region(img, (0.26, 0.06, 0.76, 0.22))
+    texts: list[str] = []
+    for thresh in (180, 200, 160, 220, 140):
+        bw = _binarize_white_text(crop, thresh, scale=3)
+        for psm in (6, 11, 7):
+            try:
+                t = pytesseract.image_to_string(
+                    bw, config=f"--psm {psm} -l eng",
+                )
+                if t and t.strip():
+                    texts.append(t.strip())
+            except Exception:
+                pass
+    for text in texts:
+        pens = _PENALTY_PARENS_RE.findall(text)
+        if len(pens) >= 2:
+            p1, p2 = int(pens[0]), int(pens[-1])
+            if 0 <= p1 <= 30 and 0 <= p2 <= 30 and p1 != p2:
+                return p1, p2
+    return None
 
 # Badge/level numbers that Tesseract sometimes picks up from the UI.
 # These are 1-3 digit numbers (typically 50-200 range) displayed in a
@@ -2442,6 +2493,33 @@ def parse_match_screenshot(
                         f" pen {r.pen1}:{r.pen2}" if r.has_penalties else "",
                         r.team1, r.team2,
                     )
+
+                    # ── Tesseract penalty fallback ───────────────────────
+                    # If AI returned a draw but no penalties, try Tesseract
+                    # on the score band — the model often misses the small
+                    # parenthesised digits flanking the big score.
+                    if (
+                        r.score1 is not None
+                        and r.score1 == r.score2
+                        and r.pen1 is None
+                        and r.pen2 is None
+                        and _OCR_AVAILABLE
+                    ):
+                        pens = _tesseract_penalty_scan(img)
+                        if pens:
+                            r.pen1, r.pen2 = pens
+                            log.info(
+                                "Tesseract penalty fallback found (%s:%s) "
+                                "for %s:%s draw",
+                                r.pen1, r.pen2, r.score1, r.score2,
+                            )
+                            pen_str = (
+                                f" ({r.pen1}-{r.pen2} pen)"
+                            )
+                            r.raw_texts["score"] = (
+                                f"{r.score1}:{r.score2}{pen_str}"
+                            )
+
                     return r
                 log.info("AI OCR returned partial/None result, falling back to tesseract")
         except Exception as e:
