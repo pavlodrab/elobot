@@ -2520,6 +2520,66 @@ def parse_match_screenshot(
                                 f"{r.score1}:{r.score2}{pen_str}"
                             )
 
+                    # ── Tesseract score verification (non-draw) ──────────
+                    # Weak models (flash-lite, nemotron) sometimes misread
+                    # the score when penalties are on screen — e.g. they
+                    # see "2:3" instead of "0:0 (4) (5)".  When the AI
+                    # returns a NON-draw score, run Tesseract on the score
+                    # band as a cross-check.  If Tesseract finds a DRAW
+                    # AND parenthesised penalty numbers, override the AI
+                    # score — a 120:00 match that went to penalties MUST
+                    # end in a draw.
+                    if (
+                        r.score1 is not None
+                        and r.score2 is not None
+                        and r.score1 != r.score2
+                        and _OCR_AVAILABLE
+                    ):
+                        pens = _tesseract_penalty_scan(img)
+                        if pens:
+                            # Tesseract found a draw + penalties —
+                            # re-OCR just the central score digits to
+                            # get the correct regulation score.
+                            score_crop = _crop_region(
+                                img, (0.42, 0.08, 0.60, 0.21)
+                            )
+                            t_score = None
+                            for thresh in (180, 200, 160, 220):
+                                bw = _binarize_white_text(
+                                    score_crop, thresh, scale=4
+                                )
+                                for psm in (6, 7, 8):
+                                    try:
+                                        t = pytesseract.image_to_string(
+                                            bw,
+                                            config=f"--psm {psm} -l eng",
+                                        )
+                                        t_score = _parse_score(t)
+                                        if t_score and t_score[0] == t_score[1]:
+                                            break
+                                    except Exception:
+                                        pass
+                                if t_score and t_score[0] == t_score[1]:
+                                    break
+                            if t_score and t_score[0] == t_score[1]:
+                                old_s1, old_s2 = r.score1, r.score2
+                                r.score1, r.score2 = t_score
+                                r.pen1, r.pen2 = pens
+                                log.warning(
+                                    "Tesseract score override: AI said "
+                                    "%s:%s but Tesseract found draw %s:%s "
+                                    "with pens (%s:%s) — overriding",
+                                    old_s1, old_s2,
+                                    r.score1, r.score2,
+                                    r.pen1, r.pen2,
+                                )
+                                pen_str = (
+                                    f" ({r.pen1}-{r.pen2} pen)"
+                                )
+                                r.raw_texts["score"] = (
+                                    f"{r.score1}:{r.score2}{pen_str}"
+                                )
+
                     return r
                 log.info("AI OCR returned partial/None result, falling back to tesseract")
         except Exception as e:
